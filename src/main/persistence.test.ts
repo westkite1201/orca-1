@@ -1736,6 +1736,124 @@ describe('Store', () => {
     })
   })
 
+  it('defaults missing Harness history to an empty list', async () => {
+    const persisted: Partial<PersistedState> = getDefaultPersistedState(testState.dir)
+    delete persisted.harnessRuns
+    writeDataFile(persisted)
+
+    const store = await createStore()
+
+    expect(store.listHarnessRuns()).toEqual([])
+  })
+
+  it('persists Harness runs with fixed Codex and Claude candidates', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: '  Implement the comparison view  ',
+      verificationCommand: '  pnpm test  ',
+      baseSha: 'a'.repeat(40)
+    })
+
+    expect(run).toMatchObject({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40),
+      fatalError: null,
+      candidates: [
+        { agent: 'codex', status: 'pending' },
+        { agent: 'claude', status: 'pending' }
+      ]
+    })
+
+    const reloaded = await createStore()
+    expect(reloaded.listHarnessRuns()).toEqual([run])
+    expect(reloaded.listHarnessRuns('another-repo')).toEqual([])
+  })
+
+  it('updates one Harness candidate without overwriting its sibling', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const originalClaude = run.candidates[1]
+
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'creating',
+      worktreeId: 'repo-1::/repo-codex',
+      worktreePath: '/repo-codex',
+      branch: 'jaws/run-codex',
+      agentTerminalHandle: 'term-codex'
+    })
+    store.updateHarnessCandidate(run.id, 'codex', { status: 'ready' })
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'running',
+      taskId: 'task-codex',
+      dispatchId: 'dispatch-codex'
+    })
+    const workerDone = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'worker_done'
+    })
+    const workerCompletedAt = workerDone.candidates[0].workerCompletedAt!
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'verifying',
+      verificationTerminalHandle: 'term-verify-codex'
+    })
+    const verified = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'verified',
+      verification: {
+        command: 'pnpm test',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 25,
+        outputTail: 'passed',
+        outputTruncated: false,
+        error: null,
+        startedAt: workerCompletedAt + 1,
+        completedAt: workerCompletedAt + 26
+      },
+      diff: {
+        headSha: 'b'.repeat(40),
+        diffStat: '1 file changed, 1 insertion(+)',
+        changedFiles: [{ path: 'src/harness.ts', status: 'modified' }],
+        untrackedPaths: [],
+        capturedAt: workerCompletedAt + 26,
+        error: null
+      }
+    })
+
+    expect(verified.candidates[0]).toMatchObject({
+      status: 'verified',
+      worktreeId: 'repo-1::/repo-codex',
+      branch: 'jaws/run-codex',
+      taskId: 'task-codex',
+      dispatchId: 'dispatch-codex'
+    })
+    expect(verified.candidates[1]).toEqual(originalClaude)
+    expect(() => store.updateHarnessCandidate(run.id, 'claude', { status: 'running' })).toThrow(
+      'Invalid Harness candidate transition'
+    )
+
+    const completed = store.updateHarnessCandidate(run.id, 'claude', {
+      status: 'failed',
+      error: 'Claude authentication is required.'
+    })
+    expect(completed.completedAt).not.toBeNull()
+
+    const reloaded = await createStore()
+    expect(reloaded.listHarnessRuns()[0]).toEqual(completed)
+  })
+
   it('can clear an automation back to the project default branch', async () => {
     const store = await createStore()
     store.addRepo(makeRepo({ worktreeBaseRef: 'origin/main' }))
