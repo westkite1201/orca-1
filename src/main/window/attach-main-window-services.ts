@@ -7,8 +7,10 @@ import type { Store } from '../persistence'
 import type {
   CreateWorktreeResult,
   UpdateCheckOptions,
+  UpdateStatus,
   WorktreeStartupLaunch
 } from '../../shared/types'
+import productProfile from '../../shared/product-profile.json'
 import { registerRepoHandlers } from '../ipc/repos'
 import { registerWorktreeHandlers } from '../ipc/worktrees'
 import { registerWorkspaceCleanupHandlers } from '../ipc/workspace-cleanup'
@@ -54,6 +56,7 @@ import {
 import { logStartupMilestone } from '../startup/startup-diagnostics'
 
 const UPDATER_SETUP_FALLBACK_MS = 15_000
+const DISABLED_UPDATE_STATUS: UpdateStatus = { state: 'idle' }
 
 // Why: a manual check can arrive before deferred setup runs, so entry points force this pending setup to configure the updater first.
 let pendingAutoUpdaterSetup: (() => void) | null = null
@@ -135,7 +138,7 @@ export function attachMainWindowServices(
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.
   let updaterSetupDone = false
   const setupAutoUpdaterDeferred = (): void => {
-    if (updaterSetupDone || mainWindow.isDestroyed()) {
+    if (updaterSetupDone || mainWindow.isDestroyed() || !productProfile.updatesEnabled) {
       return
     }
     updaterSetupDone = true
@@ -427,8 +430,18 @@ export function registerUpdaterHandlers(_store: Store): void {
   ipcMain.removeHandler('updater:quitAndInstall')
   ipcMain.removeHandler('updater:dismissNudge')
 
-  ipcMain.handle('updater:getStatus', () => getUpdateStatus())
   ipcMain.handle('updater:getVersion', () => app.getVersion())
+  if (!productProfile.updatesEnabled) {
+    // Why: Jaws has no trusted release feed yet, but the shared preload contract
+    // still expects updater handlers to exist.
+    ipcMain.handle('updater:getStatus', () => DISABLED_UPDATE_STATUS)
+    ipcMain.handle('updater:check', () => undefined)
+    ipcMain.handle('updater:download', () => undefined)
+    ipcMain.handle('updater:quitAndInstall', () => undefined)
+    ipcMain.handle('updater:dismissNudge', () => undefined)
+    return
+  }
+  ipcMain.handle('updater:getStatus', () => getUpdateStatus())
   ipcMain.handle('updater:check', (_event, options?: UpdateCheckOptions) => {
     ensureAutoUpdaterConfigured()
     return checkForUpdatesFromMenu(options)

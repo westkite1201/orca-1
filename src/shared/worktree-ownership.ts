@@ -12,6 +12,7 @@ import {
   type AgentScratchWorktreePathMatcher
 } from './agent-scratch-worktrees'
 import { isExplicitlyImportedExternalWorktreePath } from './external-worktree-inbox'
+import productProfile from './product-profile.json'
 import type {
   DetectedWorktree,
   ExternalWorktreeVisibility,
@@ -144,7 +145,7 @@ function buildWslWorkspaceLayouts(
   if (!linuxHome) {
     return []
   }
-  const root = `//wsl.localhost/${parsed.distro}${linuxHome}/orca/workspaces`
+  const root = `//wsl.localhost/${parsed.distro}${linuxHome}/${productProfile.userDataDirectoryName}/workspaces`
   const historicalModes = (settings.workspaceDirHistory ?? []).map(
     (layout) => layout.nestWorkspaces
   )

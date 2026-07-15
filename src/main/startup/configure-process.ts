@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
 import { getMainE2EConfig } from '../e2e-config'
+import productProfile from '../../shared/product-profile.json'
 
 const DEV_PARENT_SHUTDOWN_GRACE_MS = 3000
 const HTTP1_COMPATIBILITY_ENV_VAR = 'ORCA_DISABLE_HTTP2'
@@ -137,7 +138,7 @@ export function patchPackagedProcessPath(): void {
   }
 }
 
-export function configureDevUserDataPath(isDev: boolean): void {
+export function configureProductUserDataPath(isDev: boolean): void {
   const e2eConfig = getMainE2EConfig()
   if (e2eConfig.userDataDir) {
     // Why: the E2E suite launches a fresh Electron app for each spec. A
@@ -158,17 +159,18 @@ export function configureDevUserDataPath(isDev: boolean): void {
     return
   }
 
-  if (!isDev) {
-    return
-  }
-  const overrideUserDataPath = process.env.ORCA_DEV_USER_DATA_PATH
+  const overrideUserDataPath = isDev ? process.env.ORCA_DEV_USER_DATA_PATH : undefined
   if (overrideUserDataPath) {
     // Why: automated repros need an isolated profile so the dev's persisted tabs/worktrees don't skew startup and hide window bugs.
     app.setPath('userData', overrideUserDataPath)
     return
   }
-  // Why: without a dev-only path, pnpm dev overwrites the packaged app's runtime pointer under userData and breaks the orca CLI.
-  app.setPath('userData', join(app.getPath('appData'), 'orca-dev'))
+  // Why: Jaws coexists with Orca, so both packaged and dev state must stay in
+  // product-owned directories before persistence and the instance lock start.
+  const directoryName = isDev
+    ? productProfile.devUserDataDirectoryName
+    : productProfile.userDataDirectoryName
+  app.setPath('userData', join(app.getPath('appData'), directoryName))
 }
 
 function areSameE2EHomePath(left: string, right: string): boolean {

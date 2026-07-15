@@ -6,6 +6,7 @@ import {
   type KeybindingOverrides
 } from '../../shared/keybindings'
 import type { UpdateCheckOptions } from '../../shared/types'
+import productProfile from '../../shared/product-profile.json'
 import { translateMain } from '../i18n/main-i18n'
 
 export type AppearanceMenuState = {
@@ -27,7 +28,7 @@ type RegisterAppMenuOptions = {
   onOpenSetupGuide: (window?: Electron.BaseWindow | null) => void
   onOpenFeatureTour: (window?: Electron.BaseWindow | null) => void
   onOpenCrashReport: (window?: Electron.BaseWindow | null) => void
-  onCheckForUpdates: (options: UpdateCheckOptions) => void
+  onCheckForUpdates?: (options: UpdateCheckOptions) => void
   onBeforeReload?: (options: { ignoreCache: boolean; webContentsId: number }) => void
   onZoomIn: () => void
   onZoomOut: () => void
@@ -100,17 +101,20 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
     const includePerfPrerelease =
       !localBuild && modifierClick && (isMac ? event.metaKey === true : event.ctrlKey === true)
     const includePrerelease = !localBuild && modifierClick && event.shiftKey === true
-    onCheckForUpdates({
+    onCheckForUpdates?.({
       includePrerelease,
       includePerfPrerelease,
       ...(localBuild ? { localBuild: true } : {})
     })
   }
 
-  const checkForUpdatesItem: Electron.MenuItemConstructorOptions = {
-    label: translateMain('menu.checkForUpdates', 'Check for Updates...'),
-    click: checkForUpdatesClick
-  }
+  const checkForUpdatesItem: Electron.MenuItemConstructorOptions | null =
+    productProfile.updatesEnabled && onCheckForUpdates
+      ? {
+          label: translateMain('menu.checkForUpdates', 'Check for Updates...'),
+          click: checkForUpdatesClick
+        }
+      : null
 
   const settingsItem: Electron.MenuItemConstructorOptions = {
     label: `${translateMain('menu.settings', 'Settings')}\t${shortcutLabel('app.settings')}`,
@@ -141,7 +145,7 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
     label: options.appMenuLabel ?? app.name,
     submenu: [
       { role: 'about' },
-      checkForUpdatesItem,
+      ...(checkForUpdatesItem ? [checkForUpdatesItem] : []),
       settingsItem,
       { type: 'separator' },
       { role: 'services' },
@@ -304,7 +308,7 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
         : ([
             { type: 'separator' },
             { role: 'about' },
-            checkForUpdatesItem
+            ...(checkForUpdatesItem ? [checkForUpdatesItem] : [])
           ] satisfies Electron.MenuItemConstructorOptions[]))
     ]
   }

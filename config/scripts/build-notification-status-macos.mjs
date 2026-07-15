@@ -8,11 +8,14 @@
 // ad-hoc deep sign) derives the correct code identifier automatically —
 // macOS keys notification records to that identifier.
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const repoRoot = path.resolve(import.meta.dirname, '../..')
+const productProfile = JSON.parse(
+  readFileSync(path.join(repoRoot, 'src', 'shared', 'product-profile.json'), 'utf8')
+)
 const sourcePath = path.join(repoRoot, 'native', 'notification-status-macos', 'main.swift')
 const defaultOutputPath = path.join(
   repoRoot,
@@ -28,7 +31,7 @@ if (process.platform !== 'darwin') {
 }
 
 const args = process.argv.slice(2)
-const bundleId = readArg('--bundle-id') ?? 'com.stablyai.orca'
+const bundleId = readArg('--bundle-id') ?? productProfile.appId
 const outputPath = readArg('--output') ?? defaultOutputPath
 // Why: dev launches only need the host architecture; release builds ship a
 // universal binary matching the app's x64 + arm64 targets.

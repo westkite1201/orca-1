@@ -80,7 +80,7 @@ import {
 } from './serve-update-handoff'
 import {
   configureElectronNetworkCompatibility,
-  configureDevUserDataPath,
+  configureProductUserDataPath,
   configureOrcaUserDataPathEnv,
   enableMainProcessGpuFeatures,
   installDevParentDisconnectQuit,
@@ -524,7 +524,7 @@ if (app.isPackaged && process.platform !== 'win32') {
     }
   })
 }
-configureDevUserDataPath(is.dev)
+configureProductUserDataPath(is.dev)
 configureOrcaUserDataPathEnv()
 installServeSupervisorDisconnectQuit(isServeMode)
 
@@ -613,7 +613,7 @@ function clearExpectedRendererReload(webContentsId?: number): void {
 }
 
 function getExpectedTeardownScope(webContentsId?: number): ExpectedTeardownScope {
-  if (isQuitting || isQuittingForUpdate()) {
+  if (isQuitting) {
     return 'app-shutdown'
   }
   if (webContentsId === undefined) {
@@ -966,9 +966,7 @@ function showMainWindowFromTray(): void {
     mainWindow.focus()
     return
   }
-  if (!isQuittingForUpdate()) {
-    openMainWindow()
-  }
+  openMainWindow()
 }
 
 function openSettingsFromSystemMenu(): void {
@@ -2735,11 +2733,6 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
-  if (isQuittingForUpdate()) {
-    recordUpdaterLifecycle('before_quit_allowed', undefined, {
-      message: 'before-quit allowed for update install'
-    })
-  }
   isQuitting = true
   desktopRelayService?.fenceAndCloseNow()
   runtimeRpc?.setMobileRelayPairingProvider(null)

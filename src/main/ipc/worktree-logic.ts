@@ -4,6 +4,7 @@ import { isWindowsAbsolutePathLike, resolveRuntimePath } from '../../shared/cros
 import { isWslUncPath } from '../../shared/wsl-paths'
 import { splitWorktreeId } from '../../shared/worktree-id'
 import { getWslHome, parseWslPath } from '../wsl'
+import productProfile from '../../shared/product-profile.json'
 
 type WorktreePathSettings = Pick<GlobalSettings, 'nestWorkspaces' | 'workspaceDir'>
 type WorktreeBasePathRepo = Pick<Repo, 'path' | 'worktreeBasePath'>
@@ -110,7 +111,7 @@ export function computeWorkspaceRoot(repoPath: string, settings: { workspaceDir:
       // Mirror absolute local desktop workspace roots inside the distro so
       // terminals stay on the WSL filesystem; repo-relative roots can resolve
       // directly against the WSL repo path.
-      return win32.join(wslHome, 'orca', 'workspaces')
+      return win32.join(wslHome, productProfile.userDataDirectoryName, 'workspaces')
     }
   }
   return resolveWorkspaceDirForRepo(repoPath, settings.workspaceDir)

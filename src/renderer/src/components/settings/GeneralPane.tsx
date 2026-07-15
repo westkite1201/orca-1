@@ -23,6 +23,7 @@ import { SearchableSetting } from './SearchableSetting'
 import { SettingsSubsectionHeader, SettingsSwitchRow } from './SettingsFormControls'
 import { translate } from '@/i18n/i18n'
 import { DefaultWindowsProjectRuntimeSetting } from './DefaultWindowsProjectRuntimeSetting'
+import productProfile from '../../../../shared/product-profile.json'
 
 export {
   createAutoSaveDelayDraftState,
@@ -195,6 +196,7 @@ export function GeneralPane({
         wslCapabilitiesLoading={wslCapabilitiesLoading}
       />
     ) : null,
+    productProfile.updatesEnabled &&
     matchesSettingsSearch(searchQuery, getGeneralUpdateSearchEntries()) ? (
       <GeneralUpdateSettingsSection key="updates" />
     ) : null
