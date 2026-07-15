@@ -30,6 +30,7 @@ import type {
 import type { FolderWorkspacePathStatusRequest } from '../../shared/folder-workspace-path-status'
 import { isFolderRepo } from '../../shared/repo-kind'
 import { DEFAULT_REPO_BADGE_COLOR } from '../../shared/constants'
+import productProfile from '../../shared/product-profile.json'
 import { normalizeRepoBadgeColor } from '../../shared/repo-badge-color'
 import { sanitizeRepoIcon } from '../../shared/repo-icon'
 import { normalizeRepoSourceControlAiOverrides } from '../../shared/source-control-ai'
@@ -947,7 +948,7 @@ async function isGitAvailable(): Promise<boolean> {
 }
 
 function getDefaultCreateProjectParent(): string {
-  return join(homedir(), 'orca', 'projects')
+  return join(homedir(), productProfile.userDataDirectoryName, 'projects')
 }
 
 function markCloneAbortCleanupPending(metadata: ActiveCloneMetadata): void {

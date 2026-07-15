@@ -85,10 +85,6 @@ vi.mock('../browser/browser-manager', () => ({
 }))
 
 vi.mock('../updater', () => ({
-  checkForUpdates: vi.fn(),
-  getUpdateStatus: vi.fn(),
-  quitAndInstall: vi.fn(),
-  dismissNudge: vi.fn(),
   setupAutoUpdater: setupAutoUpdaterMock
 }))
 
@@ -168,8 +164,6 @@ function getClosedHandlers(mainWindowOnMock: MockFn): (() => void)[] {
     .map(([, handler]) => handler as () => void)
 }
 
-// Updater setup is deferred to first paint; fire the captured ready-to-show
-// handler and flush its setImmediate hop.
 async function fireReadyToShow(mainWindow: MainWindowStub): Promise<void> {
   const handler = mainWindow.once.mock.calls.find(([event]) => event === 'ready-to-show')?.[1] as
     | (() => void)
@@ -249,40 +243,14 @@ describe('attachMainWindowServices', () => {
     expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenLastCalledWith(store)
   })
 
-  it('passes injected update quit cleanup to the auto-updater', async () => {
-    const onBeforeUpdateQuit = vi.fn()
-    const store = createStore()
+  it('never initializes the auto-updater after ready-to-show', async () => {
     const mainWindow = createMainWindow()
 
-    attachMainWindowServices(
-      mainWindow as never,
-      store,
-      createRuntime() as never,
-      undefined,
-      undefined,
-      { onBeforeUpdateQuit }
-    )
+    attachMainWindowServices(mainWindow as never, createStore(), createRuntime() as never)
 
-    // Deferred to first paint — must not be configured at attach time.
     expect(setupAutoUpdaterMock).not.toHaveBeenCalled()
     await fireReadyToShow(mainWindow)
-    expect(setupAutoUpdaterMock).toHaveBeenCalledTimes(1)
-    await setupAutoUpdaterMock.mock.calls[0][1].onBeforeQuit()
-
-    expect(onBeforeUpdateQuit).toHaveBeenCalledTimes(1)
-    expect(store.flush).toHaveBeenCalledTimes(1)
-  })
-
-  it('flushes the store before update quit when no cleanup is injected', async () => {
-    const store = createStore()
-    const mainWindow = createMainWindow()
-
-    attachMainWindowServices(mainWindow as never, store, createRuntime() as never)
-
-    await fireReadyToShow(mainWindow)
-    await setupAutoUpdaterMock.mock.calls[0][1].onBeforeQuit()
-
-    expect(store.flush).toHaveBeenCalledTimes(1)
+    expect(setupAutoUpdaterMock).not.toHaveBeenCalled()
   })
 
   it('ignores app reload requests from non-main webContents', async () => {

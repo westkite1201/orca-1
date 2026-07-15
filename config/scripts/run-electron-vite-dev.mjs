@@ -26,6 +26,7 @@ delete process.env.ELECTRON_RUN_AS_NODE
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(import.meta.dirname, '../..')
+const productProfile = require('../../src/shared/product-profile.json')
 const STABLE_NAME_FLAG = '--stable-name'
 const rawForwardedArgs = process.argv.slice(2)
 // Why: keep an escape hatch for tools that key off Electron's stock app name.
@@ -64,7 +65,7 @@ function formatDevInstanceLabel(branch, worktreeName) {
 }
 
 function createDockTitle(branch, label) {
-  return `Orca: ${branch || label || 'dev'}`
+  return `${productProfile.name}: ${branch || label || 'dev'}`
 }
 
 function seedDevInstanceIdentityEnv() {
@@ -106,7 +107,7 @@ function sanitizeMacAppBundleName(value) {
       .join('')
       .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 120) || 'Orca'
+      .slice(0, 120) || productProfile.name
   )
 }
 
@@ -126,7 +127,7 @@ function prepareMacDevElectronApp() {
     electronVersion = JSON.parse(readFileSync(electronPackagePath, 'utf8')).version ?? null
   } catch {}
 
-  const title = process.env.ORCA_DEV_DOCK_TITLE || 'Orca: dev'
+  const title = process.env.ORCA_DEV_DOCK_TITLE || `${productProfile.name}: dev`
   const identityKey = process.env.ORCA_DEV_INSTANCE_KEY || repoRoot
   // v6: bundle the notification-status helper (real permission readout) and
   // ad-hoc re-sign after plist edits so Notification Center accepts the
@@ -154,7 +155,7 @@ function prepareMacDevElectronApp() {
   // once, macOS may route a notification click to the other instance —
   // Electron drops clicks for notification ids it didn't create, so the
   // click is lost, not misdirected.
-  const bundleId = 'com.stablyai.orca.dev'
+  const bundleId = `${productProfile.appId}.dev`
   process.env.ORCA_DEV_MACOS_BUNDLE_ID = bundleId
   const expectedMarker = JSON.stringify(
     { title, appBundleName, bundleId, sourceAppPath, electronVersion, bundleLayoutVersion },

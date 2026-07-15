@@ -109,15 +109,15 @@ describe('patchPackagedProcessPath', () => {
   })
 })
 
-describe('configureDevUserDataPath', () => {
+describe('configureProductUserDataPath', () => {
   it('uses an explicit dev userData override when provided', async () => {
     const { app } = await import('electron')
-    const { configureDevUserDataPath } = await import('./configure-process')
+    const { configureProductUserDataPath } = await import('./configure-process')
     const originalOverride = process.env.ORCA_DEV_USER_DATA_PATH
-    process.env.ORCA_DEV_USER_DATA_PATH = '/tmp/orca-dev-repro'
+    process.env.ORCA_DEV_USER_DATA_PATH = '/tmp/jaws-dev-repro'
 
     try {
-      configureDevUserDataPath(true)
+      configureProductUserDataPath(true)
     } finally {
       if (originalOverride === undefined) {
         delete process.env.ORCA_DEV_USER_DATA_PATH
@@ -126,29 +126,29 @@ describe('configureDevUserDataPath', () => {
       }
     }
 
-    expect(app.setPath).toHaveBeenCalledWith('userData', '/tmp/orca-dev-repro')
+    expect(app.setPath).toHaveBeenCalledWith('userData', '/tmp/jaws-dev-repro')
   })
 
-  it('moves dev runs onto an orca-dev userData path', async () => {
+  it('moves dev runs onto a jaws-dev userData path', async () => {
     const { app } = await import('electron')
-    const { configureDevUserDataPath } = await import('./configure-process')
+    const { configureProductUserDataPath } = await import('./configure-process')
 
     delete process.env.ORCA_DEV_USER_DATA_PATH
-    configureDevUserDataPath(true)
+    configureProductUserDataPath(true)
 
-    // Why: production code uses path.join(app.getPath('appData'), 'orca-dev')
+    // Why: production code uses path.join(app.getPath('appData'), 'jaws-dev')
     // which produces platform-specific separators.
-    expect(app.setPath).toHaveBeenCalledWith('userData', join('/tmp/app-data', 'orca-dev'))
+    expect(app.setPath).toHaveBeenCalledWith('userData', join('/tmp/app-data', 'jaws-dev'))
   })
 
-  it('leaves packaged runs on the default userData path', async () => {
+  it('moves packaged runs onto the Jaws userData path', async () => {
     const { app } = await import('electron')
-    const { configureDevUserDataPath } = await import('./configure-process')
+    const { configureProductUserDataPath } = await import('./configure-process')
 
     vi.mocked(app.setPath).mockClear()
-    configureDevUserDataPath(false)
+    configureProductUserDataPath(false)
 
-    expect(app.setPath).not.toHaveBeenCalled()
+    expect(app.setPath).toHaveBeenCalledWith('userData', join('/tmp/app-data', 'jaws'))
   })
 })
 

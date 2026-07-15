@@ -1,9 +1,9 @@
 {
-  "name": "orca",
+  "name": "jaws",
   "version": "1.4.138",
-  "description": "Next-gen IDE for parallel agentic development",
+  "description": "Personal multi-agent development workspace built on Orca",
   "homepage": "https://github.com/stablyai/orca",
-  "author": "stablyai",
+  "author": "seoyeonkim",
   "bin": {
     "orca": "./out/cli/index.js",
     "orca-dev": "./config/scripts/orca-dev.mjs"

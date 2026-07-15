@@ -109,6 +109,13 @@ describe('GeneralPane search entries', () => {
     expect(matchesSettingsSearch('red underline', entries)).toBe(true)
   })
 
+  it('omits the disabled upstream updater settings', () => {
+    const entries = getGeneralPaneSearchEntries()
+
+    expect(matchesSettingsSearch('check for updates', entries)).toBe(false)
+    expect(matchesSettingsSearch('release notes', entries)).toBe(false)
+  })
+
   it('omits the default project runtime setting when Windows runtimes are unsupported', () => {
     const entries = getGeneralPaneSearchEntries({ includeProjectRuntime: false })
 

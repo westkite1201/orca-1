@@ -6,6 +6,7 @@
     "../src/main/**/*",
     "../src/preload/**/*",
     "../src/shared/**/*",
+    "../src/shared/**/*.json",
     "../src/relay/**/*",
     "../src/types/**/*"
   ],

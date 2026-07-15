@@ -49,11 +49,9 @@ import {
   registerAppMenu,
   rebuildAppMenu
 } from './menu/register-app-menu'
-import { checkForUpdatesFromMenu, isQuittingForUpdate } from './updater'
-import { recordUpdaterLifecycle } from './updater-lifecycle-diagnostics'
 import {
   configureElectronNetworkCompatibility,
-  configureDevUserDataPath,
+  configureProductUserDataPath,
   configureOrcaUserDataPathEnv,
   enableMainProcessGpuFeatures,
   installDevParentDisconnectQuit,
@@ -107,10 +105,7 @@ import { RateLimitService } from './rate-limits/service'
 import { readMiniMaxSessionCookie } from './minimax/minimax-cookie-store'
 import { getInitialClaudeRateLimitTarget } from './rate-limits/claude-rate-limit-target'
 import { getInitialCodexRateLimitTarget } from './rate-limits/codex-rate-limit-target'
-import {
-  attachMainWindowServices,
-  ensureAutoUpdaterConfigured
-} from './window/attach-main-window-services'
+import { attachMainWindowServices } from './window/attach-main-window-services'
 import { createMainWindow, loadMainWindow } from './window/createMainWindow'
 import { createSystemTray, destroySystemTray, setTrayAttention } from './tray/system-tray'
 import { focusExistingMainWindow } from './window/focus-existing-window'
@@ -429,7 +424,7 @@ if (app.isPackaged && process.platform !== 'win32') {
     }
   })
 }
-configureDevUserDataPath(is.dev)
+configureProductUserDataPath(is.dev)
 configureOrcaUserDataPathEnv()
 
 // Why: just past createMainWindow's win32 10s ready-to-show reveal fallback,
@@ -504,7 +499,7 @@ function clearExpectedRendererReload(webContentsId?: number): void {
 }
 
 function getExpectedTeardownScope(webContentsId?: number): ExpectedTeardownScope {
-  if (isQuitting || isQuittingForUpdate()) {
+  if (isQuitting) {
     return 'app-shutdown'
   }
   if (webContentsId === undefined) {
@@ -535,7 +530,7 @@ function recordAgentStateCrashBreadcrumb(agentType: string, state: string): void
   })
 }
 
-// Why: the lock must be acquired AFTER configureDevUserDataPath — Electron
+// Why: the lock must be acquired AFTER configureProductUserDataPath — Electron
 // derives the lock identity from the `userData` path, so this placement lets
 // dev (`orca-dev`) and packaged (`orca`) runs lock in separate namespaces
 // instead of serialising against each other.
@@ -589,8 +584,8 @@ if (hasSingleInstanceLock) {
   installDevParentDisconnectQuit(shouldCoupleToDevParent)
   installDevParentWatchdog(shouldCoupleToDevParent)
   installDevParentSignalQuit(shouldCoupleToDevParent)
-  // Why: must run after configureDevUserDataPath (which redirects userData to
-  // orca-dev in dev mode) but before app.setName('Orca') inside whenReady
+  // Why: must run after configureProductUserDataPath (which isolates Jaws
+  // profiles) but before app.setName() inside whenReady
   // (which would change the resolved path on case-sensitive filesystems).
   initDataPath()
   initOrcaProfilePaths()
@@ -755,9 +750,7 @@ function showMainWindowFromTray(): void {
     mainWindow.focus()
     return
   }
-  if (!isQuittingForUpdate()) {
-    openMainWindow()
-  }
+  openMainWindow()
 }
 
 function openMainWindow(): BrowserWindow {
@@ -977,9 +970,7 @@ function openMainWindow(): BrowserWindow {
       },
       // Why: let the PTY layer skip its orphan sweep on the one recovery reload
       // that re-fires did-finish-load, so live local sessions survive it (#5787).
-      isRecoveryReloadInFlight,
-      onBeforeUpdateQuit: () =>
-        preserveAgentAuthBeforeRestart({ codexRuntimeHome, claudeRuntimeAuth, store })
+      isRecoveryReloadInFlight
     }
   )
   rateLimits.attach(window)
@@ -1973,12 +1964,6 @@ app.whenReady().then(async () => {
   logStartupMilestone('i18n-ready')
 
   registerAppMenu({
-    onCheckForUpdates: (options) => {
-      // Why: the menu is clickable before first paint; a manual check must
-      // run against a configured updater (see attach-main-window-services).
-      ensureAutoUpdaterConfigured()
-      return checkForUpdatesFromMenu(options)
-    },
     onBeforeReload: ({ ignoreCache, webContentsId }) => {
       if (mainWindow?.webContents.id === webContentsId) {
         markExpectedRendererReload(webContentsId)
@@ -2214,21 +2199,13 @@ app.whenReady().then(async () => {
   })
 
   app.on('activate', () => {
-    // Don't re-open a window while Squirrel's ShipIt is replacing the .app
-    // bundle.  Without this guard the old version gets resurrected and the
-    // update never applies.
-    if (BrowserWindow.getAllWindows().length === 0 && !isQuittingForUpdate()) {
+    if (BrowserWindow.getAllWindows().length === 0) {
       openMainWindow()
     }
   })
 })
 
 app.on('before-quit', () => {
-  if (isQuittingForUpdate()) {
-    recordUpdaterLifecycle('before_quit_allowed', undefined, {
-      message: 'before-quit allowed for update install'
-    })
-  }
   isQuitting = true
   unsubscribeSystemResumeBroadcast?.()
   unsubscribeSystemResumeBroadcast = null
@@ -2250,14 +2227,6 @@ app.on('before-quit', () => {
 // async work and let Electron exit.
 let daemonDisconnectDone = false
 app.on('will-quit', (e) => {
-  const updateQuitInProgress = isQuittingForUpdate()
-  if (updateQuitInProgress) {
-    recordUpdaterLifecycle(
-      'will_quit_cleanup_started',
-      { daemonTeardown: 'disconnect' },
-      { message: 'will-quit cleanup for update install; daemonTeardown=disconnect' }
-    )
-  }
   // Why: before-quit can still be aborted by renderer beforeunload; wait until
   // the committed quit path before removing the Windows notification icon.
   destroySystemTray()
