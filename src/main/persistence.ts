@@ -139,6 +139,16 @@ import {
   nextAutomationRunNumber,
   pruneAutomationRuns
 } from '../shared/automation-run-retention'
+import {
+  canTransitionHarnessCandidateStatus,
+  deriveHarnessRunStatus,
+  isHarnessCandidateVerified,
+  type HarnessAgent,
+  type HarnessCandidate,
+  type HarnessCandidatePatch,
+  type HarnessRun,
+  type HarnessRunCreateInput
+} from '../shared/harness-types'
 import { pruneWorkspaceSessionBrowserHistory } from '../shared/workspace-session-browser-history'
 import {
   FOLDER_WORKSPACE_INSTANCE_SEPARATOR,
@@ -3445,6 +3455,7 @@ export class Store {
             }
             return runs
           })(),
+          harnessRuns: Array.isArray(parsed.harnessRuns) ? parsed.harnessRuns : [],
           onboarding: normalizedOnboarding
         }
       }
@@ -4604,6 +4615,165 @@ export class Store {
     const existing = this.state.sparsePresetsByRepo[repoId] ?? []
     this.state.sparsePresetsByRepo[repoId] = existing.filter((entry) => entry.id !== presetId)
     this.scheduleSave()
+  }
+
+  // ── Harness ───────────────────────────────────────────────────────
+
+  listHarnessRuns(repoId?: string): HarnessRun[] {
+    const runs = this.state.harnessRuns ?? []
+    return [...(repoId ? runs.filter((run) => run.repoId === repoId) : runs)].sort(
+      (left, right) => right.createdAt - left.createdAt
+    )
+  }
+
+  createHarnessRun(input: HarnessRunCreateInput): HarnessRun {
+    const repoId = input.repoId.trim()
+    const sourceWorktreeId = input.sourceWorktreeId.trim()
+    const sourceWorktreePath = input.sourceWorktreePath.trim()
+    const goal = input.goal.trim()
+    const verificationCommand = input.verificationCommand.trim()
+    const baseSha = input.baseSha.trim()
+    if (
+      !repoId ||
+      !sourceWorktreeId ||
+      !sourceWorktreePath ||
+      !goal ||
+      !verificationCommand ||
+      !baseSha
+    ) {
+      throw new Error('Harness runs require a repository, source worktree, goal, command, and SHA.')
+    }
+
+    const now = Date.now()
+    const createCandidate = <TAgent extends HarnessAgent>(
+      agent: TAgent
+    ): HarnessCandidate<TAgent> => ({
+      id: randomUUID(),
+      agent,
+      status: 'pending',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      agentTerminalHandle: null,
+      verificationTerminalHandle: null,
+      taskId: null,
+      dispatchId: null,
+      verification: null,
+      diff: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      workerCompletedAt: null,
+      completedAt: null
+    })
+    const run: HarnessRun = {
+      id: randomUUID(),
+      repoId,
+      sourceWorktreeId,
+      sourceWorktreePath,
+      goal,
+      verificationCommand,
+      baseSha,
+      candidates: [createCandidate('codex'), createCandidate('claude')],
+      fatalError: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    }
+    this.state.harnessRuns = [...(this.state.harnessRuns ?? []), run]
+    this.flush()
+    return run
+  }
+
+  updateHarnessCandidate(
+    runId: string,
+    agent: HarnessAgent,
+    patch: HarnessCandidatePatch
+  ): HarnessRun {
+    const runIndex = (this.state.harnessRuns ?? []).findIndex((run) => run.id === runId)
+    if (runIndex === -1) {
+      throw new Error('Harness run not found.')
+    }
+    const currentRun = this.state.harnessRuns[runIndex]
+    if (currentRun.fatalError !== null) {
+      throw new Error('Harness run has already failed.')
+    }
+    const currentCandidate = currentRun.candidates.find((candidate) => candidate.agent === agent)
+    if (!currentCandidate) {
+      throw new Error('Harness candidate not found.')
+    }
+    const nextStatus = patch.status ?? currentCandidate.status
+    if (
+      nextStatus !== currentCandidate.status &&
+      !canTransitionHarnessCandidateStatus(currentCandidate.status, nextStatus)
+    ) {
+      throw new Error(
+        `Invalid Harness candidate transition: ${currentCandidate.status} -> ${nextStatus}.`
+      )
+    }
+
+    const now = Date.now()
+    const terminal = nextStatus === 'verified' || nextStatus === 'failed'
+    const updatedCandidate: HarnessCandidate = {
+      ...currentCandidate,
+      ...patch,
+      id: currentCandidate.id,
+      agent: currentCandidate.agent,
+      status: nextStatus,
+      updatedAt: now,
+      startedAt:
+        patch.startedAt ?? currentCandidate.startedAt ?? (nextStatus === 'running' ? now : null),
+      workerCompletedAt:
+        patch.workerCompletedAt ??
+        currentCandidate.workerCompletedAt ??
+        (nextStatus === 'worker_done' ? now : null),
+      completedAt: patch.completedAt ?? currentCandidate.completedAt ?? (terminal ? now : null)
+    }
+    if (
+      updatedCandidate.status === 'verified' &&
+      !isHarnessCandidateVerified(updatedCandidate, currentRun.verificationCommand)
+    ) {
+      throw new Error(
+        'Verified Harness candidates require worker, command, test, and Git evidence.'
+      )
+    }
+
+    const candidates: HarnessRun['candidates'] =
+      agent === 'codex'
+        ? [updatedCandidate as HarnessCandidate<'codex'>, currentRun.candidates[1]]
+        : [currentRun.candidates[0], updatedCandidate as HarnessCandidate<'claude'>]
+    const nextRun: HarnessRun = {
+      ...currentRun,
+      candidates,
+      updatedAt: now
+    }
+    nextRun.completedAt =
+      deriveHarnessRunStatus(nextRun) === 'completed' ? (currentRun.completedAt ?? now) : null
+    this.state.harnessRuns[runIndex] = nextRun
+    this.flush()
+    return nextRun
+  }
+
+  failHarnessRun(runId: string, error: string): HarnessRun {
+    const runIndex = (this.state.harnessRuns ?? []).findIndex((run) => run.id === runId)
+    if (runIndex === -1) {
+      throw new Error('Harness run not found.')
+    }
+    const fatalError = error.trim()
+    if (!fatalError) {
+      throw new Error('Harness run failures require an error message.')
+    }
+    const now = Date.now()
+    const failed: HarnessRun = {
+      ...this.state.harnessRuns[runIndex],
+      fatalError,
+      updatedAt: now,
+      completedAt: now
+    }
+    this.state.harnessRuns[runIndex] = failed
+    this.flush()
+    return failed
   }
 
   // ── Automations ───────────────────────────────────────────────────
