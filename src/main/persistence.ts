@@ -2209,6 +2209,31 @@ const MAX_CLAUDE_LIVE_PTY_SESSION_IDS = 200
 // the state file without limit. Re-adoption only needs recent removals.
 const MAX_REMOVED_SSH_TARGET_TOMBSTONES = 50
 
+const MAX_TERMINAL_HARNESS_RUNS = 50
+
+function isTerminalHarnessRun(run: HarnessRun): boolean {
+  const status = deriveHarnessRunStatus(run)
+  return status === 'completed' || status === 'failed'
+}
+
+function pruneHarnessRuns(runs: readonly HarnessRun[]): HarnessRun[] {
+  const recentTerminalRunIds = new Set(
+    runs
+      .filter(isTerminalHarnessRun)
+      .sort(
+        (left, right) =>
+          (right.completedAt ?? right.updatedAt) - (left.completedAt ?? left.updatedAt) ||
+          right.createdAt - left.createdAt ||
+          right.id.localeCompare(left.id)
+      )
+      .slice(0, MAX_TERMINAL_HARNESS_RUNS)
+      .map((run) => run.id)
+  )
+
+  // Why: active runs must remain resumable; only detailed output from old terminal runs is evicted.
+  return runs.filter((run) => !isTerminalHarnessRun(run) || recentTerminalRunIds.has(run.id))
+}
+
 function normalizeClaudeLivePtySessionIds(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return []
@@ -3455,7 +3480,53 @@ export class Store {
             }
             return runs
           })(),
-          harnessRuns: Array.isArray(parsed.harnessRuns) ? parsed.harnessRuns : [],
+          harnessRuns: (() => {
+            if (!Array.isArray(parsed.harnessRuns)) {
+              return []
+            }
+            const normalizedRuns = parsed.harnessRuns.map((run) => ({
+              ...run,
+              // Why: comparison was the only legacy behavior; missing or unknown
+              // values must retain that behavior instead of silently orchestrating.
+              mode: (run.mode === 'orchestrator'
+                ? 'orchestrator'
+                : 'comparison') as HarnessRun['mode'],
+              candidates: run.candidates.map((candidate) => {
+                if (
+                  (run.mode !== 'comparison' && run.mode !== 'orchestrator') ||
+                  candidate.agentTerminalPaneKey === undefined ||
+                  candidate.verificationTerminalHandle === undefined ||
+                  candidate.verificationTerminalPaneKey === undefined ||
+                  candidate.verificationTerminalOwnership === undefined ||
+                  candidate.workerResult === undefined ||
+                  candidate.recoveryStartedAt === undefined ||
+                  candidate.childLaneDrainStartedAt === undefined
+                ) {
+                  this.loadNeedsSave = true
+                }
+                return {
+                  ...candidate,
+                  agentTerminalPaneKey: candidate.agentTerminalPaneKey ?? null,
+                  verificationTerminalHandle: candidate.verificationTerminalHandle ?? null,
+                  verificationTerminalPaneKey: candidate.verificationTerminalPaneKey ?? null,
+                  verificationTerminalOwnership:
+                    candidate.verificationTerminalOwnership === 'pending' ||
+                    candidate.verificationTerminalOwnership === 'owned' ||
+                    candidate.verificationTerminalOwnership === 'stopped'
+                      ? candidate.verificationTerminalOwnership
+                      : null,
+                  workerResult: candidate.workerResult ?? null,
+                  recoveryStartedAt: candidate.recoveryStartedAt ?? null,
+                  childLaneDrainStartedAt: candidate.childLaneDrainStartedAt ?? null
+                }
+              }) as HarnessRun['candidates']
+            }))
+            const runs = pruneHarnessRuns(normalizedRuns)
+            if (runs.length !== normalizedRuns.length) {
+              this.loadNeedsSave = true
+            }
+            return runs
+          })(),
           onboarding: normalizedOnboarding
         }
       }
@@ -3726,12 +3797,11 @@ export class Store {
       if (this.writeGeneration !== gen) {
         return
       }
-      await rename(tmpFile, dataFile)
+      // Why: keep the generation check and atomic swap in one JS turn. An
+      // awaited rename let a required sync flush land between them, then the
+      // older async rename could overwrite that newer durable lifecycle state.
+      renameSync(tmpFile, dataFile)
       renamed = true
-      // Why the gen re-check: a sync flush can interleave during the rename
-      // await, write fresher state, and record its own hash. Recording this
-      // stale hash over it would make later saves skip against content that
-      // is not what the file holds.
       if (this.writeGeneration === gen) {
         this.lastWrittenStateHash = stateHash
       }
@@ -4626,6 +4696,10 @@ export class Store {
     )
   }
 
+  getHarnessRun(runId: string): HarnessRun | null {
+    return (this.state.harnessRuns ?? []).find((run) => run.id === runId) ?? null
+  }
+
   createHarnessRun(input: HarnessRunCreateInput): HarnessRun {
     const repoId = input.repoId.trim()
     const sourceWorktreeId = input.sourceWorktreeId.trim()
@@ -4633,6 +4707,7 @@ export class Store {
     const goal = input.goal.trim()
     const verificationCommand = input.verificationCommand.trim()
     const baseSha = input.baseSha.trim()
+    const mode = input.mode ?? 'comparison'
     if (
       !repoId ||
       !sourceWorktreeId ||
@@ -4644,6 +4719,7 @@ export class Store {
       throw new Error('Harness runs require a repository, source worktree, goal, command, and SHA.')
     }
 
+    const harnessRunsBefore = [...(this.state.harnessRuns ?? [])]
     const now = Date.now()
     const createCandidate = <TAgent extends HarnessAgent>(
       agent: TAgent
@@ -4655,15 +4731,21 @@ export class Store {
       worktreePath: null,
       branch: null,
       agentTerminalHandle: null,
+      agentTerminalPaneKey: null,
       verificationTerminalHandle: null,
+      verificationTerminalPaneKey: null,
+      verificationTerminalOwnership: null,
       taskId: null,
       dispatchId: null,
+      workerResult: null,
       verification: null,
       diff: null,
       error: null,
       createdAt: now,
       updatedAt: now,
       startedAt: null,
+      recoveryStartedAt: null,
+      childLaneDrainStartedAt: null,
       workerCompletedAt: null,
       completedAt: null
     })
@@ -4675,22 +4757,35 @@ export class Store {
       goal,
       verificationCommand,
       baseSha,
-      candidates: [createCandidate('codex'), createCandidate('claude')],
+      mode,
+      candidates:
+        mode === 'orchestrator'
+          ? [createCandidate('codex')]
+          : [createCandidate('codex'), createCandidate('claude')],
       fatalError: null,
       createdAt: now,
       updatedAt: now,
       completedAt: null
     }
-    this.state.harnessRuns = [...(this.state.harnessRuns ?? []), run]
-    this.flush()
+    this.state.harnessRuns = pruneHarnessRuns([...(this.state.harnessRuns ?? []), run])
+    try {
+      // Why: worktrees and PTYs may launch as soon as this returns; the run
+      // identity must already be crash-durable before those side effects begin.
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.harnessRuns = harnessRunsBefore
+      throw error
+    }
     return run
   }
 
   updateHarnessCandidate(
     runId: string,
     agent: HarnessAgent,
-    patch: HarnessCandidatePatch
+    patch: HarnessCandidatePatch,
+    options: { durability?: 'best-effort' | 'required' } = {}
   ): HarnessRun {
+    const harnessRunsBefore = [...(this.state.harnessRuns ?? [])]
     const runIndex = (this.state.harnessRuns ?? []).findIndex((run) => run.id === runId)
     if (runIndex === -1) {
       throw new Error('Harness run not found.')
@@ -4702,6 +4797,9 @@ export class Store {
     const currentCandidate = currentRun.candidates.find((candidate) => candidate.agent === agent)
     if (!currentCandidate) {
       throw new Error('Harness candidate not found.')
+    }
+    if (currentCandidate.status === 'verified' || currentCandidate.status === 'failed') {
+      throw new Error('Harness candidate evidence is immutable after completion.')
     }
     const nextStatus = patch.status ?? currentCandidate.status
     if (
@@ -4739,19 +4837,33 @@ export class Store {
       )
     }
 
-    const candidates: HarnessRun['candidates'] =
-      agent === 'codex'
-        ? [updatedCandidate as HarnessCandidate<'codex'>, currentRun.candidates[1]]
-        : [currentRun.candidates[0], updatedCandidate as HarnessCandidate<'claude'>]
+    const candidates = currentRun.candidates.map((candidate) =>
+      candidate.agent === agent ? updatedCandidate : candidate
+    )
     const nextRun: HarnessRun = {
       ...currentRun,
       candidates,
       updatedAt: now
     }
+    const runStatus = deriveHarnessRunStatus(nextRun)
     nextRun.completedAt =
-      deriveHarnessRunStatus(nextRun) === 'completed' ? (currentRun.completedAt ?? now) : null
+      runStatus === 'completed' || runStatus === 'failed' ? (currentRun.completedAt ?? now) : null
     this.state.harnessRuns[runIndex] = nextRun
-    this.flush()
+    if (nextRun.completedAt !== null) {
+      this.state.harnessRuns = pruneHarnessRuns(this.state.harnessRuns)
+    }
+    if (options.durability === 'required') {
+      try {
+        this.flushOrThrow()
+      } catch (error) {
+        // Why: a verification PTY must not launch from lifecycle state that
+        // exists only in memory after an atomic write failure.
+        this.state.harnessRuns = harnessRunsBefore
+        throw error
+      }
+    } else {
+      this.flush()
+    }
     return nextRun
   }
 
@@ -4772,6 +4884,7 @@ export class Store {
       completedAt: now
     }
     this.state.harnessRuns[runIndex] = failed
+    this.state.harnessRuns = pruneHarnessRuns(this.state.harnessRuns)
     this.flush()
     return failed
   }

@@ -74,14 +74,24 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'task-create'],
     summary: 'Create an orchestration task',
     usage:
-      'orca orchestration task-create --spec <text> [--task-title <text>] [--display-name <text>] [--deps <json_array>] [--parent <task_id>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'spec', 'task-title', 'display-name', 'deps', 'parent']
+      'orca orchestration task-create --spec <text> [--task-title <text>] [--display-name <text>] [--execution-kind read-only|worktree] [--agent-slot <name>] [--deps <json_array>] [--parent <task_id>] [--json]',
+    allowedFlags: [
+      ...GLOBAL_FLAGS,
+      'spec',
+      'task-title',
+      'display-name',
+      'execution-kind',
+      'agent-slot',
+      'deps',
+      'parent'
+    ]
   },
   {
     path: ['orchestration', 'task-list'],
     summary: 'List orchestration tasks',
-    usage: 'orca orchestration task-list [--status <status>] [--ready] [--brief] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'status', 'ready', 'brief'],
+    usage:
+      'orca orchestration task-list [--status <status>] [--ready] [--parent <task_id>] [--brief] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'status', 'ready', 'parent', 'brief'],
     notes: ['--brief collapses whitespace and caps each spec at 160 characters.']
   },
   {

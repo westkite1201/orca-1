@@ -181,6 +181,31 @@ describe('Coordinator', () => {
     await runPromise
   })
 
+  it('does not steal a ready task reserved for a Harness run', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = createMockRuntime()
+    runtime.terminals = [{ handle: 'term_a', worktreeId: 'wt1', connected: true, writable: true }]
+    const reserved = db.createTask({
+      spec: 'paired candidate work',
+      createdByTerminalHandle: 'jaws-harness:run-1'
+    })
+    const ordinary = db.createTask({ spec: 'ordinary coordinator work' })
+    const coordinator = new Coordinator(db, runtime, {
+      spec: 'build it',
+      coordinatorHandle: 'coord',
+      pollIntervalMs: 20
+    })
+
+    const runPromise = coordinator.run()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    coordinator.stop()
+    await runPromise
+
+    expect(db.getTask(reserved.id)?.status).toBe('ready')
+    expect(db.getDispatchContext(reserved.id)).toBeUndefined()
+    expect(db.getTask(ordinary.id)?.status).toBe('dispatched')
+  })
+
   it('records completedTasks when send reconciled worker_done before coordinator read', async () => {
     db = new OrchestrationDb(':memory:')
     const runtime = createMockRuntime()

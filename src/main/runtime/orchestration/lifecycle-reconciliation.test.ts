@@ -239,6 +239,44 @@ describe('lifecycle reconciliation', () => {
     expect(db.getTask(child.id)?.status).toBe('ready')
   })
 
+  it('terminal-fails dependents when an authorized worker reports failure', () => {
+    db = new OrchestrationDb(':memory:')
+    const first = db.createTask({ spec: 'first lane' })
+    const peer = db.createTask({ spec: 'peer lane' })
+    const dependent = db.createTask({ spec: 'integration', deps: [first.id, peer.id] })
+    const transitive = db.createTask({ spec: 'verification', deps: [dependent.id] })
+    const dispatch = db.createDispatchContext(first.id, 'term_worker', `tab_w:${LEAF_A}`)
+    db.createDispatchContext(peer.id, 'term_peer', `tab_p:${LEAF_B}`)
+    const failure = db.insertMessage({
+      from: 'term_worker',
+      to: 'term_coordinator',
+      subject: 'Failed: implementation did not compile',
+      type: 'worker_done',
+      payload: JSON.stringify({ taskId: first.id, dispatchId: dispatch.id }),
+      senderPaneKey: `tab_w:${LEAF_A}`
+    })
+
+    expect(reconcileLifecycleMessage(db, failure)).toEqual({
+      action: 'failed',
+      taskId: first.id,
+      dispatchId: dispatch.id
+    })
+    expect(db.getTask(first.id)?.status).toBe('failed')
+    expect(db.getDispatchContextById(dispatch.id)).toMatchObject({
+      status: 'failed',
+      last_failure: expect.stringContaining('Failed: implementation did not compile')
+    })
+    expect(db.getTask(peer.id)?.status).toBe('dispatched')
+    expect(db.getTask(dependent.id)).toMatchObject({
+      status: 'failed',
+      result: expect.stringContaining(`failed dependency ${first.id}`)
+    })
+    expect(db.getTask(transitive.id)).toMatchObject({
+      status: 'failed',
+      result: expect.stringContaining(`failed dependency ${dependent.id}`)
+    })
+  })
+
   it('does not let a foreign replay overwrite an authorized completion', () => {
     db = new OrchestrationDb(':memory:')
     const task = db.createTask({ spec: 'work' })

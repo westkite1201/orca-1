@@ -94,15 +94,16 @@ async function renderExperimentalPane(args: {
 }
 
 describe('ExperimentalPane', () => {
-  it('does not render compact worktree cards after graduation from Experimental', () => {
+  it('does not render graduated settings or include them in experimental search', () => {
     const markup = renderToStaticMarkup(
       <ExperimentalPane settings={getDefaultSettings('/tmp')} updateSettings={vi.fn()} />
     )
+    const searchTitles = getExperimentalPaneSearchEntries().map((entry) => entry.title)
 
     expect(markup).not.toContain('Compact worktree cards')
-    expect(getExperimentalPaneSearchEntries().map((entry) => entry.title)).not.toContain(
-      'Compact worktree cards'
-    )
+    expect(markup).not.toContain('Agents View')
+    expect(searchTitles).not.toContain('Compact worktree cards')
+    expect(searchTitles).not.toContain('Agents View')
   })
 
   it('renders agent sleep as an off-by-default searchable experimental switch', () => {

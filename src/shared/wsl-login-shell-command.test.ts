@@ -63,7 +63,7 @@ describe('wsl login shell command helpers', () => {
     expect(command).toContain('getent passwd')
     expect(command).toContain('bash|zsh|ksh|mksh|ash)')
     expect(command).toContain('exec "$_orca_wsl_shell" -ilc')
-    expect(command).toContain('exec /bin/sh -lc')
+    expect(command).toContain('*) exec "$_orca_wsl_shell" -lc')
     expect(command).toContain("printf '\\''hello'\\''")
   })
 

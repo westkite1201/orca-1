@@ -2920,6 +2920,43 @@ describe('registerPtyHandlers', () => {
         expect(runtime.onPtyExit).not.toHaveBeenCalled()
       })
 
+      it.each([
+        ['persisted ownership', 'remote-pty', true],
+        ['app-scoped identity', 'ssh:ssh-1@@remote-pty', false]
+      ])(
+        'runtime controller stopAndWait keeps %s when its SSH provider is absent',
+        async (_label, ptyId, persistOwnership) => {
+          const store = { markSshRemotePtyLease: vi.fn() }
+          const runtime = {
+            setPtyController: vi.fn(),
+            onPtyExit: vi.fn()
+          }
+          if (persistOwnership) {
+            setPtyOwnership(ptyId, 'ssh-1')
+          }
+          handlers.clear()
+          registerPtyHandlers(
+            mainWindow as never,
+            runtime as never,
+            undefined,
+            undefined,
+            undefined,
+            store as never
+          )
+          const controller = runtime.setPtyController.mock.calls[0]?.[0] as {
+            stopAndWait: (id: string) => Promise<boolean>
+          }
+
+          await expect(controller.stopAndWait(ptyId)).resolves.toBe(false)
+
+          expect(store.markSshRemotePtyLease).not.toHaveBeenCalled()
+          expect(runtime.onPtyExit).not.toHaveBeenCalled()
+          if (persistOwnership) {
+            deletePtyOwnership(ptyId)
+          }
+        }
+      )
+
       it('runtime controller kill routes app-scoped SSH ids through the parsed provider when ownership is absent', async () => {
         const localShutdown = vi.fn()
         setLocalPtyProvider({

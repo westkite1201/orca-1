@@ -26,15 +26,21 @@ function createCandidate<TAgent extends HarnessAgent>(
     worktreePath: null,
     branch: null,
     agentTerminalHandle: null,
+    agentTerminalPaneKey: null,
     verificationTerminalHandle: null,
+    verificationTerminalPaneKey: null,
+    verificationTerminalOwnership: null,
     taskId: null,
     dispatchId: null,
+    workerResult: null,
     verification: null,
     diff: null,
     error: null,
     createdAt: 10,
     updatedAt: 10,
     startedAt: null,
+    recoveryStartedAt: null,
+    childLaneDrainStartedAt: null,
     workerCompletedAt: null,
     completedAt: null
   }
@@ -46,6 +52,7 @@ function createRun(
 ): HarnessRun {
   return {
     id: 'run-1',
+    mode: 'comparison',
     repoId: 'repo-1',
     sourceWorktreeId: 'source-worktree',
     sourceWorktreePath: '/repo',
@@ -75,6 +82,13 @@ function createDiff(overrides: Partial<HarnessDiffSummary> = {}): HarnessDiffSum
 function createVerifiedCandidate(): HarnessCandidate<'codex'> {
   return {
     ...createCandidate('codex', 'verified'),
+    workerResult: {
+      messageId: 'message-codex',
+      subject: 'worker_done',
+      body: 'Implemented the feature.',
+      payload: null,
+      receivedAt: 20
+    },
     workerCompletedAt: 20,
     completedAt: 40,
     verification: {
@@ -157,6 +171,15 @@ describe('Harness run status', () => {
 
     expect(deriveHarnessRunStatus(run)).toBe('failed')
   })
+
+  it('reports a failed single-coordinator run without changing comparison completion', () => {
+    const orchestrator = createRun('failed', 'failed')
+    orchestrator.mode = 'orchestrator'
+    orchestrator.candidates = [orchestrator.candidates[0]]
+
+    expect(deriveHarnessRunStatus(orchestrator)).toBe('failed')
+    expect(deriveHarnessRunStatus(createRun('failed', 'failed'))).toBe('completed')
+  })
 })
 
 describe('Harness verification evidence', () => {
@@ -182,6 +205,14 @@ describe('Harness verification evidence', () => {
     const withoutWorkerCompletion = createVerifiedCandidate()
     withoutWorkerCompletion.workerCompletedAt = null
     expect(isHarnessCandidateVerified(withoutWorkerCompletion, VERIFY_COMMAND)).toBe(false)
+
+    const withoutWorkerResult = createVerifiedCandidate()
+    withoutWorkerResult.workerResult = null
+    expect(isHarnessCandidateVerified(withoutWorkerResult, VERIFY_COMMAND)).toBe(false)
+
+    const legacyWithoutWorkerResult = createVerifiedCandidate()
+    Reflect.deleteProperty(legacyWithoutWorkerResult, 'workerResult')
+    expect(isHarnessCandidateVerified(legacyWithoutWorkerResult, VERIFY_COMMAND)).toBe(false)
 
     const failedVerification = createVerifiedCandidate()
     failedVerification.verification = { ...failedVerification.verification!, exitCode: 1 }

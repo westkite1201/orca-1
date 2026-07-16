@@ -116,6 +116,18 @@ describe('buildDispatchPreamble', () => {
     expect(result).toContain('orchestration check --terminal term_worker')
   })
 
+  it('makes report-only workers decide safely or fail without waiting for replies', () => {
+    const result = buildDispatchPreamble(baseParams({ interactionMode: 'report-only' }))
+
+    expect(result).toContain('=== NON-INTERACTIVE COMPARISON RULES ===')
+    expect(result).toContain('Make the safest reasonable assumption')
+    expect(result).toContain('worker_done with subject "Failed: <reason>"')
+    expect(result).not.toMatch(/orchestration ask --to/)
+    expect(result).not.toContain('--type escalation')
+    expect(result).not.toContain('--type decision_gate')
+    expect(result).not.toContain('check --wait')
+  })
+
   it('tells prompt-returning workers to idle without post-done polling', () => {
     const result = buildDispatchPreamble(baseParams())
     const section = afterWorkerDoneSection(result)

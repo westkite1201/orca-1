@@ -135,6 +135,12 @@ export async function removeRegisteredSshTarget(targetId: string): Promise<void>
 // scattered Maps/Sets that previously tracked this state independently.
 const activeSessions = new Map<string, SshRelaySession>()
 
+export function isRegisteredSshRuntimeReady(targetId: string): boolean {
+  // Why: the raw SSH socket reports connected before the relay has rebuilt
+  // the Git, filesystem, and PTY providers required by runtime work.
+  return activeSessions.get(targetId)?.getState() === 'ready'
+}
+
 export function getActiveSshAiVaultHostInfo(targetId: string): SshRelayAiVaultHostInfo | null {
   if (isRuntimeOwnedSshTargetId(targetId)) {
     return null

@@ -7,6 +7,62 @@
       "webDescription": "重试 Web 客户端或重新连接到配对的运行时。"
     }
   },
+  "harness": {
+    "activeRunConflict": "已有正在运行的编排任务。清空此表单即可打开它。",
+    "branchPending": "分支待创建",
+    "cancel": "取消",
+    "checkingExisting": "正在检查现有运行…",
+    "close": "关闭",
+    "comparisonResultTitle": "比较结果",
+    "comparisonRunDescription": "比较两个候选方案的 Git 变更依据和验证结果。",
+    "comparisonRunTitle": "比较运行",
+    "coordinator": "Codex 协调器",
+    "description": "向 Jaws 提交议题或目标。它会规划工作通道、隔离变更工作、集成结果并进行验证。",
+    "discoveryRetrying": "正在重新连接以检查现有运行…",
+    "diff": {
+      "added": "新增 {{count}} 个",
+      "copied": "复制 {{count}} 个",
+      "deleted": "删除 {{count}} 个",
+      "files": "{{count}} 个文件",
+      "modified": "修改 {{count}} 个",
+      "oneFile": "1 个文件",
+      "renamed": "重命名 {{count}} 个",
+      "untracked": "未跟踪 {{count}} 个"
+    },
+    "gitWorktree": "Git 工作树",
+    "goal": "议题或目标",
+    "goalPlaceholder": "粘贴议题或描述期望结果",
+    "newComparison": "新建运行",
+    "noGitRepository": "请添加 Git 仓库以启动编排运行。",
+    "orchestratorResultTitle": "编排结果",
+    "orchestratorRunDescription": "跟踪此运行的协调器、Git 变更依据和验证状态。",
+    "orchestratorRunTitle": "编排运行",
+    "ownerUpgradeRequired": "请更新工作树所属的运行时以使用编排器。",
+    "result": "结果",
+    "resume": "继续",
+    "resuming": "正在继续…",
+    "retry": "重试",
+    "runComparison": "启动编排器",
+    "selectWorktree": "选择工作树",
+    "starting": "正在启动…",
+    "status": {
+      "completed": "已完成",
+      "creating": "正在创建",
+      "failed": "失败",
+      "pending": "等待中",
+      "preparing": "准备中",
+      "ready": "已就绪",
+      "running": "运行中",
+      "verified": "已验证",
+      "verifying": "验证中",
+      "workerDone": "工作已完成"
+    },
+    "verificationCommand": "验证命令",
+    "verificationCommandPassed": "验证命令通过 · {{seconds}}秒",
+    "verificationFailed": "验证失败 · {{seconds}}秒",
+    "verificationPassed": "验证通过 · {{seconds}}秒",
+    "verificationPlaceholder": "pnpm test"
+  },
   "settings": {
     "appearance": {
       "language": {
@@ -3921,7 +3977,8 @@
           "196c1b5362": "打开 GitLab 任务",
           "0ccba862b8": "打开 GitHub 任务",
           "fee535205b": "任务",
-          "d599269755": "从侧边栏隐藏"
+          "d599269755": "从侧边栏隐藏",
+          "harness": "编排器"
         },
         "SidebarRepositoryFilterSection": {
           "d3a9c4cea1": "清除",
@@ -12601,7 +12658,9 @@
         "ActivityTitlebarControls": {
           "f915168c8e": "未读",
           "d6a8de3934": "智能体",
-          "dc708f3eff": "紧密智能体"
+          "dc708f3eff": "紧密智能体",
+          "closeHarness": "关闭编排器",
+          "harness": "编排器"
         }
       },
       "confirmation": {

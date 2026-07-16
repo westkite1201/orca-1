@@ -768,21 +768,10 @@ describe('createUISlice hydratePersistedUI', () => {
     expect(store.getState().activeView).toBe('terminal')
   })
 
-  it('drops a persisted activity view when experimental activity is disabled', () => {
+  it('restores a persisted Harness view regardless of the legacy activity setting', () => {
     const store = createUIStore()
     store.setState({
       settings: { experimentalActivity: false } as AppState['settings']
-    })
-
-    store.getState().hydratePersistedUI(makePersistedUI({ activeView: 'activity' }), 'startup')
-
-    expect(store.getState().activeView).toBe('terminal')
-  })
-
-  it('restores a persisted activity view when experimental activity is enabled', () => {
-    const store = createUIStore()
-    store.setState({
-      settings: { experimentalActivity: true } as AppState['settings']
     })
 
     store.getState().hydratePersistedUI(makePersistedUI({ activeView: 'activity' }), 'startup')
@@ -1821,6 +1810,20 @@ describe('createUISlice hydratePersistedUI', () => {
 })
 
 describe('createUISlice settings navigation', () => {
+  it('keeps Harness available when the legacy activity setting is off', () => {
+    const store = createUIStore()
+    store.setState({
+      settings: { experimentalActivity: false } as AppState['settings']
+    })
+
+    store.getState().openActivityPage()
+    expect(store.getState().activeView).toBe('activity')
+
+    store.getState().openSettingsPage()
+    store.getState().closeSettingsPage()
+    expect(store.getState().activeView).toBe('activity')
+  })
+
   it('prefetches the restored default task source when provider settings drifted', () => {
     const store = createUIStore()
     const prefetchWorkItems = vi.fn()

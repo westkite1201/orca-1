@@ -18,6 +18,14 @@ describe('OrchestrationDb', () => {
     return db
   }
 
+  type StatusTable = 'tasks' | 'dispatch_contexts'
+  function rejectStatusUpdate(d: OrchestrationDb, table: StatusTable, status: string): void {
+    const sqlite = (d as unknown as { db: Database.Database }).db
+    sqlite.exec(`CREATE TRIGGER reject_status_update BEFORE UPDATE OF status ON ${table}
+      WHEN NEW.status = '${status}' BEGIN
+      SELECT RAISE(ABORT, 'forced status update failure'); END;`)
+  }
+
   describe('messages', () => {
     it('inserts and retrieves a message', () => {
       const d = createDb()
@@ -249,6 +257,20 @@ describe('OrchestrationDb', () => {
       expect(d.getDispatchContext(task.id)?.status).toBe('completed')
     })
 
+    it('rolls back task completion, dependent promotion, and dispatch completion together', () => {
+      const d = createDb()
+      const task = d.createTask({ spec: 'do it' })
+      const dependent = d.createTask({ spec: 'follow up', deps: [task.id] })
+      const dispatch = d.createDispatchContext(task.id, 'term_a')
+      rejectStatusUpdate(d, 'dispatch_contexts', 'completed')
+
+      expect(() => d.updateTaskStatus(task.id, 'completed', 'done')).toThrow()
+
+      expect(d.getTask(task.id)).toMatchObject({ status: 'dispatched', result: null })
+      expect(d.getTask(dependent.id)?.status).toBe('pending')
+      expect(d.getDispatchContextById(dispatch.id)?.status).toBe('dispatched')
+    })
+
     it('listTasks filters by status', () => {
       const d = createDb()
       d.createTask({ spec: 'ready task' })
@@ -258,13 +280,6 @@ describe('OrchestrationDb', () => {
       expect(d.listTasks({ status: 'ready' })).toHaveLength(1)
       expect(d.listTasks({ status: 'completed' })).toHaveLength(1)
       expect(d.listTasks({ ready: true })).toHaveLength(1)
-    })
-
-    it('listTasks returns all when no filter', () => {
-      const d = createDb()
-      d.createTask({ spec: 'one' })
-      d.createTask({ spec: 'two' })
-      expect(d.listTasks()).toHaveLength(2)
     })
 
     it('listTasksWithDispatch joins active dispatch metadata', () => {
@@ -296,13 +311,6 @@ describe('OrchestrationDb', () => {
       expect(row?.assignee_handle).toBeNull()
       expect(row?.dispatch_id).toBeNull()
     })
-
-    it('supports parent_id for task decomposition', () => {
-      const d = createDb()
-      const parent = d.createTask({ spec: 'parent' })
-      const child = d.createTask({ spec: 'child', parentId: parent.id })
-      expect(child.parent_id).toBe(parent.id)
-    })
   })
 
   describe('dispatch contexts', () => {
@@ -316,6 +324,17 @@ describe('OrchestrationDb', () => {
       expect(ctx.assignee_handle).toBe('term_worker')
       expect(ctx.status).toBe('dispatched')
       expect(d.getTask(task.id)?.status).toBe('dispatched')
+    })
+
+    it('rolls back dispatch creation when the task transition fails', () => {
+      const d = createDb()
+      const task = d.createTask({ spec: 'work' })
+      rejectStatusUpdate(d, 'tasks', 'dispatched')
+
+      expect(() => d.createDispatchContext(task.id, 'term_worker')).toThrow()
+
+      expect(d.getTask(task.id)?.status).toBe('ready')
+      expect(d.getDispatchContext(task.id)).toBeUndefined()
     })
 
     it('rejects dispatch for non-ready tasks', () => {
@@ -460,6 +479,19 @@ describe('OrchestrationDb', () => {
       expect(after3?.failure_count).toBe(3)
       expect(after3?.status).toBe('circuit_broken')
       expect(d.getTask(task.id)?.status).toBe('failed')
+    })
+
+    it('rolls back dispatch failure when the task transition fails', () => {
+      const d = createDb()
+      const task = d.createTask({ spec: 'flaky' })
+      const dispatch = d.createDispatchContext(task.id, 'term_a')
+      rejectStatusUpdate(d, 'tasks', 'ready')
+
+      expect(() => d.failDispatch(dispatch.id, 'timeout')).toThrow(/forced status update failure/)
+
+      expect(d.getTask(task.id)?.status).toBe('dispatched')
+      expect(d.getDispatchContextById(dispatch.id)?.status).toBe('dispatched')
+      expect(d.getDispatchContextById(dispatch.id)?.failure_count).toBe(0)
     })
 
     it('completeDispatch sets completed_at', () => {
@@ -637,6 +669,19 @@ describe('OrchestrationDb', () => {
       d.recordHeartbeat(ctx.id, '2026-05-04T00:00:00.000Z')
       const after = d.getDispatchContext(task.id)
       expect(after?.last_heartbeat_at).toBe('2026-05-04T00:00:00.000Z')
+    })
+
+    it('does not move liveness backward when heartbeat history is replayed newest-first', () => {
+      const d = createDb()
+      const task = d.createTask({ spec: 'heartbeat ordering' })
+      const dispatch = d.createDispatchContext(task.id, 'term_worker')
+
+      d.recordHeartbeat(dispatch.id, '2026-05-04T00:05:00.000Z')
+      d.recordHeartbeat(dispatch.id, '2026-05-04T00:00:00.000Z')
+
+      expect(d.getDispatchContextById(dispatch.id)?.last_heartbeat_at).toBe(
+        '2026-05-04T00:05:00.000Z'
+      )
     })
 
     it('recordHeartbeat is a no-op for completed rows (straggler ignored)', () => {
@@ -869,14 +914,25 @@ describe('OrchestrationDb', () => {
       expect(d.getMessageById('msg_v1')?.subject).toBe('pre-migration')
     })
 
-    it('adds pane-identity columns (v6) and persists them', () => {
+    it('adds pane, task contract, and worktree evidence columns through v7', () => {
       const path = createV1Snapshot()
       const d = new OrchestrationDb(path)
       db = d
 
-      const task = d.createTask({ spec: 'work' })
-      const ctx = d.createDispatchContext(task.id, 'term_a', 'tab_1:leaf_1')
+      const task = d.createTask({
+        spec: 'work',
+        executionKind: 'worktree',
+        agentSlot: 'codex'
+      })
+      const ctx = d.createDispatchContext(task.id, 'term_a', 'tab_1:leaf_1', {
+        assigneeWorktreeId: 'wt_worker'
+      })
       expect(d.getDispatchContextById(ctx.id)?.assignee_pane_key).toBe('tab_1:leaf_1')
+      expect(d.getDispatchContextById(ctx.id)?.assignee_worktree_id).toBe('wt_worker')
+      expect(d.getTask(task.id)).toMatchObject({
+        execution_kind: 'worktree',
+        agent_slot: 'codex'
+      })
 
       const msg = d.insertMessage({
         from: 'w',

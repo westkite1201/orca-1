@@ -7,6 +7,62 @@
       "webDescription": "Retry the web client or reconnect to the paired runtime."
     }
   },
+  "harness": {
+    "activeRunConflict": "An active orchestrator run already exists. Clear this form to open it.",
+    "branchPending": "Branch pending",
+    "cancel": "Cancel",
+    "checkingExisting": "Checking for an existing run…",
+    "close": "Close",
+    "comparisonResultTitle": "Comparison result",
+    "comparisonRunDescription": "Compare both candidates, their Git evidence, and verification.",
+    "comparisonRunTitle": "Comparison run",
+    "coordinator": "Codex coordinator",
+    "description": "Give Jaws an issue or goal. It will plan lanes, isolate mutating work, integrate the result, and verify it.",
+    "discoveryRetrying": "Reconnecting to check for an existing run…",
+    "diff": {
+      "added": "{{count}} added",
+      "copied": "{{count}} copied",
+      "deleted": "{{count}} deleted",
+      "files": "{{count}} files",
+      "modified": "{{count}} modified",
+      "oneFile": "1 file",
+      "renamed": "{{count}} renamed",
+      "untracked": "{{count}} untracked"
+    },
+    "gitWorktree": "Git worktree",
+    "goal": "Issue or goal",
+    "goalPlaceholder": "Paste an issue or describe the outcome",
+    "newComparison": "New run",
+    "noGitRepository": "Add a Git repository to start an orchestrator run.",
+    "orchestratorResultTitle": "Orchestrator result",
+    "orchestratorRunDescription": "Track the coordinator, Git evidence, and verification for this run.",
+    "orchestratorRunTitle": "Orchestrator run",
+    "ownerUpgradeRequired": "Update the worktree owner runtime to use Orchestrator.",
+    "result": "Result",
+    "resume": "Resume",
+    "resuming": "Resuming…",
+    "retry": "Retry",
+    "runComparison": "Start orchestrator",
+    "selectWorktree": "Select a worktree",
+    "starting": "Starting…",
+    "status": {
+      "completed": "Completed",
+      "creating": "Creating",
+      "failed": "Failed",
+      "pending": "Pending",
+      "preparing": "Preparing",
+      "ready": "Ready",
+      "running": "Running",
+      "verified": "Verified",
+      "verifying": "Verifying",
+      "workerDone": "Worker done"
+    },
+    "verificationCommand": "Verification command",
+    "verificationCommandPassed": "Verification command passed · {{seconds}}s",
+    "verificationFailed": "Verification failed · {{seconds}}s",
+    "verificationPassed": "Verification passed · {{seconds}}s",
+    "verificationPlaceholder": "pnpm test"
+  },
   "settings": {
     "appearance": {
       "language": {
@@ -3955,7 +4011,8 @@
           "196c1b5362": "Open GitLab tasks",
           "0ccba862b8": "Open GitHub tasks",
           "fee535205b": "Tasks",
-          "d599269755": "Hide from sidebar"
+          "d599269755": "Hide from sidebar",
+          "harness": "Orchestrator"
         },
         "SidebarRepositoryFilterSection": {
           "d3a9c4cea1": "Clear",
@@ -12601,7 +12658,9 @@
         "ActivityTitlebarControls": {
           "f915168c8e": "unread",
           "d6a8de3934": "agents",
-          "dc708f3eff": "Close agents"
+          "dc708f3eff": "Close agents",
+          "closeHarness": "Close Orchestrator",
+          "harness": "Orchestrator"
         }
       },
       "confirmation": {

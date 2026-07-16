@@ -74,7 +74,6 @@ vi.mock('@/components/ui/context-menu', () => ({
 
 import {
   getSetupGuideSidebarEntryReady,
-  shouldShowAgentsButton,
   shouldShowAutomationsButton,
   shouldShowMobileButton,
   shouldShowSetupGuideEntry
@@ -197,26 +196,18 @@ describe('SidebarNav', () => {
     setSidebarState()
   })
 
-  it('hides the Agents entry while settings are loading', () => {
-    expect(shouldShowAgentsButton(null)).toBe(false)
-  })
-
-  it('hides the Agents entry while the experimental Agents view is off', () => {
-    expect(
-      shouldShowAgentsButton({
+  it('always shows Orchestrator and opens it when selected', async () => {
+    setSidebarState({
+      settings: {
         ...getDefaultSettings('/tmp'),
         experimentalActivity: false
-      })
-    ).toBe(false)
-  })
+      }
+    })
+    const container = await renderSidebarNav()
 
-  it('shows the Agents entry when the experimental Agents view is on', () => {
-    expect(
-      shouldShowAgentsButton({
-        ...getDefaultSettings('/tmp'),
-        experimentalActivity: true
-      })
-    ).toBe(true)
+    await clickButton(getButtonByText(container, 'Orchestrator'))
+
+    expect(mocks.openActivityPage).toHaveBeenCalledOnce()
   })
 
   it('shows the Mobile entry by default for older settings', () => {
@@ -232,6 +223,7 @@ describe('SidebarNav', () => {
     const container = await renderSidebarNav()
 
     expect(queryButtonByText(container, 'Automations')).not.toBeNull()
+    expect(queryButtonByText(container, 'Orchestrator')).not.toBeNull()
     expect(queryButtonByText(container, 'Orca Mobile')).not.toBeNull()
 
     await act(async () => {
@@ -239,6 +231,7 @@ describe('SidebarNav', () => {
     })
 
     expect(queryButtonByText(container, '自动化')).not.toBeNull()
+    expect(queryButtonByText(container, '编排器')).not.toBeNull()
     expect(queryButtonByText(container, 'Orca 手机端')).not.toBeNull()
   })
 
@@ -250,6 +243,7 @@ describe('SidebarNav', () => {
     })
 
     expect(queryButtonByText(container, '[Automations]')).not.toBeNull()
+    expect(queryButtonByText(container, '[Orchestrator]')).not.toBeNull()
     expect(queryButtonByText(container, '[Orca Mobile]')).not.toBeNull()
   })
 
