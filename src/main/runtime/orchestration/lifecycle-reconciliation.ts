@@ -4,7 +4,7 @@ import { parsePaneKey } from '../../../shared/stable-pane-id'
 
 // Why: the tab half can change on pane break-out, while opaque legacy keys
 // have no safe equivalence beyond exact equality.
-function isSamePane(assigneePaneKey: string, senderPaneKey: string): boolean {
+export function hasSamePaneIdentity(assigneePaneKey: string, senderPaneKey: string): boolean {
   if (assigneePaneKey === senderPaneKey) {
     return true
   }
@@ -19,7 +19,7 @@ function hasLifecycleAuthority(
 ): boolean {
   if (dispatch.assignee_pane_key) {
     return Boolean(
-      msg.sender_pane_key && isSamePane(dispatch.assignee_pane_key, msg.sender_pane_key)
+      msg.sender_pane_key && hasSamePaneIdentity(dispatch.assignee_pane_key, msg.sender_pane_key)
     )
   }
   // Why: rows created before pane identity existed can only use the exact

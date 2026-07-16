@@ -7,6 +7,62 @@
       "webDescription": "Vuelva a cargar el cliente web o vuelva a conectarse al servidor Orca vinculado."
     }
   },
+  "harness": {
+    "activeRunConflict": "Ya hay una ejecución activa del orquestador. Vacía este formulario para abrirla.",
+    "branchPending": "Rama pendiente",
+    "cancel": "Cancelar",
+    "checkingExisting": "Buscando una ejecución existente…",
+    "close": "Cerrar",
+    "comparisonResultTitle": "Resultado de la comparación",
+    "comparisonRunDescription": "Compara ambos candidatos, su evidencia de Git y la verificación.",
+    "comparisonRunTitle": "Ejecución comparativa",
+    "coordinator": "Coordinador Codex",
+    "description": "Dale a Jaws una incidencia o un objetivo. Planificará líneas de trabajo, aislará los cambios, integrará el resultado y lo verificará.",
+    "discoveryRetrying": "Volviendo a conectar para buscar una ejecución existente…",
+    "diff": {
+      "added": "{{count}} añadidos",
+      "copied": "{{count}} copiados",
+      "deleted": "{{count}} eliminados",
+      "files": "{{count}} archivos",
+      "modified": "{{count}} modificados",
+      "oneFile": "1 archivo",
+      "renamed": "{{count}} renombrados",
+      "untracked": "{{count}} sin seguimiento"
+    },
+    "gitWorktree": "Worktree de Git",
+    "goal": "Incidencia u objetivo",
+    "goalPlaceholder": "Pega una incidencia o describe el resultado",
+    "newComparison": "Nueva ejecución",
+    "noGitRepository": "Añade un repositorio Git para iniciar una ejecución del orquestador.",
+    "orchestratorResultTitle": "Resultado del orquestador",
+    "orchestratorRunDescription": "Sigue al coordinador, la evidencia de Git y la verificación de esta ejecución.",
+    "orchestratorRunTitle": "Ejecución del orquestador",
+    "ownerUpgradeRequired": "Actualiza el entorno propietario del worktree para usar el Orquestador.",
+    "result": "Resultado",
+    "resume": "Reanudar",
+    "resuming": "Reanudando…",
+    "retry": "Reintentar",
+    "runComparison": "Iniciar orquestador",
+    "selectWorktree": "Selecciona un worktree",
+    "starting": "Iniciando…",
+    "status": {
+      "completed": "Completado",
+      "creating": "Creando",
+      "failed": "Fallido",
+      "pending": "Pendiente",
+      "preparing": "Preparando",
+      "ready": "Listo",
+      "running": "En curso",
+      "verified": "Verificado",
+      "verifying": "Verificando",
+      "workerDone": "Trabajo terminado"
+    },
+    "verificationCommand": "Comando de verificación",
+    "verificationCommandPassed": "Comando de verificación superado · {{seconds}} s",
+    "verificationFailed": "Verificación fallida · {{seconds}} s",
+    "verificationPassed": "Verificación superada · {{seconds}} s",
+    "verificationPlaceholder": "pnpm test"
+  },
   "settings": {
     "appearance": {
       "language": {
@@ -4140,7 +4196,8 @@
           "196c1b5362": "Abrir tareas de GitLab",
           "0ccba862b8": "Abrir tareas de GitHub",
           "fee535205b": "Tareas",
-          "d599269755": "Ocultar de la barra lateral"
+          "d599269755": "Ocultar de la barra lateral",
+          "harness": "Orquestador"
         },
         "SidebarRepositoryFilterSection": {
           "d3a9c4cea1": "Limpiar",
@@ -13518,7 +13575,9 @@
         "ActivityTitlebarControls": {
           "f915168c8e": "no leído",
           "d6a8de3934": "agentes",
-          "dc708f3eff": "Agents cercanos"
+          "dc708f3eff": "Agents cercanos",
+          "closeHarness": "Cerrar Orquestador",
+          "harness": "Orquestador"
         }
       },
       "confirmation": {

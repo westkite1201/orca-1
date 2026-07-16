@@ -7,6 +7,62 @@
       "webDescription": "웹 클라이언트를 다시 시도하거나 페어링된 런타임에 다시 연결하세요."
     }
   },
+  "harness": {
+    "activeRunConflict": "실행 중인 오케스트레이터 작업이 이미 있습니다. 이 양식을 비우면 해당 작업을 엽니다.",
+    "branchPending": "브랜치 생성 대기 중",
+    "cancel": "취소",
+    "checkingExisting": "기존 실행을 확인하는 중…",
+    "close": "닫기",
+    "comparisonResultTitle": "비교 결과",
+    "comparisonRunDescription": "두 후보의 Git 변경 증거와 검증 결과를 비교합니다.",
+    "comparisonRunTitle": "비교 실행",
+    "coordinator": "Codex 코디네이터",
+    "description": "Jaws에 이슈나 목표를 주면 작업 레인을 계획하고, 변경 작업을 격리해 실행한 뒤 결과를 통합하고 검증합니다.",
+    "discoveryRetrying": "기존 실행을 확인하기 위해 다시 연결하는 중…",
+    "diff": {
+      "added": "추가 {{count}}개",
+      "copied": "복사 {{count}}개",
+      "deleted": "삭제 {{count}}개",
+      "files": "파일 {{count}}개",
+      "modified": "수정 {{count}}개",
+      "oneFile": "파일 1개",
+      "renamed": "이름 변경 {{count}}개",
+      "untracked": "추적 안 됨 {{count}}개"
+    },
+    "gitWorktree": "Git 워크트리",
+    "goal": "이슈 또는 목표",
+    "goalPlaceholder": "이슈를 붙여넣거나 원하는 결과를 설명하세요",
+    "newComparison": "새 실행",
+    "noGitRepository": "오케스트레이터를 시작하려면 Git 저장소를 추가하세요.",
+    "orchestratorResultTitle": "오케스트레이터 결과",
+    "orchestratorRunDescription": "이 실행의 코디네이터, Git 변경 증거, 검증 상태를 추적합니다.",
+    "orchestratorRunTitle": "오케스트레이터 실행",
+    "ownerUpgradeRequired": "Orchestrator를 사용하려면 작업 트리 소유자 런타임을 업데이트하세요.",
+    "result": "결과",
+    "resume": "재개",
+    "resuming": "재개 중…",
+    "retry": "다시 시도",
+    "runComparison": "오케스트레이터 시작",
+    "selectWorktree": "워크트리 선택",
+    "starting": "시작 중…",
+    "status": {
+      "completed": "완료",
+      "creating": "생성 중",
+      "failed": "실패",
+      "pending": "대기 중",
+      "preparing": "준비 중",
+      "ready": "준비 완료",
+      "running": "실행 중",
+      "verified": "검증 완료",
+      "verifying": "검증 중",
+      "workerDone": "작업 완료"
+    },
+    "verificationCommand": "검증 명령",
+    "verificationCommandPassed": "검증 명령 통과 · {{seconds}}초",
+    "verificationFailed": "검증 실패 · {{seconds}}초",
+    "verificationPassed": "검증 통과 · {{seconds}}초",
+    "verificationPlaceholder": "pnpm test"
+  },
   "settings": {
     "appearance": {
       "language": {
@@ -4121,7 +4177,8 @@
           "196c1b5362": "GitLab 작업 열기",
           "0ccba862b8": "GitHub 작업 열기",
           "fee535205b": "작업",
-          "d599269755": "사이드바에서 숨기기"
+          "d599269755": "사이드바에서 숨기기",
+          "harness": "오케스트레이터"
         },
         "SidebarRepositoryFilterSection": {
           "d3a9c4cea1": "지우기",
@@ -13518,7 +13575,9 @@
         "ActivityTitlebarControls": {
           "f915168c8e": "읽지 않음",
           "d6a8de3934": "에이전트",
-          "dc708f3eff": "agents 닫기"
+          "dc708f3eff": "agents 닫기",
+          "closeHarness": "오케스트레이터 닫기",
+          "harness": "오케스트레이터"
         }
       },
       "confirmation": {

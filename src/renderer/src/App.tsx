@@ -20,7 +20,7 @@ import {
   PanelLeft,
   PanelRight
 } from 'lucide-react'
-import logo from '../../../resources/logo.svg'
+import logo from '../../../resources/jaws-logo.png'
 import productProfile from '../../shared/product-profile.json'
 import { SYNC_FIT_PANES_EVENT, TOGGLE_TERMINAL_PANE_EXPAND_EVENT } from '@/constants/terminal'
 import { syncZoomCSSVar } from '@/lib/ui-zoom'
@@ -2023,13 +2023,8 @@ function App(): React.JSX.Element {
             {settings?.showTitlebarAppName !== false && (
               <ContextMenu>
                 <ContextMenuTrigger asChild>
-                  <div
-                    className="titlebar-app-name"
-                    aria-label={translate('auto.App.5096cbbc86', 'Orca')}
-                  >
-                    <span className="titlebar-app-name-main">
-                      {translate('auto.App.5096cbbc86', 'Orca')}
-                    </span>
+                  <div className="titlebar-app-name" aria-label={productProfile.name}>
+                    <span className="titlebar-app-name-main">{productProfile.name}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>

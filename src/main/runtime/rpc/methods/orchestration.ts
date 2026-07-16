@@ -148,6 +148,7 @@ const TaskCreateParams = z.object({
 const TaskListParams = z.object({
   status: z.enum(['pending', 'ready', 'dispatched', 'completed', 'failed', 'blocked']).optional(),
   ready: OptionalBoolean,
+  parent: OptionalString,
   // Why: server-side truncation keeps --brief cheap over SSH/relay instead of shipping full specs the CLI throws away.
   brief: OptionalBoolean,
   run: OptionalString,
@@ -1013,11 +1014,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               requireCurrentConsumer: params.run === undefined
             })
       // Why: listTasksWithDispatch adds assignee_handle + dispatch_id (NULL for non-dispatched), so legacy-shape consumers are unaffected.
-      const joined = db.listTasksWithDispatch({
-        status: params.status as TaskStatus,
-        ready: params.ready,
-        runId: run.id
-      })
+      const joined = db
+        .listTasksWithDispatch({
+          status: params.status as TaskStatus,
+          ready: params.ready,
+          runId: run.id
+        })
+        .filter((task) => !params.parent || task.parent_id === params.parent)
       const tasks = joined.map((row) => {
         const { assignee_handle, dispatch_id, ...base } = row
         if (base.status === 'dispatched') {
@@ -1175,10 +1178,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         throw new Error('Missing --task')
       }
       const ctx = db.getDispatchContext(params.task)
+      const task = db.getTask(params.task)
 
       // Why: the preamble is derived from the current task spec, so it can be regenerated deterministically even after dispatch completes.
       if (params.preamble) {
-        const task = db.getTask(params.task)
         if (!task) {
           throw new Error(`Task not found: ${params.task}`)
         }
@@ -1193,10 +1196,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           devMode: params.devMode,
           ...(ctx ? { cliCommand: runtime.getTerminalOrchestrationCliCommand(workerHandle) } : {})
         })
-        return { dispatch: ctx ?? null, preamble }
+        return { dispatch: ctx ?? null, task, preamble }
       }
 
-      return { dispatch: ctx ?? null }
+      return { dispatch: ctx ?? null, task: task ?? null }
     }
   }),
 

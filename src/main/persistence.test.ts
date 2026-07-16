@@ -1746,7 +1746,7 @@ describe('Store', () => {
     expect(store.listHarnessRuns()).toEqual([])
   })
 
-  it('persists Harness runs with fixed Codex and Claude candidates', async () => {
+  it('persists comparison runs with fixed Codex and Claude candidates', async () => {
     const store = await createStore()
     const run = store.createHarnessRun({
       repoId: 'repo-1',
@@ -1758,6 +1758,7 @@ describe('Store', () => {
     })
 
     expect(run).toMatchObject({
+      mode: 'comparison',
       repoId: 'repo-1',
       sourceWorktreeId: 'repo-1::/repo',
       sourceWorktreePath: '/repo',
@@ -1773,7 +1774,271 @@ describe('Store', () => {
 
     const reloaded = await createStore()
     expect(reloaded.listHarnessRuns()).toEqual([run])
+    expect(reloaded.getHarnessRun(run.id)).toEqual(run)
+    expect(reloaded.getHarnessRun('missing-run')).toBeNull()
     expect(reloaded.listHarnessRuns('another-repo')).toEqual([])
+  })
+
+  it('persists an orchestrator run with one Codex coordinator', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the issue',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+
+    expect(run).toMatchObject({
+      mode: 'orchestrator',
+      candidates: [{ agent: 'codex', status: 'pending' }]
+    })
+    expect(run.candidates).toHaveLength(1)
+    expect((await createStore()).getHarnessRun(run.id)).toEqual(run)
+  })
+
+  it('timestamps a failed single-candidate orchestrator run as terminal', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Coordinate the issue',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+
+    const failed = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'failed',
+      error: 'Coordinator stopped.'
+    })
+
+    expect(failed.completedAt).not.toBeNull()
+  })
+
+  it('normalizes newly required Harness candidate fields without replacing valid data', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const persisted = readDataFile() as PersistedState
+    const legacyRun = persisted.harnessRuns[0] as unknown as Record<string, unknown>
+    delete legacyRun.mode
+    const legacyCandidate = persisted.harnessRuns[0].candidates[0] as unknown as Record<
+      string,
+      unknown
+    >
+    delete legacyCandidate.agentTerminalPaneKey
+    delete legacyCandidate.verificationTerminalHandle
+    delete legacyCandidate.verificationTerminalPaneKey
+    delete legacyCandidate.verificationTerminalOwnership
+    delete legacyCandidate.workerResult
+    delete legacyCandidate.recoveryStartedAt
+    const currentCandidate = persisted.harnessRuns[0].candidates[1]
+    const paneKey = makePaneKey('tab-claude', TEST_LEAF_1)
+    const workerResult = {
+      messageId: 'message-claude',
+      subject: 'worker_done',
+      body: 'Finished the task.',
+      payload: '{"ok":true}',
+      receivedAt: 123
+    }
+    currentCandidate.agentTerminalPaneKey = paneKey
+    currentCandidate.verificationTerminalHandle = 'verify-h1'
+    currentCandidate.verificationTerminalPaneKey = paneKey
+    currentCandidate.verificationTerminalOwnership = 'owned'
+    currentCandidate.workerResult = workerResult
+    currentCandidate.recoveryStartedAt = 456
+    writeDataFile(persisted)
+
+    const reloaded = await createStore()
+
+    expect(reloaded.getHarnessRun(run.id)).toMatchObject({ mode: 'comparison' })
+    expect(reloaded.getHarnessRun(run.id)?.candidates).toMatchObject([
+      {
+        agentTerminalPaneKey: null,
+        verificationTerminalHandle: null,
+        verificationTerminalPaneKey: null,
+        verificationTerminalOwnership: null,
+        workerResult: null,
+        recoveryStartedAt: null
+      },
+      {
+        agentTerminalPaneKey: paneKey,
+        verificationTerminalHandle: 'verify-h1',
+        verificationTerminalPaneKey: paneKey,
+        verificationTerminalOwnership: 'owned',
+        workerResult,
+        recoveryStartedAt: 456
+      }
+    ])
+    reloaded.flush()
+    const rewritten = readDataFile() as PersistedState
+    expect(rewritten.harnessRuns[0].candidates[0]).toMatchObject({
+      agentTerminalPaneKey: null,
+      verificationTerminalHandle: null,
+      verificationTerminalPaneKey: null,
+      verificationTerminalOwnership: null,
+      workerResult: null,
+      recoveryStartedAt: null
+    })
+  })
+
+  it('throws and rolls back a required Harness lifecycle write on disk failure', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Verify durable lifecycle writes',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const before = store.getHarnessRun(run.id)
+
+    rmSync(testState.dir, { recursive: true, force: true })
+    writeFileSync(testState.dir, 'block the data directory', 'utf-8')
+    try {
+      expect(() =>
+        store.updateHarnessCandidate(
+          run.id,
+          'codex',
+          { verificationTerminalOwnership: 'owned' },
+          { durability: 'required' }
+        )
+      ).toThrow()
+      expect(store.getHarnessRun(run.id)).toEqual(before)
+    } finally {
+      rmSync(testState.dir, { force: true })
+      mkdirSync(testState.dir, { recursive: true })
+    }
+  })
+
+  it('does not expose a Harness run when its initial durable write fails', async () => {
+    const store = await createStore()
+    rmSync(testState.dir, { recursive: true, force: true })
+    writeFileSync(testState.dir, 'block the data directory', 'utf-8')
+    try {
+      expect(() =>
+        store.createHarnessRun({
+          repoId: 'repo-1',
+          sourceWorktreeId: 'repo-1::/repo',
+          sourceWorktreePath: '/repo',
+          goal: 'Do not launch from an in-memory run',
+          verificationCommand: 'pnpm test',
+          baseSha: 'a'.repeat(40)
+        })
+      ).toThrow()
+      expect(store.listHarnessRuns()).toEqual([])
+    } finally {
+      rmSync(testState.dir, { force: true })
+      mkdirSync(testState.dir, { recursive: true })
+    }
+  })
+
+  it('keeps active Harness runs and only the 50 newest terminal runs on load', async () => {
+    const store = await createStore()
+    store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const persisted = readDataFile() as PersistedState
+    const template = persisted.harnessRuns[0]
+    const active = {
+      ...template,
+      id: 'active-old',
+      createdAt: -1,
+      updatedAt: -1,
+      candidates: template.candidates.map((candidate) => ({
+        ...candidate,
+        id: `active-${candidate.agent}`,
+        createdAt: -1,
+        updatedAt: -1
+      })) as typeof template.candidates
+    }
+    const terminalRuns = Array.from({ length: 52 }, (_, index) => ({
+      ...template,
+      id: `terminal-${index}`,
+      fatalError: 'Finished.',
+      createdAt: index,
+      updatedAt: index,
+      completedAt: index,
+      candidates: template.candidates.map((candidate) => ({
+        ...candidate,
+        id: `terminal-${index}-${candidate.agent}`,
+        createdAt: index,
+        updatedAt: index
+      })) as typeof template.candidates
+    }))
+    persisted.harnessRuns = [active, ...terminalRuns]
+    writeDataFile(persisted)
+
+    const reloaded = await createStore()
+    const retained = reloaded.listHarnessRuns()
+
+    expect(retained).toHaveLength(51)
+    expect(retained.some((run) => run.id === active.id)).toBe(true)
+    expect(retained.some((run) => run.id === 'terminal-0')).toBe(false)
+    expect(retained.some((run) => run.id === 'terminal-1')).toBe(false)
+    expect(retained.some((run) => run.id === 'terminal-2')).toBe(true)
+    reloaded.flush()
+    expect((readDataFile() as PersistedState).harnessRuns).toHaveLength(51)
+  })
+
+  it('prunes terminal Harness history as runs finish', async () => {
+    let now = 1_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now++)
+    const store = await createStore()
+    const terminalRunIds: string[] = []
+    try {
+      for (let index = 0; index < 52; index += 1) {
+        const run = store.createHarnessRun({
+          repoId: 'repo-1',
+          sourceWorktreeId: 'repo-1::/repo',
+          sourceWorktreePath: '/repo',
+          goal: `Implement comparison ${index}`,
+          verificationCommand: 'pnpm test',
+          baseSha: 'a'.repeat(40)
+        })
+        terminalRunIds.push(run.id)
+        if (index % 2 === 0) {
+          store.failHarnessRun(run.id, 'Stopped.')
+        } else {
+          store.updateHarnessCandidate(run.id, 'codex', { status: 'failed', error: 'Stopped.' })
+          store.updateHarnessCandidate(run.id, 'claude', { status: 'failed', error: 'Stopped.' })
+        }
+      }
+
+      const active = store.createHarnessRun({
+        repoId: 'repo-1',
+        sourceWorktreeId: 'repo-1::/repo',
+        sourceWorktreePath: '/repo',
+        goal: 'Keep this run active',
+        verificationCommand: 'pnpm test',
+        baseSha: 'a'.repeat(40)
+      })
+      const retained = store.listHarnessRuns()
+
+      expect(retained).toHaveLength(51)
+      expect(retained.some((run) => run.id === active.id)).toBe(true)
+      expect(retained.some((run) => run.id === terminalRunIds[0])).toBe(false)
+      expect(retained.some((run) => run.id === terminalRunIds[1])).toBe(false)
+      expect(retained.filter((run) => run.completedAt !== null)).toHaveLength(50)
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it('updates one Harness candidate without overwriting its sibling', async () => {
@@ -1802,7 +2067,14 @@ describe('Store', () => {
       dispatchId: 'dispatch-codex'
     })
     const workerDone = store.updateHarnessCandidate(run.id, 'codex', {
-      status: 'worker_done'
+      status: 'worker_done',
+      workerResult: {
+        messageId: 'message-codex',
+        subject: 'worker_done',
+        body: 'Implemented the comparison view.',
+        payload: null,
+        receivedAt: Date.now()
+      }
     })
     const workerCompletedAt = workerDone.candidates[0].workerCompletedAt!
     store.updateHarnessCandidate(run.id, 'codex', {
@@ -1849,6 +2121,9 @@ describe('Store', () => {
       error: 'Claude authentication is required.'
     })
     expect(completed.completedAt).not.toBeNull()
+    expect(() =>
+      store.updateHarnessCandidate(run.id, 'claude', { error: 'rewritten evidence' })
+    ).toThrow('immutable after completion')
 
     const reloaded = await createStore()
     expect(reloaded.listHarnessRuns()[0]).toEqual(completed)

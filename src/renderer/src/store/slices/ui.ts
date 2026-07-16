@@ -494,17 +494,10 @@ function hydratedUIPartialMatchesState(state: AppState, hydrated: Partial<UISlic
   )
 }
 
-function sanitizeHydratedActiveView(
-  value: PersistedUIState['activeView'],
-  experimentalActivityEnabled: boolean
-): TopLevelView {
+function sanitizeHydratedActiveView(value: PersistedUIState['activeView']): TopLevelView {
   // Why: older data (pre-activeView) or a view a different build doesn't have
   // falls back to terminal rather than rendering nothing.
   if (!isTopLevelView(value)) {
-    return 'terminal'
-  }
-  // Why: activity is hidden when its setting is off, so gate only it (mobile/automations stay functional when hidden).
-  if (value === 'activity' && !experimentalActivityEnabled) {
     return 'terminal'
   }
   return value
@@ -1406,16 +1399,12 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
         worktreeNavHistoryIndex: nextHistoryIndex
       }
     }),
-  openActivityPage: () => {
-    if (get().settings?.experimentalActivity !== true) {
-      return
-    }
+  openActivityPage: () =>
     set((state) => ({
       activeView: 'activity',
       previousViewBeforeActivity:
         state.activeView === 'activity' ? state.previousViewBeforeActivity : state.activeView
-    }))
-  },
+    })),
   closeActivityPage: () =>
     set((state) => ({
       activeView: state.previousViewBeforeActivity
@@ -1493,14 +1482,9 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
     }))
   },
   closeSettingsPage: () =>
-    set((state) => {
-      const previousView =
-        state.previousViewBeforeSettings === 'activity' &&
-        state.settings?.experimentalActivity !== true
-          ? 'terminal'
-          : state.previousViewBeforeSettings
-      return { activeView: previousView }
-    }),
+    set((state) => ({
+      activeView: state.previousViewBeforeSettings
+    })),
   settingsNavigationTarget: null,
   openSettingsTarget: (target) => set({ settingsNavigationTarget: target }),
   clearSettingsTarget: () => set({ settingsNavigationTarget: null }),
@@ -2520,10 +2504,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
           ui.workspaceCleanup?.dismissals
         ),
         // Why: restore only on startup; on 'sync' broadcasts it would clobber the window's current per-window view.
-        activeView:
-          source === 'startup'
-            ? sanitizeHydratedActiveView(ui.activeView, s.settings?.experimentalActivity === true)
-            : s.activeView,
+        activeView: source === 'startup' ? sanitizeHydratedActiveView(ui.activeView) : s.activeView,
         persistedUIReady: true
       }
       // Why: return the same ref on identical hydration so App's debounced writer doesn't echo it back to main.

@@ -729,6 +729,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       status: getOptionalStringFlag(flags, 'status'),
       ready: flags.has('ready') ? true : undefined,
       brief: brief ? true : undefined,
+      parent: getOptionalStringFlag(flags, 'parent'),
       run,
       callerTerminalHandle
     })
