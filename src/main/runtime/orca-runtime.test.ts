@@ -1734,6 +1734,61 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
+  it('resolves a persisted pane key after the pane moves to another tab', () => {
+    const runtime = createRuntime()
+    const leafId = '99999999-9999-4999-8999-999999999999'
+    const oldPaneKey = makePaneKey('tab-before-breakout', leafId)
+    runtime.attachWindow(TEST_WINDOW_ID)
+    runtime.syncWindowGraph(TEST_WINDOW_ID, {
+      tabs: [
+        {
+          tabId: 'tab-before-breakout',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Codex',
+          activeLeafId: leafId,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-before-breakout',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId,
+          paneRuntimeId: 1,
+          ptyId: 'pty-breakout'
+        }
+      ]
+    })
+    runtime.resolveTerminalPane(oldPaneKey)
+
+    runtime.syncWindowGraph(TEST_WINDOW_ID, {
+      tabs: [
+        {
+          tabId: 'tab-after-breakout',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Codex',
+          activeLeafId: leafId,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-after-breakout',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId,
+          paneRuntimeId: 1,
+          ptyId: 'pty-breakout'
+        }
+      ]
+    })
+
+    expect(runtime.resolveTerminalPane(oldPaneKey)).toMatchObject({
+      tabId: 'tab-after-breakout',
+      leafId,
+      ptyId: 'pty-breakout'
+    })
+  })
+
   it('drops a stale leaf when a woken agent PTY is re-keyed to a new leaf on renderer reload', async () => {
     const runtime = createRuntime()
     const tabId = 'tab-1'
@@ -8666,6 +8721,27 @@ describe('OrcaRuntimeService', () => {
     expect(confirmForegroundProcess).toHaveBeenCalledWith('pty-1')
   })
 
+  it('uses strong provider confirmation to resolve the exact target agent type', async () => {
+    const getForegroundProcess = vi.fn(async () => 'powershell.exe')
+    const confirmForegroundProcess = vi.fn(async () => 'codex')
+    const { runtime, handle } = await createExplicitAgentStatusHarness({
+      getForegroundProcess,
+      confirmForegroundProcess
+    })
+
+    await expect(runtime.getTerminalAgentType(handle)).resolves.toBe('codex')
+    expect(getForegroundProcess).toHaveBeenCalledWith('pty-1')
+    expect(confirmForegroundProcess).toHaveBeenCalledWith('pty-1')
+  })
+
+  it('uses fresh typed hook evidence when foreground identity is unavailable', async () => {
+    const { runtime, handle } = await createExplicitAgentStatusHarness({
+      getForegroundProcess: async () => null
+    })
+
+    await expect(runtime.getTerminalAgentType(handle)).resolves.toBe('codex')
+  })
+
   it('calls foreground confirmation with its controller receiver', async () => {
     const getForegroundProcess = vi.fn(async () => 'powershell.exe')
     const confirmForegroundProcess = vi.fn(
@@ -10285,6 +10361,85 @@ describe('OrcaRuntimeService', () => {
       handle: expect.stringMatching(/^term_/)
     })
     expect(created.warning).toBeUndefined()
+  })
+
+  it('does not use launch metadata as exact current agent evidence', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-agent-slot' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'codex',
+      launchAgent: 'codex',
+      presentation: 'background'
+    })
+
+    await expect(runtime.getTerminalAgentType(created.handle)).resolves.toBeNull()
+  })
+
+  it('persists Harness verification PTY identity before spawning and proves shutdown', async () => {
+    const order: string[] = []
+    const updateHarnessCandidate = vi.fn(
+      (_runId: string, _agent: string, patch: { verificationTerminalOwnership?: string }) => {
+        order.push(patch.verificationTerminalOwnership ?? 'persist')
+        return {} as never
+      }
+    )
+    const runtime = new OrcaRuntimeService({ ...store, updateHarnessCandidate } as never)
+    const stopAndWait = vi.fn(async () => true)
+    const spawn = vi.fn(async (options: { command?: string }) => {
+      order.push('spawn')
+      const completionToken = /(__JAWS_VERIFY_[a-f0-9]+__)/.exec(options.command ?? '')?.[1]
+      setTimeout(() => {
+        runtime.onPtyData('pty-verification', `passed\n${completionToken}0\n`, Date.now())
+      }, 0)
+      return { id: 'pty-verification' }
+    })
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill: () => true,
+      stopAndWait,
+      getForegroundProcess: async () => null
+    })
+
+    const result = await runtime.runHarnessVerification({
+      runId: 'run-1',
+      agent: 'codex',
+      worktree: `id:${TEST_WORKTREE_ID}`,
+      command: 'pnpm test',
+      timeoutSeconds: 60
+    })
+
+    expect(order).toEqual(['owned', 'spawn', 'stopped'])
+    expect(updateHarnessCandidate).toHaveBeenCalledWith(
+      'run-1',
+      'codex',
+      {
+        verificationTerminalHandle: expect.stringMatching(/^term_/),
+        verificationTerminalPaneKey: expect.stringMatching(/^[0-9a-f-]+:[0-9a-f-]+$/),
+        verificationTerminalOwnership: 'owned'
+      },
+      { durability: 'required' }
+    )
+    expect(updateHarnessCandidate).toHaveBeenCalledWith(
+      'run-1',
+      'codex',
+      { verificationTerminalOwnership: 'stopped' },
+      { durability: 'required' }
+    )
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringContaining('__JAWS_VERIFY_'),
+        persistHostSessionBinding: true,
+        worktreeId: TEST_WORKTREE_ID
+      })
+    )
+    expect(stopAndWait).toHaveBeenCalledWith('pty-verification')
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, stdout: 'passed' })
   })
 
   it('waits for exit on background terminal handles', async () => {
@@ -24869,7 +25024,7 @@ describe('OrcaRuntimeService', () => {
     ])
   })
 
-  it('infers orchestration lineage from task-id comments when dispatch is completed', async () => {
+  it('prefers persisted Harness integration lineage over a completed worker attempt', async () => {
     const workerPath = '/tmp/worktree-worker'
     const childPath = '/tmp/workspaces/worker-child'
     const childId = `${TEST_REPO_ID}::${childPath}`
@@ -24894,13 +25049,39 @@ describe('OrcaRuntimeService', () => {
       setWorktreeLineage
     }
     const runtime = new OrcaRuntimeService(runtimeStore as never)
-    const workerHandle = runtime.preAllocateHandleForPty('pty-worker')
     runtime.setOrchestrationDb({
-      getDispatchContext: vi.fn(() => ({
-        task_id: 'task_abc123',
-        assignee_handle: workerHandle,
-        status: 'completed'
-      }))
+      getTask: vi.fn((id: string) =>
+        id === 'task_abc123'
+          ? {
+              id,
+              parent_id: 'task_root123',
+              created_by_terminal_handle: 'term_coord'
+            }
+          : id === 'task_root123'
+            ? {
+                id,
+                parent_id: null,
+                created_by_terminal_handle: 'jaws-harness:run-1'
+              }
+            : undefined
+      ),
+      getDispatchContext: vi.fn((id: string) =>
+        id === 'task_root123'
+          ? {
+              id: 'ctx_root',
+              task_id: id,
+              assignee_handle: 'term_coord',
+              assignee_worktree_id: workerId,
+              status: 'dispatched'
+            }
+          : {
+              id: 'ctx_old_worker',
+              task_id: 'task_abc123',
+              assignee_handle: 'term_stale_worker',
+              assignee_worktree_id: `${TEST_REPO_ID}::/tmp/old-worker`,
+              status: 'completed'
+            }
+      )
     } as never)
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, {
@@ -24949,7 +25130,9 @@ describe('OrcaRuntimeService', () => {
     const result = await runtime.createManagedWorktree({
       repoSelector: 'id:repo-1',
       name: 'worker-child',
-      comment: 'Created via orchestration task task_abc123'
+      comment: 'Created via orchestration task task_abc123',
+      // Mirrors the normal CLI environment inherited by a coordinator shell.
+      lineage: { envParentWorkspace: `worktree:${workerId}` }
     })
 
     expect(result.lineage).toMatchObject({

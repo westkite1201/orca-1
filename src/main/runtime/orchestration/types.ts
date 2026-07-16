@@ -12,6 +12,8 @@ export type MessagePriority = 'normal' | 'high' | 'urgent'
 
 export type TaskStatus = 'pending' | 'ready' | 'dispatched' | 'completed' | 'failed' | 'blocked'
 
+export type TaskExecutionKind = 'read-only' | 'worktree'
+
 export type DispatchStatus = 'pending' | 'dispatched' | 'completed' | 'failed' | 'circuit_broken'
 
 export type GateStatus = 'pending' | 'resolved' | 'timeout'
@@ -41,6 +43,8 @@ export type TaskRow = {
   created_by_terminal_handle: string | null
   task_title: string | null
   display_name: string | null
+  execution_kind: TaskExecutionKind | null
+  agent_slot: string | null
   spec: string
   status: TaskStatus
   deps: string
@@ -54,6 +58,7 @@ export type DispatchContextRow = {
   task_id: string
   assignee_handle: string | null
   assignee_pane_key: string | null
+  assignee_worktree_id: string | null
   status: DispatchStatus
   failure_count: number
   last_failure: string | null

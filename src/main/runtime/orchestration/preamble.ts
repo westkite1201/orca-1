@@ -30,6 +30,9 @@ export type PreambleParams = {
   // Why: prompt-returning agents should idle after worker_done, while bare
   // shells have no agent prompt for Orca to reuse.
   workerKind?: 'prompt-returning-agent' | 'bare-shell'
+  // Why: Harness has no interactive coordinator inbox, so workers must not
+  // enter a reply wait that its synthetic owner can never satisfy.
+  interactionMode?: 'coordinated' | 'report-only'
 }
 
 // Why: 5 minutes is frequent enough that the coordinator's stale-heartbeat
@@ -53,7 +56,7 @@ export function buildDispatchPreamble(params: PreambleParams): string {
     workerKind: params.workerKind ?? 'prompt-returning-agent'
   })
 
-  const header = `You are working inside Orca, a multi-agent IDE. You are a dispatched worker.
+  let header = `You are working inside Orca, a multi-agent IDE. You are a dispatched worker.
 Your coordinator's terminal handle is: ${params.coordinatorHandle}
 Your task ID is: ${params.taskId}
 
@@ -125,6 +128,18 @@ Slack, GitHub comments, or any other channel to reach a human during the run.
 
 ${postDoneInstructions}`
 
+  if (params.interactionMode === 'report-only') {
+    const interactionStart = header.indexOf('  # Ask the coordinator a question')
+    const postDoneStart = header.indexOf('=== AFTER YOU SEND worker_done ===')
+    // Why: report-only workers still need lifecycle commands, but the synthetic
+    // Harness owner has no decision-gate or escalation reply loop.
+    header = `${header.slice(0, interactionStart)}${buildReportOnlyInstructions()}\n\n${header.slice(postDoneStart)}`
+    header = header.replace(
+      /Skip heartbeats only\n  # while blocked inside .*\n  # themselves liveness signals\./,
+      'Keep sending heartbeats until worker_done; this mode has no blocking reply channel.'
+    )
+  }
+
   // Why: the drift section fires only when the coordinator allowed dispatch
   // against a stale worktree (via `allow-stale-base: true` in the task spec,
   // see §3.4) OR when behind>0 but under the refusal threshold. Either way
@@ -137,6 +152,18 @@ ${postDoneInstructions}`
 
 === TASK ===
 ${params.taskSpec}`
+}
+
+function buildReportOnlyInstructions(): string {
+  return `=== NON-INTERACTIVE COMPARISON RULES ===
+
+This comparison has no interactive coordinator or human reply channel. Do not
+ask questions, open local user prompts, send decision-gate or escalation
+messages, or wait for coordinator input. Make the safest reasonable assumption
+that stays within the task and record it in your worker_done summary. If work
+cannot continue safely without approval or missing information, immediately
+send exactly one worker_done with subject "Failed: <reason>", explain what is
+blocked in the body, and stop.`
 }
 
 function buildPostWorkerDoneInstructions({

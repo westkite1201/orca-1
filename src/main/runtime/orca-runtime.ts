@@ -70,15 +70,19 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree-base-ref'
-import { OrchestrationDb } from './orchestration/db'
+import { OrchestrationDb, type TaskRow } from './orchestration/db'
 import { formatMessagesForInjection } from './orchestration/formatter'
+import { findHarnessTaskRoot } from './orchestration/harness-task-scope'
 import type {
   Automation,
   AutomationCreateInput,
+  AutomationPrecheckResult,
   AutomationRun,
   AutomationUpdateInput,
   AutomationWorkspaceMode
 } from '../../shared/automations-types'
+import { MAX_AUTOMATION_PRECHECK_OUTPUT_CHARS } from '../../shared/automation-precheck'
+import type { HarnessAgent } from '../../shared/harness-types'
 import type {
   AutomationWorkspaceProvenance,
   BaseRefSearchResult,
@@ -336,6 +340,11 @@ import type {
   BrowserScreencastResult
 } from '../../shared/runtime-types'
 import type { AutomationService } from '../automations/service'
+import { HarnessService, type HarnessStore } from '../harness/service'
+import { createHarnessRuntimeCaller } from '../harness/runtime-caller'
+import { runHarnessVerificationTerminal } from '../harness/verification-terminal-session'
+import { getRegisteredSshState } from '../ipc/ssh'
+import { getLocalPtyProvider, getSshPtyProvider } from '../ipc/pty'
 import { RuntimeBrowserCommands } from './orca-runtime-browser'
 import { buildHeadlessTerminalSplitLayout } from './headless-terminal-split-layout'
 import {
@@ -835,6 +844,11 @@ type RuntimeStore = {
   createAutomation?: Store['createAutomation']
   updateAutomation?: Store['updateAutomation']
   deleteAutomation?: Store['deleteAutomation']
+  listHarnessRuns?: Store['listHarnessRuns']
+  getHarnessRun?: Store['getHarnessRun']
+  createHarnessRun?: Store['createHarnessRun']
+  updateHarnessCandidate?: Store['updateHarnessCandidate']
+  failHarnessRun?: Store['failHarnessRun']
   getSparsePresets?: Store['getSparsePresets']
   saveSparsePreset?: Store['saveSparsePreset']
   getSettings(): {
@@ -1031,6 +1045,7 @@ type TerminalCreateOptions = {
   leafId?: string
   sessionId?: string
   persistHostSessionBinding?: boolean
+  onHandleAllocated?: (identity: { handle: string; paneKey: string }) => void
   // Why: the headless mobile-session create publishes its own authoritative
   // snapshot (with the correct target group) right after spawn. Skip the
   // intermediate pty-backed publish so the new tab doesn't briefly flash in
@@ -2174,6 +2189,8 @@ export class OrcaRuntimeService {
   private ptyForegroundAgentRefreshes = new Map<string, PtyForegroundAgentRefresh>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  private _harnessService: HarnessService | null = null
+  private resumeHarnessWhenPtyReady = false
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -2571,6 +2588,27 @@ export class OrcaRuntimeService {
         state.emulator.applyPushedViewAttributes(attributes)
       }
     })
+
+    if (
+      store?.listHarnessRuns &&
+      store.getHarnessRun &&
+      store.createHarnessRun &&
+      store.updateHarnessCandidate &&
+      store.failHarnessRun &&
+      store
+        .listHarnessRuns()
+        .some(
+          (run) =>
+            !run.fatalError &&
+            run.candidates.some(
+              (candidate) => candidate.status !== 'verified' && candidate.status !== 'failed'
+            )
+        )
+    ) {
+      // Why: worktree recovery can spawn an agent terminal, so defer it until
+      // the main process has attached the PTY controller that owns that spawn.
+      this.resumeHarnessWhenPtyReady = true
+    }
   }
 
   getLocalProvider(): IPtyProvider | null {
@@ -2930,6 +2968,150 @@ export class OrcaRuntimeService {
     this.automationService = service
   }
 
+  getHarnessService(): HarnessService {
+    if (this._harnessService) {
+      return this._harnessService
+    }
+    const store = this.store
+    if (
+      !store?.listHarnessRuns ||
+      !store.getHarnessRun ||
+      !store.createHarnessRun ||
+      !store.updateHarnessCandidate ||
+      !store.failHarnessRun
+    ) {
+      throw new Error('runtime_unavailable')
+    }
+    // Why: the runtime owning the worktrees must also own comparison execution,
+    // including when the desktop controls an SSH or paired runtime.
+    this._harnessService = new HarnessService(
+      store as RuntimeStore & HarnessStore,
+      createHarnessRuntimeCaller(this),
+      {
+        autoMonitor: this.ptyController !== null,
+        // Why: desktop RPC may arrive before its PTY bridge is attached; persist
+        // starts immediately but launch terminals only after that bridge is ready.
+        deferExecutionUntilMonitoring: true
+      }
+    )
+    return this._harnessService
+  }
+
+  async runHarnessVerification(args: {
+    runId: string
+    agent: HarnessAgent
+    worktree: string
+    command: string
+    timeoutSeconds: number
+  }): Promise<AutomationPrecheckResult> {
+    const worktree = await this.resolveWorktreeSelector(args.worktree)
+    const store = this.requireStore()
+    const repo = store.getRepo(worktree.repoId)
+    if (!repo) {
+      throw new Error('repo_not_found')
+    }
+    const remotePlatform = repo.connectionId
+      ? getRegisteredSshState(repo.connectionId)?.remotePlatform
+      : undefined
+    const windows = repo.connectionId
+      ? remotePlatform === 'win32'
+      : this.getAgentLaunchPlatformForRepo(repo) === 'win32'
+    // Why: verification is a managed PTY so restart recovery retains a stable
+    // pane identity and cannot release a possibly-live local or SSH process.
+    return await runHarnessVerificationTerminal({
+      command: args.command,
+      timeoutSeconds: args.timeoutSeconds,
+      windows,
+      session: {
+        create: async ({ command, onHandleAllocated }) =>
+          await this.createTerminal(`id:${worktree.id}`, {
+            command,
+            title: 'Jaws verification',
+            presentation: 'background',
+            persistHostSessionBinding: true,
+            onHandleAllocated
+          }),
+        read: async (handle) =>
+          await this.readTerminal(handle, {
+            limit: MAX_AUTOMATION_PRECHECK_OUTPUT_CHARS
+          }),
+        stop: async (handle) => await this.stopTerminalAndWait(handle)
+      },
+      onHandleAllocated: ({ handle, paneKey }) => {
+        store.updateHarnessCandidate(
+          args.runId,
+          args.agent,
+          {
+            verificationTerminalHandle: handle,
+            verificationTerminalPaneKey: paneKey,
+            verificationTerminalOwnership: 'owned'
+          },
+          { durability: 'required' }
+        )
+      },
+      onStopped: () => {
+        store.updateHarnessCandidate(
+          args.runId,
+          args.agent,
+          { verificationTerminalOwnership: 'stopped' },
+          { durability: 'required' }
+        )
+      }
+    })
+  }
+
+  async findFreshHarnessVerificationTerminal(args: {
+    handle: string
+    worktreeId: string
+  }): Promise<string | null> {
+    const worktree = await this.resolveWorktreeSelector(`id:${args.worktreeId}`)
+    const repo = this.requireStore().getRepo(worktree.repoId)
+    if (!repo) {
+      throw new Error('repo_not_found')
+    }
+    const provider = repo.connectionId
+      ? getSshPtyProvider(repo.connectionId)
+      : getLocalPtyProvider()
+    if (!provider) {
+      throw new Error('terminal_liveness_unavailable')
+    }
+    const sessionsResult = await withTimeoutResult(
+      provider.listProcesses(),
+      PTY_CONTROLLER_LIST_TIMEOUT_MS
+    )
+    if (!sessionsResult.ok) {
+      throw new Error('terminal_liveness_unavailable')
+    }
+    const matches = sessionsResult.value.filter(
+      (session) => session.terminalHandle?.trim() === args.handle
+    )
+    if (matches.length > 1) {
+      throw new Error('Verification cleanup found duplicate terminal handles.')
+    }
+    const match = matches[0]
+    if (!match) {
+      return null
+    }
+    const sessionWorktreeId =
+      inferWorktreeIdFromPtyId(match.id) ?? findResolvedWorktreeIdForPath([worktree], match.cwd)
+    if (sessionWorktreeId !== worktree.id) {
+      throw new Error('Verification cleanup resolved a different worktree.')
+    }
+    if (!repo.connectionId) {
+      // Why: a local provider handle proves liveness, not ownership of the
+      // persisted pane; only pane resolution may authorize stopping it.
+      throw new Error('Verification cleanup could not re-establish stable pane authority.')
+    }
+    // Why: remote provider metadata carries the preallocated handle even if
+    // the app crashed before pane binding; adopt it before exact-stop recovery.
+    this.adoptControllerTerminalHandle(match.id, match.terminalHandle)
+    this.recordPtyWorktree(match.id, worktree.id, {
+      connected: true,
+      connectionId: repo.connectionId ?? null
+    })
+    return args.handle
+  }
+
   getRuntimeId(): string {
     return this.runtimeId
   }
@@ -2985,6 +3167,10 @@ export class OrcaRuntimeService {
     // instead of tunneling back through renderer IPC, or live handles could
     // drift from the process they are supposed to control during reloads.
     this.ptyController = controller
+    if (controller && (this.resumeHarnessWhenPtyReady || this._harnessService)) {
+      this.resumeHarnessWhenPtyReady = false
+      this.getHarnessService().activateMonitoring()
+    }
   }
 
   setNotifier(notifier: RuntimeNotifier | null): void {
@@ -9691,7 +9877,7 @@ export class OrcaRuntimeService {
   // Why: Section 7.2 — the runtime detects agent exit directly and updates
   // dispatch contexts immediately, rather than waiting for the coordinator's
   // next poll cycle. This catches agent crashes and unexpected exits within
-  // milliseconds. The task is set back to 'pending' so it can be re-dispatched.
+  // milliseconds. Generic tasks return to 'ready'; Harness tasks fail terminally.
   private failActiveDispatchOnExit(leaf: RuntimeLeafRecord, exitCode: number): void {
     if (!this._orchestrationDb) {
       return
@@ -9702,13 +9888,46 @@ export class OrcaRuntimeService {
       return
     }
 
-    const dispatch = this._orchestrationDb.getActiveDispatchForTerminal(handle)
+    const paneKey = isTerminalLeafId(leaf.leafId) ? makePaneKey(leaf.tabId, leaf.leafId) : undefined
+    const dispatch = this._orchestrationDb.getActiveDispatchForTerminal(handle, paneKey)
     if (!dispatch) {
       return
     }
 
     const errorContext = `Agent exited with code ${exitCode}`
     this._orchestrationDb.failDispatch(dispatch.id, errorContext)
+
+    const task = this._orchestrationDb.getTask(dispatch.task_id)
+    if (task) {
+      try {
+        const harnessRoot = findHarnessTaskRoot(this._orchestrationDb, task)
+        if (harnessRoot) {
+          // Why: the direct candidate is terminal on exit, while delegated
+          // lanes stay retryable only while their owning coordinator is alive.
+          if (harnessRoot.id === task.id || harnessRoot.status !== 'dispatched') {
+            this._orchestrationDb.updateTaskStatus(task.id, 'failed', errorContext)
+          }
+          // Why: the task creator is the coordinator's stable logical inbox;
+          // the root dispatch handle can be reminted after a restart.
+          const coordinatorHandle = task.created_by_terminal_handle
+          if (harnessRoot.id !== task.id && coordinatorHandle) {
+            this._orchestrationDb.insertMessage({
+              from: handle,
+              to: coordinatorHandle,
+              subject: `Child agent exited unexpectedly (code ${exitCode})`,
+              type: 'escalation',
+              priority: 'high',
+              payload: JSON.stringify({ taskId: task.id, exitCode, handle })
+            })
+            this.notifyMessageArrived(coordinatorHandle, 'escalation')
+          }
+          return
+        }
+      } catch {
+        // Invalid ancestry falls through to generic recovery and cannot claim
+        // Harness ownership without a valid root.
+      }
+    }
 
     // Why: create an escalation message so the coordinator is notified about
     // the unexpected exit on its next check cycle, even if the circuit breaker
@@ -10577,16 +10796,19 @@ export class OrcaRuntimeService {
 
   private getFreshExplicitAgentStatusForHandle(handle: string): {
     status: NonNullable<RuntimeTerminalAgentStatus['status']>
+    agentType: TuiAgent | null
     updatedAt: number
   } | null {
     const paneKey = this.getPaneKeyForTerminalHandle(handle)
     const now = Date.now()
     let bestStatus: NonNullable<RuntimeTerminalAgentStatus['status']> | null = null
+    let bestAgentType: TuiAgent | null = null
     let bestUpdatedAt = -1
 
     const consider = (
       state: AgentStatusEntry['state'] | undefined,
-      updatedAt: number | null | undefined
+      updatedAt: number | null | undefined,
+      agentType: string | null | undefined
     ): void => {
       if (!state) {
         return
@@ -10599,23 +10821,26 @@ export class OrcaRuntimeService {
       // resumes. Prefer the newest explicit state; only let permission win ties.
       if (updatedAt > bestUpdatedAt || (updatedAt === bestUpdatedAt && status === 'permission')) {
         bestStatus = status
+        bestAgentType = isTuiAgent(agentType) ? agentType : null
         bestUpdatedAt = updatedAt
       }
     }
 
     if (paneKey) {
       const retained = this.latestAgentStatusByPaneKey.get(paneKey)
-      consider(retained?.payload.state, retained?.updatedAt)
+      consider(retained?.payload.state, retained?.updatedAt, retained?.payload.agentType)
     }
 
     for (const entry of this.getAgentStatusSnapshotFn?.() ?? []) {
       if (entry.terminalHandle !== handle && (!paneKey || entry.paneKey !== paneKey)) {
         continue
       }
-      consider(entry.state, entry.receivedAt)
+      consider(entry.state, entry.receivedAt, entry.agentType)
     }
 
-    return bestStatus ? { status: bestStatus, updatedAt: bestUpdatedAt } : null
+    return bestStatus
+      ? { status: bestStatus, agentType: bestAgentType, updatedAt: bestUpdatedAt }
+      : null
   }
 
   private async writeTerminalAction(
@@ -17597,6 +17822,9 @@ export class OrcaRuntimeService {
       const tabId = canAdoptPaneIdentity ? (hintedTabId as string) : randomUUID()
       const leafId = canAdoptPaneIdentity ? (launchOpts.leafId as string) : randomUUID()
       const paneKey = makePaneKey(tabId, leafId)
+      // Why: Harness persists this identity before spawn, so a crash can never
+      // leave a verification command running without a durable stop target.
+      launchOpts.onHandleAllocated?.({ handle: preAllocatedHandle, paneKey })
       const launchToken = launchOpts.launchConfig
         ? (launchOpts.launchToken ?? randomUUID())
         : undefined
@@ -18631,6 +18859,21 @@ export class OrcaRuntimeService {
     return { handle, tabId: leaf.tabId, ptyKilled }
   }
 
+  async stopTerminalAndWait(handle: string): Promise<boolean> {
+    const pty = this.getLivePtyForHandle(handle)
+    let ptyId: string | null = pty?.pty.ptyId ?? null
+    if (!ptyId) {
+      this.assertGraphReady()
+      ptyId = this.getLiveLeafForHandle(handle).leaf.ptyId
+    }
+    if (!ptyId || !this.ptyController?.stopAndWait) {
+      return false
+    }
+    // Why: Harness cleanup may release its run only after the local or remote
+    // provider confirms the exact child PTY is no longer live.
+    return await this.ptyController.stopAndWait(ptyId)
+  }
+
   async splitTerminal(
     handle: string,
     opts: {
@@ -19569,9 +19812,18 @@ export class OrcaRuntimeService {
       }
     }
 
+    // Why: a task-id comment is the coordinator's explicit lane binding. The
+    // shell also exports the same parent as generic env context, but choosing it
+    // would erase the task provenance required before dispatch.
     const preferred =
-      candidates.find((candidate) => candidate.source === 'env-workspace') ??
+      (commentTaskId
+        ? candidates.find(
+            (candidate) =>
+              candidate.source === 'orchestration-context' && candidate.taskId === commentTaskId
+          )
+        : undefined) ??
       candidates.find((candidate) => candidate.source === 'orchestration-context') ??
+      candidates.find((candidate) => candidate.source === 'env-workspace') ??
       first
     return {
       kind: 'lineage',
@@ -19603,30 +19855,105 @@ export class OrcaRuntimeService {
     taskId: string
   ): Promise<WorktreeLineageCandidate | null> {
     const db = this.getOrchestrationDbIfAvailable()
+    const task = db?.getTask(taskId)
+    const candidateForWorktree = async (
+      worktreeId: string,
+      coordinatorHandle?: string | null
+    ): Promise<WorktreeLineageCandidate | null> => {
+      try {
+        const parent = await this.resolveWorktreeSelector(`id:${worktreeId}`)
+        return {
+          source: 'orchestration-context',
+          parent: {
+            type: 'worktree',
+            workspaceKey: worktreeWorkspaceKey(parent.id),
+            worktree: parent,
+            instanceId: parent.instanceId ?? null
+          },
+          taskId,
+          ...(coordinatorHandle ? { coordinatorHandle } : {})
+        }
+      } catch {
+        return null
+      }
+    }
+    const worktreeForHandle = async (handle: string): Promise<string | null> => {
+      try {
+        return (await this.showTerminal(handle)).worktreeId
+      } catch {
+        return null
+      }
+    }
+
+    if (db && task) {
+      let harnessRoot: TaskRow | null
+      try {
+        harnessRoot = findHarnessTaskRoot(db, task)
+      } catch {
+        return null
+      }
+      if (harnessRoot && harnessRoot.id !== task.id) {
+        const rootDispatch = db.getDispatchContext(harnessRoot.id)
+        const coordinatorHandle = task.created_by_terminal_handle ?? rootDispatch?.assignee_handle
+        // Why: retries belong beside the integration worktree, never beside a
+        // previous worker attempt whose latest dispatch may now be stale.
+        if (rootDispatch?.assignee_worktree_id) {
+          return await candidateForWorktree(rootDispatch.assignee_worktree_id, coordinatorHandle)
+        }
+        if (rootDispatch?.assignee_pane_key) {
+          try {
+            const paneHandle = this.resolveTerminalPane(rootDispatch.assignee_pane_key).handle
+            const worktreeId = await worktreeForHandle(paneHandle)
+            if (worktreeId) {
+              return await candidateForWorktree(worktreeId, coordinatorHandle)
+            }
+          } catch {
+            // Fall through to legacy handle recovery below.
+          }
+        }
+        for (const handle of [rootDispatch?.assignee_handle, task.created_by_terminal_handle]) {
+          if (!handle) {
+            continue
+          }
+          const worktreeId = await worktreeForHandle(handle)
+          if (worktreeId) {
+            return await candidateForWorktree(worktreeId, coordinatorHandle)
+          }
+        }
+        return null
+      }
+    }
+
     const dispatch = db?.getDispatchContext(taskId)
+    if (dispatch?.assignee_worktree_id) {
+      return await candidateForWorktree(
+        dispatch.assignee_worktree_id,
+        task?.created_by_terminal_handle
+      )
+    }
+    if (dispatch?.assignee_pane_key) {
+      try {
+        const paneHandle = this.resolveTerminalPane(dispatch.assignee_pane_key).handle
+        const worktreeId = await worktreeForHandle(paneHandle)
+        if (worktreeId) {
+          return await candidateForWorktree(worktreeId, task?.created_by_terminal_handle)
+        }
+      } catch {
+        // Fall through to handle-based recovery for legacy dispatch rows.
+      }
+    }
     // Why: agent-created task records may never be dispatched, but the
     // creating terminal still identifies the parent workspace for descendants.
-    const parentHandle =
-      dispatch?.assignee_handle ?? db?.getTask(taskId)?.created_by_terminal_handle
-    if (!parentHandle) {
-      return null
-    }
-    try {
-      const terminal = await this.showTerminal(parentHandle)
-      const parent = await this.resolveWorktreeSelector(`id:${terminal.worktreeId}`)
-      return {
-        source: 'orchestration-context',
-        parent: {
-          type: 'worktree',
-          workspaceKey: worktreeWorkspaceKey(parent.id),
-          worktree: parent,
-          instanceId: parent.instanceId ?? null
-        },
-        taskId
+    for (const handle of [dispatch?.assignee_handle, task?.created_by_terminal_handle]) {
+      if (!handle) {
+        continue
       }
-    } catch {
-      return null
+      const worktreeId = await worktreeForHandle(handle)
+      if (worktreeId) {
+        return await candidateForWorktree(worktreeId, task?.created_by_terminal_handle)
+      }
     }
+    return null
   }
 
   private getOrchestrationDbIfAvailable(): OrchestrationDb | null {
@@ -21133,6 +21460,41 @@ export class OrcaRuntimeService {
     }
   }
 
+  async getTerminalAgentType(handle: string): Promise<TuiAgent | null> {
+    const ptyId = this.getTerminalAgentStatusPtyId(handle)
+    if (this.ptyController) {
+      let foreground: string | null = null
+      try {
+        foreground = await this.ptyController.getForegroundProcess(ptyId)
+      } catch {
+        this.assertTerminalAgentStatusPtyBinding(handle, ptyId)
+      }
+      this.assertTerminalAgentStatusPtyBinding(handle, ptyId)
+      if (foreground) {
+        const recognized = recognizeAgentProcess(foreground)
+        if (recognized) {
+          return recognized.agent
+        }
+        const confirmationController = this.ptyController
+        if (!confirmationController?.confirmForegroundProcess) {
+          return null
+        }
+        try {
+          const confirmed = await confirmationController.confirmForegroundProcess(ptyId)
+          this.assertTerminalAgentStatusPtyBinding(handle, ptyId)
+          return recognizeAgentProcess(confirmed)?.agent ?? null
+        } catch {
+          this.assertTerminalAgentStatusPtyBinding(handle, ptyId)
+          return null
+        }
+      }
+    }
+    this.assertTerminalAgentStatusPtyBinding(handle, ptyId)
+    // Why: launch metadata describes what started, not what owns the PTY now.
+    // Only fresh typed hook evidence may substitute for provider identity.
+    return this.getFreshExplicitAgentStatusForHandle(handle)?.agentType ?? null
+  }
+
   getAgentStatusOrchestrationContextForPaneKey(
     paneKey: string
   ): AgentStatusOrchestrationContext | undefined {
@@ -21262,9 +21624,20 @@ export class OrcaRuntimeService {
       if (leaf?.ptyId) {
         return this.issueHandle(leaf)
       }
+      // Why: pane break-out can change the tab half while retaining the stable
+      // leaf UUID recorded on an active dispatch.
+      for (const candidate of this.leaves.values()) {
+        if (candidate.leafId === parsed.leafId && candidate.ptyId) {
+          return this.issueHandle(candidate)
+        }
+      }
     }
     for (const pty of this.ptysById.values()) {
-      if (pty.paneKey === paneKey) {
+      const ptyPane = pty.paneKey ? parsePaneKey(pty.paneKey) : null
+      if (
+        pty.paneKey === paneKey ||
+        (parsed && ptyPane && ptyPane.leafId === parsed.leafId && pty.connected)
+      ) {
         return this.issuePtyHandle(pty)
       }
     }

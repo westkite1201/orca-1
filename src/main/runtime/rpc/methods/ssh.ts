@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   connectRegisteredSshTarget,
   getRegisteredSshState,
+  isRegisteredSshRuntimeReady,
   listRegisteredRemovedSshTargetLabels,
   listRegisteredSshTargets
 } from '../../../ipc/ssh'
@@ -15,7 +16,10 @@ export const SSH_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'ssh.getState',
     params: SshTarget,
-    handler: (params) => ({ state: getRegisteredSshState(params.targetId) ?? null })
+    handler: (params) => ({
+      state: getRegisteredSshState(params.targetId) ?? null,
+      runtimeReady: isRegisteredSshRuntimeReady(params.targetId)
+    })
   }),
   defineMethod({
     name: 'ssh.connect',

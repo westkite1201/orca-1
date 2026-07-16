@@ -142,8 +142,7 @@ async function resolveOrchestrationTerminalHandle(
   flags: Map<string, string | boolean>,
   cwd: string,
   client: Parameters<CommandHandler>[0]['client'],
-  flagName: 'from' | 'terminal',
-  options: { validateEnvHandle?: boolean } = {}
+  flagName: 'from' | 'terminal'
 ): Promise<string> {
   const explicit = getOptionalStringFlag(flags, flagName)
   if (explicit) {
@@ -151,19 +150,8 @@ async function resolveOrchestrationTerminalHandle(
   }
   const envHandle = process.env.ORCA_TERMINAL_HANDLE
   if (envHandle && envHandle.length > 0) {
-    if (flagName === 'from' && options.validateEnvHandle) {
-      // Why: long-lived shells can retain an ORCA_TERMINAL_HANDLE after the
-      // runtime remints the pane handle; do not bake that stale id into
-      // coordinator preambles.
-      const live = await isLiveTerminalHandle(envHandle, client)
-      if (!live) {
-        const reminted = await resolveOrchestrationPaneTerminalHandle(client)
-        if (reminted) {
-          return reminted
-        }
-        throwNoActiveSenderTerminal()
-      }
-    }
+    // Why: the injected handle is the coordinator's durable inbox address;
+    // pane identity carries authority separately across runtime remints.
     return envHandle
   }
   if (flagName === 'from') {
@@ -172,43 +160,9 @@ async function resolveOrchestrationTerminalHandle(
   return await getTerminalHandle(flags, cwd, client)
 }
 
-async function resolveTaskCreatorTerminalHandle(
-  client: Parameters<CommandHandler>[0]['client']
-): Promise<string | undefined> {
+function resolveTaskCreatorTerminalHandle(): string | undefined {
   const envHandle = process.env.ORCA_TERMINAL_HANDLE
-  if (!envHandle || envHandle.length === 0) {
-    return undefined
-  }
-  let live: boolean
-  try {
-    live = await isLiveTerminalHandle(envHandle, client)
-  } catch (err) {
-    if (isOptionalTaskCreatorHandleError(err)) {
-      // Why: creator handles are best-effort lineage metadata; graph
-      // unavailability should not block task creation itself.
-      return undefined
-    }
-    throw err
-  }
-  if (live) {
-    return envHandle
-  }
-  return await resolveOrchestrationPaneTerminalHandle(client, { optional: true })
-}
-
-async function isLiveTerminalHandle(
-  handle: string,
-  client: Parameters<CommandHandler>[0]['client']
-): Promise<boolean> {
-  try {
-    await client.call('terminal.show', { terminal: handle })
-    return true
-  } catch (err) {
-    if (isStaleTerminalIdentityError(err)) {
-      return false
-    }
-    throw err
-  }
+  return envHandle && envHandle.length > 0 ? envHandle : undefined
 }
 
 function getClientErrorCode(err: unknown): string | undefined {
@@ -219,72 +173,8 @@ function getClientErrorCode(err: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
-function isStaleTerminalIdentityError(err: unknown): boolean {
-  const code = getClientErrorCode(err)
-  return code === 'terminal_handle_stale' || code === 'terminal_gone'
-}
-
 function isNoActiveTerminalError(err: unknown): boolean {
   return getClientErrorCode(err) === 'no_active_terminal'
-}
-
-function isOptionalTaskCreatorHandleError(err: unknown): boolean {
-  const code = getClientErrorCode(err)
-  return code === 'no_active_sender_terminal' || code === 'runtime_unavailable'
-}
-
-async function resolveOrchestrationPaneTerminalHandle(
-  client: Parameters<CommandHandler>[0]['client'],
-  options: { optional?: boolean } = {}
-): Promise<string | undefined> {
-  const paneKey = process.env.ORCA_PANE_KEY
-  if (!paneKey || paneKey.length === 0) {
-    return undefined
-  }
-  try {
-    // Why: pane key reminting preserves the caller identity; focus-based
-    // active-terminal fallback can point at a different pane.
-    const response = await client.call<{ terminal: { handle: string } }>('terminal.resolvePane', {
-      paneKey
-    })
-    return response.result.terminal.handle
-  } catch (err) {
-    if (
-      isPaneRemintUnavailableError(err) ||
-      (options.optional === true && isOptionalPaneRemintUnavailableError(err))
-    ) {
-      return undefined
-    }
-    throw err
-  }
-}
-
-function isPaneRemintUnavailableError(err: unknown): boolean {
-  const code = getClientErrorCode(err)
-  const message = getClientErrorMessage(err)
-  return (
-    code === 'terminal_not_found' ||
-    code === 'terminal_handle_stale' ||
-    code === 'terminal_gone' ||
-    message === 'terminal_not_found' ||
-    message === 'terminal_handle_stale' ||
-    message === 'terminal_gone'
-  )
-}
-
-function isOptionalPaneRemintUnavailableError(err: unknown): boolean {
-  return getClientErrorCode(err) === 'runtime_unavailable'
-}
-
-function getClientErrorMessage(err: unknown): string | undefined {
-  if (err instanceof Error) {
-    return err.message
-  }
-  if (!err || typeof err !== 'object') {
-    return undefined
-  }
-  const message = (err as { message?: unknown }).message
-  return typeof message === 'string' ? message : undefined
 }
 
 async function resolveCoordinatorTerminalHandle(
@@ -292,9 +182,7 @@ async function resolveCoordinatorTerminalHandle(
   cwd: string,
   client: Parameters<CommandHandler>[0]['client']
 ): Promise<string> {
-  return await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from', {
-    validateEnvHandle: true
-  })
+  return await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
 }
 
 async function resolveImplicitOrchestrationSender(
@@ -543,16 +431,19 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   },
 
   'orchestration task-create': async ({ flags, client, json }) => {
-    const callerTerminalHandle = await resolveTaskCreatorTerminalHandle(client)
+    const callerTerminalHandle = resolveTaskCreatorTerminalHandle()
     const result = await client.call<{ task: { id: string; status: string } }>(
       'orchestration.taskCreate',
       {
         spec: getRequiredStringFlag(flags, 'spec'),
         taskTitle: getOptionalStringFlag(flags, 'task-title'),
         displayName: getOptionalStringFlag(flags, 'display-name'),
+        executionKind: getOptionalStringFlag(flags, 'execution-kind'),
+        agentSlot: getOptionalStringFlag(flags, 'agent-slot'),
         deps: getOptionalStringFlag(flags, 'deps'),
         parent: getOptionalStringFlag(flags, 'parent'),
-        callerTerminalHandle
+        callerTerminalHandle,
+        callerPaneKey: process.env.ORCA_PANE_KEY || undefined
       }
     )
     printResult(result, json, (r) => `Created ${r.task.id} [${r.task.status}]`)
@@ -575,6 +466,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     }>('orchestration.taskList', {
       status: getOptionalStringFlag(flags, 'status'),
       ready: flags.has('ready') ? true : undefined,
+      parent: getOptionalStringFlag(flags, 'parent'),
       brief: brief ? true : undefined
     })
     // Why: current runtimes abbreviate server-side (rows carry
@@ -639,6 +531,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       task: getRequiredStringFlag(flags, 'task'),
       to,
       from,
+      senderPaneKey: process.env.ORCA_PANE_KEY || undefined,
       inject: flags.has('inject') ? true : undefined,
       dryRun,
       returnPreamble,
@@ -731,6 +624,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     }>('orchestration.run', {
       spec: getRequiredStringFlag(flags, 'spec'),
       from,
+      coordinatorPaneKey: process.env.ORCA_PANE_KEY || undefined,
       pollIntervalMs: getOptionalPositiveIntegerFlag(flags, 'poll-interval-ms'),
       maxConcurrent: getOptionalPositiveIntegerFlag(flags, 'max-concurrent'),
       worktree: getOptionalStringFlag(flags, 'worktree')

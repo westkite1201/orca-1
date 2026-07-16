@@ -2,11 +2,25 @@
 import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, OptionalBoolean, requiredString } from '../schemas'
-import type { MessageType, MessagePriority, TaskStatus } from '../../orchestration/db'
+import type {
+  MessageType,
+  MessagePriority,
+  OrchestrationDb,
+  TaskRow,
+  TaskExecutionKind,
+  TaskStatus
+} from '../../orchestration/db'
+import type { OrcaRuntimeService } from '../../orca-runtime'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
+import {
+  assertHarnessTaskTreeOpen,
+  findHarnessTaskRoot,
+  hasActiveHarnessTaskTree,
+  isHarnessTaskCoordinator
+} from '../../orchestration/harness-task-scope'
 import { abbreviateOrchestrationTasks } from '../../../../shared/orchestration-task-summary'
 import { ORCHESTRATION_GATE_METHODS } from './orchestration-gates'
 
@@ -29,6 +43,17 @@ const TASK_STATUSES: TaskStatus[] = [
   'failed',
   'blocked'
 ]
+
+const HARNESS_OWNER_PREFIX = 'jaws-harness:'
+const HARNESS_MAX_CONCURRENT_LANES = 4
+
+function assertHarnessResetSafe(db: OrchestrationDb): void {
+  if (hasActiveHarnessTaskTree(db)) {
+    // Why: deleting task ownership cannot stop its local or remote PTY, so
+    // Harness cleanup must retain these rows until termination is proven.
+    throw new Error('Cannot reset orchestration tasks while a Harness lane is active.')
+  }
+}
 
 function getLifecycleGroupRecipientError(type: 'worker_done' | 'heartbeat'): string {
   return `${type} messages must be sent to a concrete coordinator terminal handle, not a group address.`
@@ -125,14 +150,18 @@ const TaskCreateParams = z.object({
   spec: requiredString('Missing --spec'),
   taskTitle: OptionalString,
   displayName: OptionalString,
+  executionKind: z.enum(['read-only', 'worktree']).optional(),
+  agentSlot: z.string().trim().min(1).max(64).optional(),
   deps: OptionalString,
   parent: OptionalString,
-  callerTerminalHandle: OptionalString
+  callerTerminalHandle: OptionalString,
+  callerPaneKey: OptionalString
 })
 
 const TaskListParams = z.object({
   status: z.enum(['pending', 'ready', 'dispatched', 'completed', 'failed', 'blocked']).optional(),
   ready: OptionalBoolean,
+  parent: OptionalString,
   // Why: truncating specs server-side keeps `--brief` cheap over SSH/relay
   // transports instead of shipping full specs the CLI then throws away.
   brief: OptionalBoolean
@@ -163,6 +192,7 @@ const DispatchParams = z.object({
   // to be absent. The handler enforces presence before any side-effecting work.
   to: OptionalString,
   from: OptionalString,
+  senderPaneKey: OptionalString,
   inject: OptionalBoolean,
   dryRun: OptionalBoolean,
   returnPreamble: OptionalBoolean,
@@ -175,6 +205,143 @@ const DispatchShowParams = z.object({
   from: OptionalString,
   devMode: OptionalBoolean
 })
+
+function preambleInteractionMode(
+  from: string | undefined,
+  taskOwner: string | null
+): 'coordinated' | 'report-only' {
+  return from?.startsWith('jaws-harness:') || taskOwner?.startsWith('jaws-harness:')
+    ? 'report-only'
+    : 'coordinated'
+}
+
+function assertHarnessTaskCoordinator(args: {
+  db: OrchestrationDb
+  task: TaskRow
+  callerHandle: string | undefined
+  callerPaneKey: string | null
+}): void {
+  const root = findHarnessTaskRoot(args.db, args.task)
+  assertHarnessTaskTreeOpen(args.db, args.task)
+  if (
+    root &&
+    !isHarnessTaskCoordinator({
+      db: args.db,
+      root,
+      callerHandle: args.callerHandle,
+      callerPaneKey: args.callerPaneKey
+    })
+  ) {
+    throw new Error('Only the assigned Orchestrator coordinator can manage child tasks.')
+  }
+}
+
+function taskSpecForDispatch(task: TaskRow): string {
+  if (!task.execution_kind) {
+    return task.spec
+  }
+  const executionRule =
+    task.execution_kind === 'read-only'
+      ? 'This is a read-only lane. Do not modify files or run mutating commands.'
+      : 'Modify only this assigned isolated worktree and commit the completed changes.'
+  return `${task.spec}\n\nExecution contract (${task.execution_kind}, agent slot ${task.agent_slot ?? 'unassigned'}): ${executionRule}`
+}
+
+async function resolveHarnessIntegrationWorktreeId(args: {
+  db: OrchestrationDb
+  runtime: OrcaRuntimeService
+  root: TaskRow
+}): Promise<string> {
+  const dispatch = args.db.getDispatchContext(args.root.id)
+  if (!dispatch) {
+    throw new Error('Orchestrator root has no dispatch context.')
+  }
+  if (dispatch.assignee_worktree_id) {
+    return dispatch.assignee_worktree_id
+  }
+  let handle = dispatch.assignee_handle
+  if (dispatch.assignee_pane_key) {
+    handle = args.runtime.resolveTerminalPane(dispatch.assignee_pane_key).handle
+  }
+  if (!handle) {
+    throw new Error('Orchestrator root has no resolvable coordinator terminal.')
+  }
+  const terminal = await args.runtime.showTerminal(handle)
+  // Why: upgraded databases may have an active v6 root dispatch; backfill its
+  // live worktree before applying the v7 child isolation contract.
+  args.db.recordDispatchAssigneeWorktree(dispatch.id, terminal.worktreeId)
+  return terminal.worktreeId
+}
+
+async function resolveHarnessAssigneeWorktreeId(args: {
+  db: OrchestrationDb
+  runtime: OrcaRuntimeService
+  root: TaskRow
+  task: TaskRow
+  targetHandle: string
+}): Promise<string> {
+  const targetTerminal = await args.runtime.showTerminal(args.targetHandle)
+  if (args.root.id === args.task.id) {
+    return targetTerminal.worktreeId
+  }
+  if (!args.task.execution_kind || !args.task.agent_slot) {
+    throw new Error('Orchestrator child task is missing execution-kind or agent-slot metadata.')
+  }
+  const targetAgent = await args.runtime.getTerminalAgentType(args.targetHandle)
+  if (targetAgent !== args.task.agent_slot) {
+    throw new Error(`Orchestrator lane target must be the ${args.task.agent_slot} agent.`)
+  }
+  const integrationWorktreeId = await resolveHarnessIntegrationWorktreeId(args)
+  if (args.task.execution_kind === 'read-only') {
+    if (targetTerminal.worktreeId !== integrationWorktreeId) {
+      throw new Error('Read-only Orchestrator lanes must use the integration worktree.')
+    }
+    return targetTerminal.worktreeId
+  }
+  if (targetTerminal.worktreeId === integrationWorktreeId) {
+    throw new Error('Mutating Orchestrator lanes require a separate isolated worktree.')
+  }
+
+  const worktree = await args.runtime.showManagedWorktree(`id:${targetTerminal.worktreeId}`)
+  if (
+    worktree.lineage?.origin !== 'orchestration' ||
+    worktree.lineage.taskId !== args.task.id ||
+    worktree.lineage.parentWorktreeId !== integrationWorktreeId
+  ) {
+    throw new Error(
+      'Mutating Orchestrator lane worktree must be created for this task from the integration worktree.'
+    )
+  }
+  if (worktree.createdWithAgent !== args.task.agent_slot) {
+    throw new Error(`Mutating Orchestrator lane must use agent slot ${args.task.agent_slot}.`)
+  }
+  const runId = args.root.created_by_terminal_handle?.startsWith(HARNESS_OWNER_PREFIX)
+    ? args.root.created_by_terminal_handle.slice(HARNESS_OWNER_PREFIX.length)
+    : ''
+  if (!runId) {
+    throw new Error('Orchestrator root is missing its Harness run identity.')
+  }
+  const run = args.runtime.getHarnessService().show(runId)
+  if (worktree.repoId !== run.repoId) {
+    throw new Error('Mutating Orchestrator lane worktree belongs to a different repository.')
+  }
+  const status = await args.runtime.getRuntimeGitStatus(`id:${targetTerminal.worktreeId}`)
+  const statusFailure = status.didHitLimit
+    ? 'status was truncated'
+    : status.head?.trim() !== run.baseSha
+      ? `HEAD is ${status.head?.trim() || 'unknown'}, expected ${run.baseSha}`
+      : status.conflictOperation !== 'unknown'
+        ? `${status.conflictOperation} is in progress`
+        : status.entries.length > 0
+          ? 'worktree is dirty'
+          : null
+  if (statusFailure) {
+    throw new Error(
+      `Mutating Orchestrator lane is not a clean start-SHA worktree: ${statusFailure}.`
+    )
+  }
+  return targetTerminal.worktreeId
+}
 
 const AskParams = z.object({
   to: requiredString('Missing --to'),
@@ -310,20 +477,31 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
 
       const readAndReturn = () => {
         const messages = showAll
-          ? db.getAllMessagesForHandle(handle, undefined, typeFilter)
+          ? db.getAllMessagesForHandle(handle, null, typeFilter)
           : db.getUnreadMessages(handle, typeFilter)
 
-        let visibleMessages = messages
+        // Why: message insertion and lifecycle reconciliation are separate
+        // durable writes. Every read mode repairs a crash between them, while
+        // only consuming mode changes the message's read flag.
+        // Why: history reads are newest-first, but lifecycle writes must replay
+        // oldest-first so an older heartbeat cannot roll liveness backward.
+        const reconciliation = new Map(
+          [...messages]
+            .sort((left, right) => left.sequence - right.sequence)
+            .map((message) => [
+              message.id,
+              reconcileLifecycleMessage(db, message, undefined, {
+                consumeInactive: consumeUnread
+              })
+            ])
+        )
+        const visibleMessages = messages.map((message) => {
+          const reconciled = reconciliation.get(message.id)
+          return reconciled?.action === 'rejected'
+            ? (db.getMessageById(message.id) ?? message)
+            : message
+        })
         if (consumeUnread && messages.length > 0) {
-          // Why: manual coordinators can consume lifecycle messages before
-          // the coordinator loop sees them, but unread `check` is still an
-          // authoritative read path for worker_done/heartbeat.
-          visibleMessages = messages.map((message) => {
-            const reconciled = reconcileLifecycleMessage(db, message)
-            return reconciled.action === 'rejected'
-              ? (db.getMessageById(message.id) ?? message)
-              : message
-          })
           db.markAsRead(messages.map((m) => m.id))
         }
 
@@ -419,10 +597,71 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           throw new Error('Invalid --deps: must be a JSON array of task IDs')
         }
       }
+      const callerPaneKey =
+        params.callerPaneKey ??
+        (params.callerTerminalHandle
+          ? runtime.getTerminalPaneKey(params.callerTerminalHandle)
+          : null)
+      const callerDispatch = params.callerTerminalHandle
+        ? db.getActiveDispatchForTerminal(params.callerTerminalHandle, callerPaneKey ?? undefined)
+        : undefined
+      const callerTask = callerDispatch ? db.getTask(callerDispatch.task_id) : undefined
+      const callerHarnessRoot = callerTask ? findHarnessTaskRoot(db, callerTask) : null
+      if (callerHarnessRoot && params.parent !== callerHarnessRoot.id) {
+        // Why: a Harness coordinator must not hide work under an unrelated
+        // generic parent outside the root-owned completion barrier.
+        throw new Error(
+          params.parent
+            ? 'Orchestrator child tasks must use the assigned top-level task as parent.'
+            : 'Orchestrator child tasks must specify the assigned parent task.'
+        )
+      }
+      if (params.parent) {
+        const parent = db.getTask(params.parent)
+        if (!parent) {
+          throw new Error(`Task parent not found: ${params.parent}`)
+        }
+        const harnessRoot = findHarnessTaskRoot(db, parent)
+        if (harnessRoot && harnessRoot.id !== parent.id) {
+          // Why: the completion barrier scans one root-owned lane set; allowing
+          // nested descendants would let hidden work outlive final verification.
+          throw new Error(
+            'Orchestrator child tasks must use the assigned top-level task as parent.'
+          )
+        }
+        assertHarnessTaskCoordinator({
+          db,
+          task: parent,
+          callerHandle: params.callerTerminalHandle,
+          callerPaneKey
+        })
+      }
+      let agentSlot = params.agentSlot
+      if (callerHarnessRoot) {
+        if (!params.executionKind) {
+          throw new Error('Orchestrator child tasks must specify --execution-kind.')
+        }
+        agentSlot = agentSlot ?? 'codex'
+        if (agentSlot !== 'codex') {
+          throw new Error('Orchestrator child tasks currently support only the codex agent slot.')
+        }
+        for (const dependencyId of deps ?? []) {
+          const dependency = db.getTask(dependencyId)
+          if (
+            !dependency ||
+            dependency.parent_id !== callerHarnessRoot.id ||
+            findHarnessTaskRoot(db, dependency)?.id !== callerHarnessRoot.id
+          ) {
+            throw new Error('Orchestrator child dependencies must be direct lanes in the same run.')
+          }
+        }
+      }
       const task = db.createTask({
         spec: params.spec,
         taskTitle: params.taskTitle,
         displayName: params.displayName,
+        executionKind: params.executionKind as TaskExecutionKind | undefined,
+        agentSlot,
         deps,
         parentId: params.parent,
         createdByTerminalHandle: params.callerTerminalHandle
@@ -444,7 +683,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         status: params.status as TaskStatus,
         ready: params.ready
       })
-      const tasks = joined.map((row) => {
+      const scoped = params.parent
+        ? joined.filter((task) => task.parent_id === params.parent)
+        : joined
+      const tasks = scoped.map((row) => {
         const { assignee_handle, dispatch_id, ...base } = row
         if (base.status === 'dispatched') {
           return { ...base, assignee_handle, dispatch_id }
@@ -463,7 +705,20 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     params: TaskUpdateParams,
     handler: (params, { runtime }) => {
       const db = runtime.getOrchestrationDb()
+      const existing = db.getTask(params.id)
+      if (!existing) {
+        throw new Error(`Task not found: ${params.id}`)
+      }
+      const harnessRoot = findHarnessTaskRoot(db, existing)
+      assertHarnessTaskTreeOpen(db, existing)
+      if (harnessRoot) {
+        // Why: every Harness lifecycle transition must also close or update its
+        // dispatch; direct edits can release verification while a worker lives.
+        throw new Error('Orchestrator task lifecycle is owned by worker_done and terminal exit.')
+      }
       const task = db.updateTaskStatus(params.id, params.status, params.result)
+      // The existence check above makes this unreachable unless the row is
+      // concurrently removed, which this single-process store does not do.
       if (!task) {
         throw new Error(`Task not found: ${params.id}`)
       }
@@ -480,6 +735,41 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (!task) {
         throw new Error(`Task not found: ${params.task}`)
       }
+      const harnessRoot = findHarnessTaskRoot(db, task)
+      const senderPaneKey =
+        params.senderPaneKey ?? (params.from ? runtime.getTerminalPaneKey(params.from) : null)
+      const callerDispatch = params.from
+        ? db.getActiveDispatchForTerminal(params.from, senderPaneKey ?? undefined)
+        : undefined
+      const callerTask = callerDispatch ? db.getTask(callerDispatch.task_id) : undefined
+      const callerHarnessRoot = callerTask ? findHarnessTaskRoot(db, callerTask) : null
+      if (
+        callerHarnessRoot &&
+        (!harnessRoot ||
+          harnessRoot.id !== callerHarnessRoot.id ||
+          task.parent_id !== callerHarnessRoot.id)
+      ) {
+        // Why: dispatching an existing generic task would create a live lane
+        // outside the Harness root's completion and shutdown barrier.
+        throw new Error('Orchestrator coordinators may dispatch only their direct child lanes.')
+      }
+      if (harnessRoot && harnessRoot.id !== task.id) {
+        if (!task.created_by_terminal_handle || params.from !== task.created_by_terminal_handle) {
+          // Why: a reminted live handle may identify the same pane, but child
+          // replies must keep using the stable inbox captured at task creation.
+          throw new Error('Orchestrator child dispatch must use its task creator as --from.')
+        }
+        assertHarnessTaskCoordinator({
+          db,
+          task,
+          callerHandle: params.from,
+          callerPaneKey: senderPaneKey
+        })
+      }
+      const coordinatorHandle =
+        harnessRoot && harnessRoot.id !== task.id
+          ? task.created_by_terminal_handle!
+          : (params.from ?? 'coordinator')
 
       // Why: --inject --dry-run lets a coordinator preview the exact preamble
       // text that would be injected without mutating task state or touching the
@@ -492,9 +782,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         const preamble = buildDispatchPreamble({
           taskId: task.id,
           dispatchId: 'ctx_dryrun',
-          taskSpec: task.spec,
-          coordinatorHandle: params.from ?? 'coordinator',
+          taskSpec: taskSpecForDispatch(task),
+          coordinatorHandle,
           workerHandle: params.to ?? 'worker',
+          interactionMode: preambleInteractionMode(
+            coordinatorHandle,
+            task.created_by_terminal_handle
+          ),
           devMode: params.devMode,
           ...(params.to
             ? { cliCommand: runtime.getTerminalOrchestrationCliCommand(params.to) }
@@ -527,11 +821,35 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
       }
 
-      const ctx = db.createDispatchContext(
-        params.task,
-        to,
-        runtime.getTerminalPaneKey(to) ?? undefined
-      )
+      const targetPaneKey = runtime.getTerminalPaneKey(to)
+      if (harnessRoot && harnessRoot.id !== task.id && !targetPaneKey) {
+        // Why: Harness must be able to find and stop a reminted child lane
+        // before releasing its completion barrier.
+        throw new Error('Orchestrator child dispatch requires a stable target pane identity.')
+      }
+      if (harnessRoot && harnessRoot.id !== task.id && params.inject !== true) {
+        throw new Error('Orchestrator child dispatch requires --inject.')
+      }
+      const assigneeWorktreeId = harnessRoot
+        ? await resolveHarnessAssigneeWorktreeId({
+            db,
+            runtime,
+            root: harnessRoot,
+            task,
+            targetHandle: to
+          })
+        : undefined
+      const ctx = db.createDispatchContext(params.task, to, targetPaneKey ?? undefined, {
+        assigneeWorktreeId,
+        ...(harnessRoot && harnessRoot.id !== task.id
+          ? {
+              harnessConcurrency: {
+                rootTaskId: harnessRoot.id,
+                maxConcurrent: HARNESS_MAX_CONCURRENT_LANES
+              }
+            }
+          : {})
+      })
 
       // Why: preamble is built here (not before ctx) so `dispatchId` can be
       // the real ctx.id — the preamble-hardening PR made dispatchId required
@@ -540,9 +858,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       const preamble = buildDispatchPreamble({
         taskId: task.id,
         dispatchId: ctx.id,
-        taskSpec: task.spec,
-        coordinatorHandle: params.from ?? 'coordinator',
+        taskSpec: taskSpecForDispatch(task),
+        coordinatorHandle,
         workerHandle: to,
+        interactionMode: preambleInteractionMode(
+          coordinatorHandle,
+          task.created_by_terminal_handle
+        ),
         devMode: params.devMode,
         cliCommand: runtime.getTerminalOrchestrationCliCommand(to)
       })
@@ -553,7 +875,15 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           await runtime.sendTerminalAgentPrompt(to, preamble)
           injected = true
         } catch (err) {
-          db.failDispatch(ctx.id, err instanceof Error ? err.message : String(err))
+          const error = err instanceof Error ? err.message : String(err)
+          db.failDispatch(ctx.id, error)
+          // Why: Harness comparisons cannot safely retry only one candidate after its peer starts.
+          if (
+            params.from?.startsWith('jaws-harness:') &&
+            task.created_by_terminal_handle === params.from
+          ) {
+            db.updateTaskStatus(task.id, 'failed', error)
+          }
           throw err
         }
       }
@@ -577,13 +907,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         throw new Error('Missing --task')
       }
       const ctx = db.getDispatchContext(params.task)
+      const task = db.getTask(params.task) ?? null
 
       // Why: --preamble lets callers inspect the exact preamble text that was
       // (or would be) injected for this task. The preamble is derived from the
       // current task spec, so even after dispatch completes the text can be
       // regenerated deterministically.
       if (params.preamble) {
-        const task = db.getTask(params.task)
         if (!task) {
           throw new Error(`Task not found: ${params.task}`)
         }
@@ -594,16 +924,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // (so the preview matches what was actually injected); fall back
           // to a placeholder when no dispatch has occurred yet.
           dispatchId: ctx?.id ?? 'ctx_preview',
-          taskSpec: task.spec,
+          taskSpec: taskSpecForDispatch(task),
           coordinatorHandle: params.from ?? 'coordinator',
           workerHandle,
+          interactionMode: preambleInteractionMode(params.from, task.created_by_terminal_handle),
           devMode: params.devMode,
           ...(ctx ? { cliCommand: runtime.getTerminalOrchestrationCliCommand(workerHandle) } : {})
         })
-        return { dispatch: ctx ?? null, preamble }
+        return { dispatch: ctx ?? null, task, preamble }
       }
 
-      return { dispatch: ctx ?? null }
+      return { dispatch: ctx ?? null, task }
     }
   }),
 
@@ -687,10 +1018,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     handler: (params, { runtime }) => {
       const db = runtime.getOrchestrationDb()
       if (params.all) {
+        assertHarnessResetSafe(db)
         db.resetAll()
         return { reset: 'all' }
       }
       if (params.tasks) {
+        assertHarnessResetSafe(db)
         db.resetTasks()
         return { reset: 'tasks' }
       }

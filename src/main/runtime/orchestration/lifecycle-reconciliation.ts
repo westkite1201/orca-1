@@ -4,7 +4,7 @@ import { parsePaneKey } from '../../../shared/stable-pane-id'
 
 // Why: the tab half can change on pane break-out, while opaque legacy keys
 // have no safe equivalence beyond exact equality.
-function isSamePane(assigneePaneKey: string, senderPaneKey: string): boolean {
+export function hasSamePaneIdentity(assigneePaneKey: string, senderPaneKey: string): boolean {
   if (assigneePaneKey === senderPaneKey) {
     return true
   }
@@ -19,7 +19,7 @@ function hasLifecycleAuthority(
 ): boolean {
   if (dispatch.assignee_pane_key) {
     return Boolean(
-      msg.sender_pane_key && isSamePane(dispatch.assignee_pane_key, msg.sender_pane_key)
+      msg.sender_pane_key && hasSamePaneIdentity(dispatch.assignee_pane_key, msg.sender_pane_key)
     )
   }
   // Why: rows created before pane identity existed can only use the exact
@@ -35,6 +35,7 @@ export type LifecycleReconciliationResult =
   | { action: 'suppressed' }
   | LifecycleRejectionResult
   | { action: 'completed'; taskId: string; dispatchId: string }
+  | { action: 'failed'; taskId: string; dispatchId: string }
   | { action: 'heartbeat_recorded'; dispatchId: string }
 
 export type LifecycleRejectionResult = {
@@ -85,13 +86,14 @@ function getPersistedLifecycleRejection(
 export function reconcileLifecycleMessage(
   db: OrchestrationDb,
   msg: MessageRow,
-  onLog: LogFn = noopLog
+  onLog: LogFn = noopLog,
+  options: { consumeInactive?: boolean } = {}
 ): LifecycleReconciliationResult {
   switch (msg.type) {
     case 'worker_done':
-      return reconcileWorkerDoneMessage(db, msg, onLog)
+      return reconcileWorkerDoneMessage(db, msg, onLog, options)
     case 'heartbeat':
-      return reconcileHeartbeatMessage(db, msg, onLog)
+      return reconcileHeartbeatMessage(db, msg, onLog, options)
     case 'status':
     case 'dispatch':
     case 'merge_ready':
@@ -105,7 +107,8 @@ export function reconcileLifecycleMessage(
 function reconcileHeartbeatMessage(
   db: OrchestrationDb,
   msg: MessageRow,
-  onLog: LogFn
+  onLog: LogFn,
+  options: { consumeInactive?: boolean }
 ): LifecycleReconciliationResult {
   if (!msg.payload) {
     onLog(`Heartbeat from ${msg.from_handle} missing payload; ignored`)
@@ -130,6 +133,9 @@ function reconcileHeartbeatMessage(
 
   const dispatch = db.getDispatchContextById(dispatchId)
   if (!dispatch || dispatch.status !== 'dispatched') {
+    if (options.consumeInactive === false) {
+      return { action: 'ignored' }
+    }
     // Why: an in-flight heartbeat can arrive after completion; retain it for
     // audit history without surfacing obsolete liveness to the coordinator.
     db.markAsReadAndDelivered([msg.id])
@@ -155,7 +161,8 @@ function reconcileHeartbeatMessage(
 function reconcileWorkerDoneMessage(
   db: OrchestrationDb,
   msg: MessageRow,
-  onLog: LogFn
+  onLog: LogFn,
+  options: { consumeInactive?: boolean }
 ): LifecycleReconciliationResult {
   onLog(`Worker done: ${msg.from_handle} — ${msg.subject}`)
 
@@ -212,11 +219,21 @@ function reconcileWorkerDoneMessage(
   if (dispatch.status === 'completed' && task.status === 'completed') {
     return { action: 'completed', taskId, dispatchId }
   }
-  if (dispatch.status !== 'dispatched') {
+  const workerFailed = /^\s*failed\s*:/i.test(msg.subject)
+  if (workerFailed && dispatch.status === 'failed' && task.status === 'failed') {
+    return { action: 'failed', taskId, dispatchId }
+  }
+  const isCurrentDispatch = db.getDispatchContext(taskId)?.id === dispatchId
+  const canComplete =
+    isCurrentDispatch &&
+    ((dispatch.status === 'dispatched' &&
+      (task.status === 'dispatched' || task.status === 'completed')) ||
+      (dispatch.status === 'completed' && task.status === 'dispatched'))
+  if (!canComplete && dispatch.status !== 'dispatched' && dispatch.status !== 'completed') {
     onLog(`Warning: worker_done for inactive dispatch ${dispatchId} ignored`)
     return { action: 'ignored' }
   }
-  if (db.getDispatchContext(taskId)?.id !== dispatchId || task.status !== 'dispatched') {
+  if (!canComplete) {
     onLog(`Warning: worker_done for stale dispatch ${dispatchId} ignored`)
     return { action: 'ignored' }
   }
@@ -227,14 +244,23 @@ function reconcileWorkerDoneMessage(
       ? payload.filesModified
       : []
 
-  const result = JSON.stringify({
-    completedBy: msg.from_handle,
-    filesModified,
-    completedAt: new Date().toISOString()
-  })
-  db.updateTaskStatus(taskId, 'completed', result)
-  suppressEarlierHeartbeats(db, msg, dispatchId)
+  // Why: older completion code could persist only one side of the pair. An
+  // authorized durable replay for the exact current dispatch can finish both.
+  const finishedAt = new Date().toISOString()
+  const result =
+    task.result ??
+    (workerFailed
+      ? JSON.stringify({ failedBy: msg.from_handle, error: msg.subject, failedAt: finishedAt })
+      : JSON.stringify({ completedBy: msg.from_handle, filesModified, completedAt: finishedAt }))
+  db.updateTaskStatus(taskId, workerFailed ? 'failed' : 'completed', result)
+  if (options.consumeInactive !== false) {
+    suppressEarlierHeartbeats(db, msg, dispatchId)
+  }
 
+  if (workerFailed) {
+    onLog(`Task ${taskId} failed`)
+    return { action: 'failed', taskId, dispatchId }
+  }
   onLog(`Task ${taskId} completed`)
   return { action: 'completed', taskId, dispatchId }
 }

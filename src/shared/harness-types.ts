@@ -2,6 +2,8 @@ import type { GitBranchChangeStatus } from './git-status-types'
 
 export type HarnessAgent = 'codex' | 'claude'
 
+export type HarnessRunMode = 'comparison' | 'orchestrator'
+
 export type HarnessCandidateStatus =
   | 'pending'
   | 'creating'
@@ -43,6 +45,14 @@ export type HarnessDiffSummary = {
   error: string | null
 }
 
+export type HarnessWorkerResult = {
+  messageId: string
+  subject: string
+  body: string
+  payload: string | null
+  receivedAt: number
+}
+
 export type HarnessCandidate<TAgent extends HarnessAgent = HarnessAgent> = {
   id: string
   agent: TAgent
@@ -51,15 +61,22 @@ export type HarnessCandidate<TAgent extends HarnessAgent = HarnessAgent> = {
   worktreePath: string | null
   branch: string | null
   agentTerminalHandle: string | null
+  agentTerminalPaneKey: string | null
   verificationTerminalHandle: string | null
+  verificationTerminalPaneKey: string | null
+  verificationTerminalOwnership: 'pending' | 'owned' | 'stopped' | null
   taskId: string | null
   dispatchId: string | null
+  workerResult: HarnessWorkerResult | null
   verification: HarnessVerificationSummary | null
   diff: HarnessDiffSummary | null
   error: string | null
   createdAt: number
   updatedAt: number
   startedAt: number | null
+  recoveryStartedAt: number | null
+  /** Persists the child-lane shutdown deadline across app restarts. */
+  childLaneDrainStartedAt: number | null
   /** Worker completion stays explicit because verification cannot substitute for worker_done. */
   workerCompletedAt: number | null
   completedAt: number | null
@@ -67,13 +84,14 @@ export type HarnessCandidate<TAgent extends HarnessAgent = HarnessAgent> = {
 
 export type HarnessRun = {
   id: string
+  mode: HarnessRunMode
   repoId: string
   sourceWorktreeId: string
   sourceWorktreePath: string
   goal: string
   verificationCommand: string
   baseSha: string
-  candidates: [HarnessCandidate<'codex'>, HarnessCandidate<'claude'>]
+  candidates: HarnessCandidate[]
   fatalError: string | null
   createdAt: number
   updatedAt: number
@@ -83,7 +101,15 @@ export type HarnessRun = {
 export type HarnessRunCreateInput = Pick<
   HarnessRun,
   'repoId' | 'sourceWorktreeId' | 'sourceWorktreePath' | 'goal' | 'verificationCommand' | 'baseSha'
->
+> & { mode?: HarnessRunMode }
+
+export type HarnessStartInput = {
+  /** Runtime worktree selector, such as `id:<worktree-id>`. */
+  worktree: string
+  goal: string
+  verificationCommand: string
+  mode?: HarnessRunMode
+}
 
 export type HarnessCandidatePatch = Partial<
   Pick<
@@ -93,13 +119,19 @@ export type HarnessCandidatePatch = Partial<
     | 'worktreePath'
     | 'branch'
     | 'agentTerminalHandle'
+    | 'agentTerminalPaneKey'
     | 'verificationTerminalHandle'
+    | 'verificationTerminalPaneKey'
+    | 'verificationTerminalOwnership'
     | 'taskId'
     | 'dispatchId'
+    | 'workerResult'
     | 'verification'
     | 'diff'
     | 'error'
     | 'startedAt'
+    | 'recoveryStartedAt'
+    | 'childLaneDrainStartedAt'
     | 'workerCompletedAt'
     | 'completedAt'
   >
@@ -133,6 +165,15 @@ function isTerminalHarnessCandidateStatus(status: HarnessCandidateStatus): boole
 
 export function deriveHarnessRunStatus(run: HarnessRun): HarnessRunStatus {
   if (run.fatalError !== null) {
+    return 'failed'
+  }
+  // Why: a comparison can finish with failed candidates, but a single
+  // coordinator failure is the Orchestrator run's outcome.
+  if (
+    run.mode === 'orchestrator' &&
+    run.candidates.length === 1 &&
+    run.candidates[0].status === 'failed'
+  ) {
     return 'failed'
   }
   if (run.candidates.every((candidate) => isTerminalHarnessCandidateStatus(candidate.status))) {
@@ -175,7 +216,9 @@ export function isHarnessCandidateVerified(
   return (
     candidate.status === 'verified' &&
     candidate.error === null &&
+    candidate.workerResult != null &&
     candidate.workerCompletedAt !== null &&
+    candidate.workerResult.receivedAt <= candidate.workerCompletedAt &&
     verification !== null &&
     verification.command === expectedVerificationCommand &&
     verification.exitCode === 0 &&

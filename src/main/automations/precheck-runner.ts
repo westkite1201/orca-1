@@ -1,14 +1,22 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import type { ClientChannel } from 'ssh2'
 import type { AutomationPrecheck, AutomationPrecheckResult } from '../../shared/automations-types'
 import { MAX_AUTOMATION_PRECHECK_OUTPUT_CHARS } from '../../shared/automation-precheck'
-import { getSshConnectionManager } from '../ipc/ssh'
-import { shellEscape } from '../ssh/ssh-connection-utils'
+import {
+  buildWslLoginShellCommand,
+  escapeWslShCommandForWindows,
+  quotePosixShell
+} from '../../shared/wsl-login-shell-command'
+import { parseWslUncPath } from '../../shared/wsl-paths'
+import { getRegisteredSshState, getSshConnectionManager } from '../ipc/ssh'
+import { toLinuxPath } from '../wsl'
+import { resolveSshPrecheckCommand } from './ssh-precheck-command'
 
-type AutomationPrecheckExecutionTarget =
+export type AutomationPrecheckExecutionTarget =
   | {
       type: 'local'
       cwd: string
+      wslDistro?: string
     }
   | {
       type: 'ssh'
@@ -19,6 +27,45 @@ type AutomationPrecheckExecutionTarget =
 type TailBuffer = {
   content: string
   truncated: boolean
+}
+
+export type AutomationPrecheckSpawn = {
+  command: string
+  args: string[]
+  options: SpawnOptions
+}
+
+export function resolveAutomationPrecheckSpawn(
+  precheck: AutomationPrecheck,
+  target: Extract<AutomationPrecheckExecutionTarget, { type: 'local' }>
+): AutomationPrecheckSpawn {
+  if (!target.wslDistro) {
+    return {
+      command: precheck.command,
+      args: [],
+      options: {
+        cwd: target.cwd,
+        detached: process.platform !== 'win32',
+        env: process.env,
+        shell: true,
+        windowsHide: true
+      }
+    }
+  }
+
+  const linuxCwd = parseWslUncPath(target.cwd)?.linuxPath ?? toLinuxPath(target.cwd)
+  const command = buildWslLoginShellCommand(
+    `cd ${quotePosixShell(linuxCwd)} && ${precheck.command}`
+  )
+  return {
+    command: 'wsl.exe',
+    args: ['-d', target.wslDistro, '--', 'sh', '-lc', escapeWslShCommandForWindows(command)],
+    options: {
+      detached: false,
+      env: process.env,
+      windowsHide: true
+    }
+  }
 }
 
 function appendTail(buffer: TailBuffer, chunk: string): TailBuffer {
@@ -127,13 +174,10 @@ function runLocalPrecheck(
     let timeout: ReturnType<typeof setTimeout> | null = null
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null
 
-    const child = spawn(precheck.command, {
-      cwd: target.cwd,
-      detached: process.platform !== 'win32',
-      env: process.env,
-      shell: true,
-      windowsHide: true
-    })
+    // Why: verification must use the same project runtime as its worker;
+    // spawning on Windows would otherwise test the host instead of WSL.
+    const launch = resolveAutomationPrecheckSpawn(precheck, target)
+    const child = spawn(launch.command, launch.args, launch.options)
 
     const settle = (exitCode: number | null, error: string | null): void => {
       if (settled) {
@@ -246,8 +290,14 @@ async function runSshPrecheck(
     return failedPrecheckResult(precheck, startedAt, 'SSH target is not connected.')
   }
   try {
-    const remoteCommand = `cd ${shellEscape(target.cwd)} && ${precheck.command}`
-    const channel = await connection.exec(remoteCommand)
+    // Why: the relay enriches registered state with its detected OS; the raw
+    // SSH connection state does not carry that platform reliably.
+    const launch = resolveSshPrecheckCommand({
+      cwd: target.cwd,
+      command: precheck.command,
+      remotePlatform: getRegisteredSshState(target.connectionId)?.remotePlatform
+    })
+    const channel = await connection.exec(launch.command, { wrapCommand: launch.wrapCommand })
     return await runSshChannelPrecheck({ precheck, channel, startedAt })
   } catch (error) {
     return failedPrecheckResult(

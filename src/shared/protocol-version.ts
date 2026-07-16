@@ -29,6 +29,10 @@ export const FOLDER_WORKSPACE_PATH_STATUS_RUNTIME_CAPABILITY =
   'folder-workspace.path-status.v1' as const
 export const LINEAR_ISSUE_ATTRIBUTE_FILTER_RUNTIME_CAPABILITY =
   'linear.issue-attribute-filter.v1' as const
+export const HARNESS_RUNTIME_CAPABILITY = 'harness.v1' as const
+// Why: v2 guarantees task execution metadata and dispatch isolation; older
+// hosts would strip those optional RPC fields and silently weaken the contract.
+export const HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY = 'harness.orchestrator.v2' as const
 // Why: signals the host exposes the Agent Session History scanner over RPC
 // (aiVault.listSessions). Registered unconditionally for every build, so it is a
 // STATIC capability advertised by getStatus() automatically — NOT a runtime
@@ -58,6 +62,10 @@ export const RUNTIME_CAPABILITIES = [
   WORKSPACE_RUN_CONTEXT_RUNTIME_CAPABILITY,
   FOLDER_WORKSPACE_PATH_STATUS_RUNTIME_CAPABILITY,
   LINEAR_ISSUE_ATTRIBUTE_FILTER_RUNTIME_CAPABILITY,
+  HARNESS_RUNTIME_CAPABILITY,
+  // Keep v1 advertised so older clients can still start their supported flow.
+  'harness.orchestrator.v1',
+  HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY,
   AI_VAULT_RUNTIME_CAPABILITY,
   TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY
 ] as const
