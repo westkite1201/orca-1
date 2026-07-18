@@ -2,6 +2,24 @@
   "schemaVersion": 2,
   "skills": [
     {
+      "name": "competitive-solve",
+      "sourcePath": "skills/competitive-solve",
+      "releaseRevision": 1,
+      "packageDigest": "4e91a975d407abdb0547066c556594cbbead94b1e3bc7ccea3339bc1547e2070",
+      "gitTreeSha": "4d6e801b1fbe6b158fc8c18cc0d842bb4f2178f8",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 6632,
+          "executable": false,
+          "classification": "text",
+          "exactSha256": "90f54e9f8422304ed4036a9fb469769752caf58404ca06786662ab84251c7532",
+          "textNormalizedSha256": "90f54e9f8422304ed4036a9fb469769752caf58404ca06786662ab84251c7532",
+          "identitySha256": "90f54e9f8422304ed4036a9fb469769752caf58404ca06786662ab84251c7532"
+        }
+      ]
+    },
+    {
       "name": "computer-use",
       "sourcePath": "skills/computer-use",
       "releaseRevision": 5,
