@@ -51,16 +51,26 @@ function readRuntimeArg() {
 function ensureNodeRuntime() {
   const initial = runNodeCheck()
   const patchedNodePtyRebuildReason = getPatchedNodePtyRebuildReason()
-  if (initial.ok && !patchedNodePtyRebuildReason) {
+  // A stale build/Release can coexist with a loader that still falls back to a
+  // prebuild, so a failed patched node-pty check must also force source rebuild.
+  const needsPatchedNodePtyRebuild =
+    patchedNodePtyRebuildReason !== null ||
+    (requiresPatchedNodePtySourceBuild() &&
+      initial.failures.some((failure) => failure.moduleName === 'node-pty'))
+  if (initial.ok && !needsPatchedNodePtyRebuild) {
     return
   }
 
-  if (patchedNodePtyRebuildReason) {
-    console.warn(`[native-runtime] ${patchedNodePtyRebuildReason}`)
+  if (needsPatchedNodePtyRebuild) {
+    if (patchedNodePtyRebuildReason) {
+      console.warn(`[native-runtime] ${patchedNodePtyRebuildReason}`)
+    }
     if (!initial.ok) {
       printCheckError(initial)
     }
-    runPnpm(['rebuild', 'node-pty'])
+    // Why: node-pty otherwise accepts its unpatched platform prebuild and
+    // never reaches node-gyp, even though Orca needs its patched source build.
+    runPnpm(['rebuild', 'node-pty'], { npm_config_build_from_source: 'true' })
     verifyNodeRuntimeAfterRebuild()
     return
   }
@@ -315,10 +325,11 @@ function getWindowsBuildNumber() {
   return match && match.length === 4 ? Number.parseInt(match[3], 10) : 0
 }
 
-function runPnpm(args) {
+function runPnpm(args, extraEnv = {}) {
   const command = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const result = spawnSync(command, args, {
     cwd: projectDir,
+    env: { ...process.env, ...extraEnv },
     stdio: 'inherit',
     shell: process.platform === 'win32'
   })
