@@ -251,6 +251,16 @@ describe('createSystemTray', () => {
     }
   })
 
+  it('omits Check for Updates when no updater callback is available', async () => {
+    setPlatform('darwin')
+    const { createSystemTray } = await loadModule()
+    const { onCheckForUpdates: _onCheckForUpdates, ...optionsWithoutUpdater } = createOptions()
+
+    createSystemTray(optionsWithoutUpdater)
+
+    expect(builtMenuItems().some((item) => item.label === 'Check for Updates...')).toBe(false)
+  })
+
   it('does not create a blank macOS item when the template asset fails to load', async () => {
     setPlatform('darwin')
     baseMacImage.getSize.mockReturnValue({ width: 0, height: 0 })

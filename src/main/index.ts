@@ -73,6 +73,7 @@ import {
 } from './updater'
 import { configureRemoteServerUpdater } from './runtime/remote-server-updater'
 import type { TuiAgent, UpdateCheckOptions } from '../shared/types'
+import productProfile from '../shared/product-profile.json'
 import { recordUpdaterLifecycle } from './updater-lifecycle-diagnostics'
 import {
   installServeSupervisorDisconnectQuit,
@@ -1009,11 +1010,15 @@ function getSystemTrayOptions(): SystemTrayOptions | null {
     devInstanceLabel: devInstanceIdentity.devLabel,
     onOpen: showMainWindowFromTray,
     onOpenSettings: openSettingsFromSystemMenu,
-    onCheckForUpdates: () => {
-      // Why: updater status renders in the main window, so a bare check would complete invisibly.
-      showMainWindowFromTray()
-      runUserInitiatedUpdateCheck()
-    },
+    ...(productProfile.updatesEnabled
+      ? {
+          onCheckForUpdates: () => {
+            // Why: updater status renders in the main window, so a bare check would complete invisibly.
+            showMainWindowFromTray()
+            runUserInitiatedUpdateCheck()
+          }
+        }
+      : {}),
     onQuit: quitFromSystemTray
   }
 }
