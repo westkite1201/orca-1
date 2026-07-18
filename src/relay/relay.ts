@@ -37,6 +37,7 @@ import { RelayDispatcher } from './dispatcher'
 import { RelayContext } from './context'
 import { PtyHandler } from './pty-handler'
 import { FsHandler } from './fs-handler'
+import { installRelayLogRotation } from './rotating-log-writer'
 import { GitHandler } from './git-handler'
 import { PreflightHandler } from './preflight-handler'
 import { ExternalAutomationsHandler } from './external-automations-handler'
@@ -114,6 +115,7 @@ function parseArgs(argv: string[]): {
   cliMode: boolean
   sockPath: string
   endpointDir?: string
+  logFile?: string
 } {
   let graceTimeMs = DEFAULT_GRACE_MS
   let connectMode = false
@@ -121,6 +123,7 @@ function parseArgs(argv: string[]): {
   let cliMode = false
   let sockPath = ''
   let endpointDir: string | undefined
+  let logFile: string | undefined
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === '--grace-time' && argv[i + 1]) {
       const parsed = Number.parseInt(argv[i + 1], 10)
@@ -143,12 +146,15 @@ function parseArgs(argv: string[]): {
     } else if (argv[i] === '--endpoint-dir' && argv[i + 1]) {
       endpointDir = argv[i + 1]
       i++
+    } else if (argv[i] === '--log-file' && argv[i + 1]) {
+      logFile = argv[i + 1]
+      i++
     }
   }
   if (!sockPath) {
     sockPath = join(process.cwd(), SOCK_NAME)
   }
-  return { graceTimeMs, connectMode, detached, cliMode, sockPath, endpointDir }
+  return { graceTimeMs, connectMode, detached, cliMode, sockPath, endpointDir, logFile }
 }
 
 // ── Connect mode ─────────────────────────────────────────────────────
@@ -318,7 +324,7 @@ async function readOrcaCliStdin(): Promise<string | undefined> {
 // ── Normal mode ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { graceTimeMs, connectMode, detached, cliMode, sockPath, endpointDir } = parseArgs(
+  const { graceTimeMs, connectMode, detached, cliMode, sockPath, endpointDir, logFile } = parseArgs(
     process.argv
   )
 
@@ -330,6 +336,13 @@ async function main(): Promise<void> {
     const marker = process.argv.indexOf('--orca-cli')
     await runOrcaCliMode(sockPath, marker >= 0 ? process.argv.slice(marker + 1) : [])
     return
+  }
+
+  // Why: only the long-lived detached daemon accumulates relay.log; --connect
+  // bridges and --orca-cli are short-lived and already returned above. Route all
+  // relay logging through a size-capped rotator so relay.log can't grow forever.
+  if (detached && logFile) {
+    installRelayLogRotation(logFile)
   }
 
   let ownsSocketPath = false
@@ -454,10 +467,10 @@ async function main(): Promise<void> {
 
   const ptyHandler = new PtyHandler(dispatcher, graceTimeMs)
   const fsHandler = new FsHandler(dispatcher, context)
-  // Why: GitHandler registers its own request handlers on construction,
-  // so we hold the reference only for potential future disposal.
-  const _gitHandler = new GitHandler(dispatcher, context)
-  void _gitHandler
+  const watchRegistry = fsHandler.getWatchRegistry()
+  ptyHandler.setWorktreeRemovalCoordinator(watchRegistry)
+  watchRegistry.setWorktreePtyTeardown((rootPath) => ptyHandler.shutdownForWorktreePath(rootPath))
+  const gitHandler = new GitHandler(dispatcher, context, watchRegistry)
 
   const _preflightHandler = new PreflightHandler(dispatcher)
   const _externalAutomationsHandler = new ExternalAutomationsHandler(dispatcher)
@@ -1004,24 +1017,41 @@ async function main(): Promise<void> {
     })
   }
 
+  let shutdownInFlight = false
   function shutdown(): void {
+    if (shutdownInFlight) {
+      return
+    }
+    shutdownInFlight = true
     relayLogLine(
       `[relay] Shutdown: ptys=${ptyHandler.activePtyCount}, clients=${socketClients.size}, ownsSocket=${ownsSocketPath}`
     )
     graceDeadlineAt = null
     graceReason = null
-    dispatcher.dispose()
-    ptyHandler.dispose()
-    fsHandler.dispose()
-    hookServer.stop()
-    // Why: Node's Unix server.close() can unlink the listen path. If the path
-    // was externally removed and rebound by a newer relay, closing this older
-    // server would strand the newer daemon behind a missing socket.
-    if (socketServer && ownsCurrentSocketPath()) {
-      socketServer.close()
-    }
-    cleanupOwnedSocket()
-    process.exit(0)
+    void ptyHandler
+      .dispose()
+      .then(() => {
+        dispatcher.dispose()
+        fsHandler.dispose()
+        gitHandler.dispose()
+        hookServer.stop()
+        // Why: Node's Unix server.close() can unlink the listen path. If the path
+        // was externally removed and rebound by a newer relay, closing this older
+        // server would strand the newer daemon behind a missing socket.
+        if (socketServer && ownsCurrentSocketPath()) {
+          socketServer.close()
+        }
+        cleanupOwnedSocket()
+        process.exit(0)
+      })
+      .catch((error) => {
+        // Why: keep owning a PTY whose native kill was rejected; exiting here
+        // would turn a transient signal failure into an orphan remote shell.
+        shutdownInFlight = false
+        relayLogLine(
+          `[relay] Shutdown deferred: ${error instanceof Error ? error.message : String(error)}`
+        )
+      })
   }
 
   process.on('SIGTERM', shutdown)

@@ -8,8 +8,11 @@ import type {
 import type {
   BaseRefSearchResult,
   BrowserCookieImportResult,
+  BrowserCertificateFailure,
+  BrowserLoadError,
   BrowserSessionProfile,
   BrowserSessionProfileSource,
+  CreateWorktreeResult,
   GitWorktreeInfo,
   RemoveWorktreeResult,
   Repo,
@@ -36,6 +39,12 @@ export type { RuntimeMarkdownReadTabResult, RuntimeMarkdownSaveTabResult }
 
 export type RuntimeGraphStatus = 'ready' | 'reloading' | 'unavailable'
 
+export type RuntimeDesktopWindowStatus = 'available' | 'openable' | 'initializing' | 'blocked'
+
+// Why: headless serve still owns one runtime graph, but zero can never collide
+// with Electron BrowserWindow ids and can be transferred safely on promotion.
+export const HEADLESS_RUNTIME_WINDOW_ID = 0
+
 // Why: the access scope a paired device token grants. Lives in shared so
 // pairing offers, status.get, and the device registry use one vocabulary.
 export type DeviceScope = 'mobile' | 'runtime'
@@ -54,6 +63,7 @@ export type RuntimeStatus = {
   rendererGraphEpoch: number
   graphStatus: RuntimeGraphStatus
   authoritativeWindowId: number | null
+  desktopWindowStatus?: RuntimeDesktopWindowStatus
   liveTabCount: number
   liveLeafCount: number
   // Why: optional so clients can read both new and pre-contract runtimes.
@@ -63,6 +73,7 @@ export type RuntimeStatus = {
   capabilities?: RuntimeCapability[]
   remoteControl?: RemoteRuntimeSharedConnectionDiagnostics | null
   hostPlatform?: NodeJS.Platform
+  terminalWindowsShell?: string | null
   // Why: legacy or saved WebSocket pairings may not carry scope metadata, so
   // the server stamps the authenticated token scope here for status.get only.
   deviceScope?: DeviceScope
@@ -83,6 +94,7 @@ export type CliStatusResult = {
   app: {
     running: boolean
     pid: number | null
+    desktopWindowStatus?: RuntimeDesktopWindowStatus
   }
   runtime: {
     state: CliRuntimeState
@@ -196,6 +208,8 @@ export type RuntimeMobileSessionBrowserTab = {
   loading: boolean
   canGoBack: boolean
   canGoForward: boolean
+  loadError?: BrowserLoadError | null
+  certificateFailure?: BrowserCertificateFailure | null
   color?: string | null
   isPinned?: boolean
   isActive: boolean
@@ -488,6 +502,7 @@ type RuntimeTerminalCreateBaseRequestPayload = {
   launchConfig?: SleepingAgentLaunchConfig
   launchToken?: string
   launchAgent?: TuiAgent
+  viewMode?: 'terminal' | 'chat'
   startupCommandDelivery?: StartupCommandDelivery
   title?: string
   activate?: boolean
@@ -536,6 +551,8 @@ export type RuntimeTerminalFocus = {
 export type RuntimeTerminalClose = {
   handle: string
   tabId: string
+  /** Present for the durable whole-tab lifecycle without changing legacy receipts. */
+  closeMode?: 'tab'
   ptyKilled: boolean
 }
 
@@ -585,18 +602,25 @@ export type RuntimeWorktreePsSummary = {
   workspaceKind?: 'git' | 'folder-workspace'
   worktreeId: string
   repoId: string
+  hostId?: Worktree['hostId']
+  terminalPlatform?: NodeJS.Platform
   repo: string
   path: string
   branch: string
   isArchived: boolean
   isMainWorktree: boolean
   hasHostSidebarActivity: boolean
+  worktreeInstanceId?: string
+  lineageWorktreeInstanceId?: string
+  parentWorktreeInstanceId?: string
   parentWorktreeId: string | null
   childWorktreeIds: string[]
   displayName: string
   workspaceStatus: string
   sortOrder: number
   manualOrder?: number
+  lastActivityAt?: number
+  createdAt?: number
   linkedIssue: number | null
   linkedPR: { number: number; state: string } | null
   linkedLinearIssue: string | null
@@ -665,6 +689,8 @@ export type RuntimeWorktreeCreateResult = {
   workspaceLineage?: WorkspaceLineage | null
   warnings: WorktreeLineageWarning[]
   warning?: string
+  startupTerminal?: CreateWorktreeResult['startupTerminal']
+  agentTerminalHandle?: string
 }
 
 export type RuntimeWorktreeRemoveResult = RemoveWorktreeResult & {
@@ -796,6 +822,11 @@ export type BrowserTabInfo = {
   url: string
   title: string
   active: boolean
+  // Why: a failed load leaves getURL() at chrome-error://; surface the structured
+  // error so an agent driving the browser can tell a bypassable certificate
+  // failure from an ordinary network error the way the UI can.
+  loadError?: BrowserLoadError | null
+  certificateFailure?: BrowserCertificateFailure | null
   worktreeId?: string | null
   profileId?: string | null
   profileLabel?: string | null

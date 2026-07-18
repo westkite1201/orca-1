@@ -19,6 +19,7 @@ import type {
   RuntimeMobileSessionTerminalClientTab
 } from '../../../shared/runtime-types'
 import type {
+  BrowserCertificateFailure,
   BrowserPage,
   BrowserWorkspace,
   Tab,
@@ -104,6 +105,7 @@ type MirroredTerminalTab = {
 type MirroredBrowserTab = {
   workspace: BrowserWorkspace
   page: BrowserPage
+  certificateFailure: BrowserCertificateFailure | null
   remotePageId: string
   unifiedTab: Tab
   hostTabId: string
@@ -130,6 +132,7 @@ export type WebSessionTabsSyncState = Pick<
   | 'agentStatusByPaneKey'
   | 'agentStatusEpoch'
   | 'browserPagesByWorkspace'
+  | 'browserCertificateFailuresByPageId'
   | 'browserTabsByWorktree'
   | 'groupsByWorktree'
   | 'layoutByWorktree'
@@ -685,6 +688,7 @@ function buildMirroredAgentStatusPatch(
 
   let nextAgentStatusByPaneKey = state.agentStatusByPaneKey
   let changed = false
+  let aggregateRelevantChange = false
   let sortRelevantChange = false
 
   for (const paneKey of Object.keys(state.agentStatusByPaneKey)) {
@@ -699,6 +703,7 @@ function buildMirroredAgentStatusPatch(
     }
     delete nextAgentStatusByPaneKey[paneKey]
     changed = true
+    aggregateRelevantChange = true
     sortRelevantChange = true
   }
 
@@ -712,11 +717,16 @@ function buildMirroredAgentStatusPatch(
     }
     nextAgentStatusByPaneKey[paneKey] = entry
     changed = true
-    sortRelevantChange =
-      sortRelevantChange ||
+    const entryAttributionChanged =
+      existing?.worktreeId !== entry.worktreeId || existing?.tabId !== entry.tabId
+    const entrySortRelevantChange =
       !existing ||
       existing.state !== entry.state ||
-      !isAgentStatusFresh(existing, now)
+      !isAgentStatusFresh(existing, now) ||
+      entryAttributionChanged ||
+      isMirroredCommandCodeTurnBump(existing, entry)
+    aggregateRelevantChange = aggregateRelevantChange || entrySortRelevantChange
+    sortRelevantChange = sortRelevantChange || entrySortRelevantChange
   }
 
   if (!changed) {
@@ -725,7 +735,7 @@ function buildMirroredAgentStatusPatch(
 
   return {
     agentStatusByPaneKey: nextAgentStatusByPaneKey,
-    agentStatusEpoch: sortRelevantChange ? state.agentStatusEpoch + 1 : state.agentStatusEpoch,
+    agentStatusEpoch: aggregateRelevantChange ? state.agentStatusEpoch + 1 : state.agentStatusEpoch,
     sortEpoch: sortRelevantChange ? state.sortEpoch + 1 : state.sortEpoch
   }
 }
@@ -944,7 +954,7 @@ function buildMirroredBrowserTabs(
       faviconUrl: existing?.page.faviconUrl ?? null,
       canGoBack: tab.canGoBack,
       canGoForward: tab.canGoForward,
-      loadError: null,
+      loadError: tab.loadError ?? null,
       createdAt,
       browserRuntimeEnvironmentId: environmentId,
       viewportPresetId: existing?.page.viewportPresetId ?? null
@@ -968,6 +978,7 @@ function buildMirroredBrowserTabs(
     return {
       workspace,
       page,
+      certificateFailure: tab.certificateFailure ?? null,
       remotePageId: tab.browserPageId,
       unifiedTab: buildBrowserUnifiedTab(workspace, tab, existing?.unifiedTab ?? null, groupId),
       hostTabId: tab.id
@@ -1291,18 +1302,34 @@ function agentStatusEntryEqual(a: AgentStatusEntry | undefined, b: AgentStatusEn
     a.stateStartedAt === b.stateStartedAt &&
     a.agentType === b.agentType &&
     a.paneKey === b.paneKey &&
+    a.worktreeId === b.worktreeId &&
+    a.tabId === b.tabId &&
     a.terminalTitle === b.terminalTitle &&
     a.toolName === b.toolName &&
     a.toolInput === b.toolInput &&
     a.interactivePrompt === b.interactivePrompt &&
     a.lastAssistantMessage === b.lastAssistantMessage &&
     a.interrupted === b.interrupted &&
+    a.promptInteractionKey === b.promptInteractionKey &&
     sameAgentStateHistory(a.stateHistory, b.stateHistory)
   )
 }
 
 function isAgentStatusFresh(entry: Pick<AgentStatusEntry, 'updatedAt'>, now: number): boolean {
   return now - entry.updatedAt <= AGENT_STATUS_STALE_AFTER_MS
+}
+
+function isMirroredCommandCodeTurnBump(
+  existing: AgentStatusEntry | undefined,
+  entry: AgentStatusEntry
+): boolean {
+  return (
+    existing?.agentType === 'command-code' &&
+    entry.agentType === 'command-code' &&
+    existing.state === 'working' &&
+    entry.state === 'working' &&
+    entry.stateStartedAt > existing.stateStartedAt
+  )
 }
 
 function sameStringRecord(
@@ -1452,6 +1479,29 @@ function browserPageEqual(a: BrowserPage, b: BrowserPage): boolean {
     a.createdAt === b.createdAt &&
     a.browserRuntimeEnvironmentId === b.browserRuntimeEnvironmentId &&
     a.viewportPresetId === b.viewportPresetId
+  )
+}
+
+function browserCertificateFailureEqual(
+  a: BrowserCertificateFailure | null | undefined,
+  b: BrowserCertificateFailure | null | undefined
+): boolean {
+  const left = a ?? null
+  const right = b ?? null
+  if (left === right) {
+    return true
+  }
+  return Boolean(
+    left &&
+    right &&
+    left.challengeId === right.challengeId &&
+    left.browserPageId === right.browserPageId &&
+    left.errorCode === right.errorCode &&
+    left.error === right.error &&
+    left.origin === right.origin &&
+    left.displayHost === right.displayHost &&
+    left.canProceed === right.canProceed &&
+    left.observedAt === right.observedAt
   )
 }
 
@@ -2112,6 +2162,7 @@ export function applyWebSessionTabsSnapshot(
 
   let nextBrowserPagesByWorkspace = state.browserPagesByWorkspace
   let nextRemoteBrowserPageHandlesByPageId = state.remoteBrowserPageHandlesByPageId
+  let nextBrowserCertificateFailuresByPageId = state.browserCertificateFailuresByPageId
   for (const removedWorkspaceId of removedBrowserWorkspaceIds) {
     const pages = nextBrowserPagesByWorkspace[removedWorkspaceId] ?? []
     if (nextBrowserPagesByWorkspace[removedWorkspaceId]) {
@@ -2122,6 +2173,13 @@ export function applyWebSessionTabsSnapshot(
       delete nextBrowserPagesByWorkspace[removedWorkspaceId]
     }
     for (const page of pages) {
+      if (nextBrowserCertificateFailuresByPageId[page.id]) {
+        nextBrowserCertificateFailuresByPageId =
+          nextBrowserCertificateFailuresByPageId === state.browserCertificateFailuresByPageId
+            ? { ...state.browserCertificateFailuresByPageId }
+            : nextBrowserCertificateFailuresByPageId
+        delete nextBrowserCertificateFailuresByPageId[page.id]
+      }
       if (nextRemoteBrowserPageHandlesByPageId[page.id]) {
         nextRemoteBrowserPageHandlesByPageId =
           nextRemoteBrowserPageHandlesByPageId === state.remoteBrowserPageHandlesByPageId
@@ -2131,7 +2189,7 @@ export function applyWebSessionTabsSnapshot(
       }
     }
   }
-  for (const { page, remotePageId } of mirroredBrowserTabs) {
+  for (const { page, certificateFailure, remotePageId } of mirroredBrowserTabs) {
     const current = nextBrowserPagesByWorkspace[page.workspaceId] ?? []
     if (!sameBrowserPages(current, [page])) {
       nextBrowserPagesByWorkspace =
@@ -2152,6 +2210,22 @@ export function applyWebSessionTabsSnapshot(
       nextRemoteBrowserPageHandlesByPageId[page.id] = {
         environmentId,
         remotePageId
+      }
+    }
+    if (
+      !browserCertificateFailureEqual(
+        nextBrowserCertificateFailuresByPageId[page.id],
+        certificateFailure
+      )
+    ) {
+      nextBrowserCertificateFailuresByPageId =
+        nextBrowserCertificateFailuresByPageId === state.browserCertificateFailuresByPageId
+          ? { ...state.browserCertificateFailuresByPageId }
+          : nextBrowserCertificateFailuresByPageId
+      if (certificateFailure) {
+        nextBrowserCertificateFailuresByPageId[page.id] = certificateFailure
+      } else {
+        delete nextBrowserCertificateFailuresByPageId[page.id]
       }
     }
   }
@@ -2360,6 +2434,9 @@ export function applyWebSessionTabsSnapshot(
     ...(nextRemoteBrowserPageHandlesByPageId !== state.remoteBrowserPageHandlesByPageId
       ? { remoteBrowserPageHandlesByPageId: nextRemoteBrowserPageHandlesByPageId }
       : {}),
+    ...(nextBrowserCertificateFailuresByPageId !== state.browserCertificateFailuresByPageId
+      ? { browserCertificateFailuresByPageId: nextBrowserCertificateFailuresByPageId }
+      : {}),
     ...(nextActiveTabIdByWorktree !== state.activeTabIdByWorktree
       ? { activeTabIdByWorktree: nextActiveTabIdByWorktree }
       : {}),
@@ -2428,6 +2505,23 @@ export function applyFreshWebSessionTabsSnapshots(
     : applyWebSessionTabsSnapshots(state, freshSnapshots, environmentId, now)
 }
 
+export function applyWebSessionTabsStorePatch(
+  buildPatch: (state: AppState) => WebSessionTabsSyncState | Partial<WebSessionTabsSyncState>
+): void {
+  let mirroredAgentStatusChanged = false
+  useAppStore.setState((state) => {
+    const patch = buildPatch(state)
+    mirroredAgentStatusChanged =
+      patch !== state && Object.prototype.hasOwnProperty.call(patch, 'agentStatusByPaneKey')
+    return patch
+  })
+  // Why: paired-web snapshots bypass setAgentStatus, so they must explicitly
+  // arm the same stale-boundary timer as local hook events.
+  if (mirroredAgentStatusChanged) {
+    useAppStore.getState().scheduleAgentStatusFreshness()
+  }
+}
+
 export function useWebSessionTabsSync(): void {
   const activeWorktreeId = useAppStore((state) => state.activeWorktreeId)
   const runtimeSessionMirrorEnvironmentKey = useAppStore((state) =>
@@ -2485,7 +2579,7 @@ export function useWebSessionTabsSync(): void {
             console.warn('[web-session-tabs-sync] initial listAll returned an invalid payload')
             return
           }
-          useAppStore.setState((state) =>
+          applyWebSessionTabsStorePatch((state) =>
             applyFreshWebSessionTabsSnapshots(state, result.snapshots, environmentId)
           )
         })
@@ -2526,7 +2620,7 @@ export function useWebSessionTabsSync(): void {
                     acceptReplayedWebSessionTabsSnapshot(environmentId, snapshot.worktree)
                   }
                 }
-                useAppStore.setState((state) =>
+                applyWebSessionTabsStorePatch((state) =>
                   applyFreshWebSessionTabsSnapshots(state, event.snapshots, environmentId)
                 )
                 return
@@ -2537,7 +2631,7 @@ export function useWebSessionTabsSync(): void {
               if (replayed) {
                 acceptReplayedWebSessionTabsSnapshot(environmentId, event.worktree)
               }
-              useAppStore.setState((state) =>
+              applyWebSessionTabsStorePatch((state) =>
                 applyFreshWebSessionTabsSnapshot(state, event, environmentId)
               )
             },
@@ -2642,7 +2736,7 @@ export function useWebSessionTabsSync(): void {
               skipWakeRespawn: shouldSkipWebRuntimeWakeTerminalRespawn(activeWorktreeId)
             })
             if (fresh) {
-              useAppStore.setState((state) =>
+              applyWebSessionTabsStorePatch((state) =>
                 applyWebSessionTabsSnapshot(state, event, environmentId)
               )
             }

@@ -23,6 +23,7 @@ import {
   type BrowserScreencastFrame
 } from './browser-screencast-protocol'
 import {
+  buildStreamUnsubscribe,
   buildTerminalUnsubscribeParams,
   updateTerminalSubscriptionViewport as updateCachedTerminalSubscriptionViewport
 } from './rpc-client-terminal-subscription'
@@ -567,10 +568,10 @@ export function connect(
         const stream = streamListeners.get(response.id)
         if (stream && response.ok) {
           const result = (response as RpcSuccess).result
-          if (isBrowserScreencastReadyResult(result)) {
+          if (isStreamingSubscriptionReadyResult(result)) {
             stream.subscriptionId = result.subscriptionId
             if (stream.cancelled) {
-              sendBrowserScreencastUnsubscribe(result.subscriptionId)
+              sendServerSubscriptionUnsubscribe(stream)
               removeStreamListener(response.id)
               return
             }
@@ -947,8 +948,21 @@ export function connect(
     if (pendingBrowserScreencastRequestId === id) {
       pendingBrowserScreencastRequestId = null
     }
+    disposeServerSubscriptionStream(id, stream)
+  }
+
+  function disposeRuntimeClientEventsStream(id: string): void {
+    const stream = streamListeners.get(id)
+    if (!stream || stream.method !== 'runtime.clientEvents.subscribe') {
+      return
+    }
+    disposeServerSubscriptionStream(id, stream)
+  }
+
+  function disposeServerSubscriptionStream(id: string, stream: StreamRequest): void {
+    stream.cancelled = true
     if (stream.subscriptionId) {
-      sendBrowserScreencastUnsubscribe(stream.subscriptionId)
+      sendServerSubscriptionUnsubscribe(stream)
       removeStreamListener(id)
       return
     }
@@ -1020,6 +1034,24 @@ export function connect(
       method: 'browser.screencast.unsubscribe',
       params: { subscriptionId }
     })
+  }
+
+  function sendServerSubscriptionUnsubscribe(stream: StreamRequest): void {
+    if (!stream.subscriptionId) {
+      return
+    }
+    if (stream.method === 'browser.screencast') {
+      sendBrowserScreencastUnsubscribe(stream.subscriptionId)
+      return
+    }
+    if (stream.method === 'runtime.clientEvents.subscribe') {
+      sendEncrypted({
+        id: nextId(),
+        deviceToken,
+        method: 'runtime.clientEvents.unsubscribe',
+        params: { subscriptionId: stream.subscriptionId }
+      })
+    }
   }
 
   openConnection()
@@ -1120,6 +1152,10 @@ export function connect(
           disposeBrowserScreencastStream(id)
           return
         }
+        if (stream?.method === 'runtime.clientEvents.subscribe') {
+          disposeRuntimeClientEventsStream(id)
+          return
+        }
         if (stream?.method === 'terminal.subscribe') {
           // Why: the runtime registers cleanup under the composite key
           // `${terminal}:${clientId}` so two phones subscribing to the same
@@ -1136,18 +1172,11 @@ export function connect(
               params: unsubscribeParams
             })
           }
-        } else if (
-          stream?.method === 'session.tabs.subscribe' &&
-          stream.params &&
-          typeof stream.params === 'object' &&
-          typeof (stream.params as { worktree?: unknown }).worktree === 'string'
-        ) {
-          sendEncrypted({
-            id: nextId(),
-            deviceToken,
-            method: 'session.tabs.unsubscribe',
-            params: { worktree: (stream.params as { worktree: string }).worktree }
-          })
+        } else {
+          const unsub = buildStreamUnsubscribe(stream?.method, stream?.params)
+          if (unsub) {
+            sendEncrypted({ id: nextId(), deviceToken, method: unsub.method, params: unsub.params })
+          }
         }
         removeStreamListener(id)
       }
@@ -1243,7 +1272,7 @@ function isTerminalSubscribedResult(
   )
 }
 
-function isBrowserScreencastReadyResult(
+function isStreamingSubscriptionReadyResult(
   value: unknown
 ): value is { type: 'ready'; subscriptionId: string } {
   return (

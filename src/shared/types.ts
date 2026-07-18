@@ -40,6 +40,8 @@ import type {
   GlobalWindowsRuntimeDefault,
   LocalWindowsRuntimePreference
 } from './project-execution-runtime'
+import type { UsagePercentageDisplay } from './usage-percentage-display'
+import type { PersistedNativeChatSessionOptions } from './native-chat-session-options'
 
 // Re-exported for backward compat with renderer call sites that import
 // `WorkspaceCreateTelemetrySource` from '../../../shared/types'.
@@ -271,11 +273,9 @@ export type Repo = {
   importedExternalWorktreePaths?: string[]
   /** User permanently opted out of the new-external-worktree inbox for this repo. */
   externalWorktreeDiscoverySuppressedAt?: number
-  /** Paths (relative to the primary checkout) that should be symlinked into
-   *  newly created worktrees of this repo. Consumed only when the global
-   *  `experimentalWorktreeSymlinks` flag is on — the per-repo list is the
-   *  "what to link", the global flag is the "whether to link at all" switch.
-   *  Undefined/empty means no symlinks are created for this repo. */
+  /** Paths (relative to the primary checkout) that should be APFS clone-copied
+   *  on macOS when possible, otherwise symlinked, into newly created worktrees.
+   *  Undefined/empty means no shared paths are created for this repo. */
   symlinkPaths?: string[]
   /** Durable sidebar-only repo organization. Execution remains repo-scoped. */
   projectGroupId?: string | null
@@ -427,9 +427,27 @@ export type GitWorktreeInfo = {
   branch: string
   isBare: boolean
   isSparse?: boolean
+  locked?: boolean
+  lockReason?: string
+  /** True when Git reports the worktree as prunable (its directory is gone but
+   *  the registration remains). Detected via the `prunable` porcelain field
+   *  (Git ≥ 2.36) or a path-existence probe on older Git. */
+  prunable?: boolean
+  prunableReason?: string
   /** True for the repo's main working tree (the first entry from `git worktree list`).
    *  Linked worktrees created via `git worktree add` have this set to false. */
   isMainWorktree: boolean
+}
+
+/** Head/branch snapshot read from Git metadata files without spawning Git.
+ *  Carries background-worktree freshness when status-only churn includes a
+ *  real head move (external commit/amend/reset) that must not re-enter the
+ *  structural `worktrees:changed` fanout. */
+export type WorktreeHeadIdentity = {
+  worktreePath: string
+  head: string
+  /** Full ref (e.g. `refs/heads/main`), or null for a detached HEAD. */
+  branch: string | null
 }
 
 // ─── Worktree (app-level, enriched) ──────────────────────────────────
@@ -871,6 +889,28 @@ export type BrowserLoadError = {
   validatedUrl: string
 }
 
+export type BrowserCertificateFailure = {
+  challengeId: string
+  browserPageId: string
+  errorCode: number | null
+  error: string
+  origin: string
+  displayHost: string
+  canProceed: boolean
+  observedAt: number
+}
+
+export type BrowserCertificateProceedFailureReason =
+  | 'expired'
+  | 'changed'
+  | 'ineligible'
+  | 'missing'
+  | 'navigated'
+
+export type BrowserCertificateProceedResult =
+  | { ok: true }
+  | { ok: false; reason: BrowserCertificateProceedFailureReason }
+
 // Why: BrowserPage persists the active viewport preset so CDP emulation can be
 // reapplied on reload/navigation without the user re-picking from the toolbar.
 export type BrowserViewportPresetId =
@@ -1025,6 +1065,11 @@ export type PersistedOpenFile = {
   /** Signature of the disk content the dirty draft is based on; lets restore
    *  re-derive a changed-on-disk conflict from ground truth. */
   lastKnownDiskSignature?: string
+  /** Why: a read-only tab (AI Vault View Log) must survive restart still
+   *  read-only; persisted only when true so old sessions stay writable. */
+  readOnly?: boolean
+  /** Opt-in streaming append for a read-only local log tab. */
+  liveTail?: boolean
 }
 
 export type WorkspaceSessionState = {
@@ -1149,24 +1194,32 @@ export type PRInfo = {
   headDivergedFromMergedPRAtOid?: string
   /** Target branch name for PR-created worktree compare-base repair. */
   baseRefName?: string
+  /** PR head branch name. Lets linked-PR consumers detect that the worktree
+   *  has switched to a different branch and the durable link is stale. */
+  headRefName?: string
   prRepo?: GitHubRepositoryIdentity
   headRepo?: GitHubRepositoryIdentity
   conflictSummary?: PRConflictSummary
 }
+
+// server_error covers GitHub-side HTTP 5xx outages (githubstatus.com incidents),
+// distinct from a transport-level `network` failure or a `rate_limited` budget.
+export type PRRefreshUpstreamErrorType =
+  | 'rate_limited'
+  | 'auth'
+  | 'network'
+  | 'permission'
+  | 'repo_unavailable'
+  | 'gh_unavailable'
+  | 'server_error'
+  | 'unknown'
 
 export type PRRefreshOutcome =
   | { kind: 'found'; pr: PRInfo; fetchedAt: number }
   | { kind: 'no-pr'; fetchedAt: number }
   | {
       kind: 'upstream-error'
-      errorType:
-        | 'rate_limited'
-        | 'auth'
-        | 'network'
-        | 'permission'
-        | 'repo_unavailable'
-        | 'gh_unavailable'
-        | 'unknown'
+      errorType: PRRefreshUpstreamErrorType
       message: string
       fetchedAt: number
     }
@@ -1443,6 +1496,11 @@ export type GitHubWorkItem = {
   labels: string[]
   updatedAt: string
   author: string | null
+  // Why: GHE user logins don't exist on github.com, so the github.com/{login}.png
+  // fallback 404s. Carry the API-provided avatar_url so github.com + Enterprise
+  // both render; absent on the gh-pr-view path (gh omits avatar), then the UI
+  // falls back to the login URL and finally an initials placeholder. See #8784.
+  authorAvatarUrl?: string
   branchName?: string
   baseRefName?: string
   // Why: PR checks are keyed by head commit; carrying this lets task rows use
@@ -1523,6 +1581,9 @@ export type GitHubWorkItemDetails = {
   pullRequestId?: string
   checks?: PRCheckDetail[]
   files?: GitHubPRFile[]
+  /** Only set for PRs. True when the file fetch failed (rate limit, auth,
+   *  unresolved remote) rather than the PR genuinely having no changed files. */
+  filesUnavailable?: boolean
   participants?: GitHubAssignableUser[]
   /** Logins of current assignees. Only set for issues. */
   assignees?: string[]
@@ -1578,6 +1639,7 @@ export type LinearIssue = {
   workspaceName?: string
   identifier: string
   title: string
+  branchName?: string
   description?: string
   url: string
   state: {
@@ -1736,6 +1798,10 @@ export type GitHubCreateIssueFields = {
   assignees?: string[]
 }
 
+export type GitHubCreateIssueResult =
+  | { ok: true; number: number; url: string; bodySaveWarning?: string }
+  | { ok: false; error: string }
+
 export type GitHubIssueCloseReason = 'completed' | 'not_planned' | 'duplicate'
 
 export type GitHubIssueUpdate = {
@@ -1830,6 +1896,7 @@ export type {
 } from './gitlab-types'
 
 export type {
+  JiraAuthType,
   JiraComment,
   JiraConnectArgs,
   JiraConnectionStatus,
@@ -1844,6 +1911,7 @@ export type {
   JiraMutationResult,
   JiraPriority,
   JiraProject,
+  JiraProjectStatusOrder,
   JiraSite,
   JiraSiteSelection,
   JiraStatus,
@@ -2498,6 +2566,8 @@ export type GlobalSettings = {
   editorAutoSave: boolean
   editorAutoSaveDelayMs: number
   editorMinimapEnabled: boolean
+  /** Defaults on for profiles saved before file-editor wrapping became configurable. */
+  editorWordWrap?: boolean
   /** Persisted opt-out for browser spellcheck noise in rich Markdown editing surfaces. */
   richMarkdownSpellcheckEnabled?: boolean
   /** Whether local markdown review note controls and the review panel are shown. */
@@ -2562,10 +2632,15 @@ export type GlobalSettings = {
    *  system tray instead of quitting Orca; off keeps the default quit-on-close.
    *  The tray icon itself is always present on Windows regardless of this flag. */
   minimizeToTrayOnClose?: boolean
-  /** Why: Windows terminals conventionally use right-click as a paste gesture.
-   *  The setting stays Windows-only so macOS/Linux keep their existing context
-   *  menu behavior and users can still reach the menu with Ctrl+right-click. */
+  /** Why: macOS keeps Orca running after its last window closes, so this
+   *  controls the additive menu-bar entry without changing Dock behavior. */
+  showMenuBarIcon?: boolean
+  /** Why: Windows terminals conventionally use right-click as a paste gesture,
+   *  while macOS/Linux default to their existing context menu behavior. */
   terminalRightClickToPaste: boolean
+  /** One-shot guard that distinguishes the old global true default from a
+   *  choice made after the setting became available on every platform. */
+  terminalRightClickToPasteDefaultedForPlatform?: boolean
   /** Why: COMSPEC always points to cmd.exe on stock Windows, so without an
    *  explicit setting the terminal would always open CMD instead of the
    *  user's preferred shell. Defaults to 'powershell.exe' which is the
@@ -2596,8 +2671,8 @@ export type GlobalSettings = {
    *  paste with Cmd/Ctrl+V without an intervening Cmd/Ctrl+Shift+C. Defaults
    *  to false so existing users keep the explicit-copy behavior. */
   terminalClipboardOnSelect: boolean
-  /** Why: lets TUIs like tmux, nvim, and fzf copy to the system clipboard via
-   *  the OSC 52 escape sequence — essential for SSH-hosted workflows where
+  /** Why: lets TUIs like Grok, tmux, nvim, and fzf copy to the system clipboard
+   *  via the OSC 52 escape sequence — essential for SSH-hosted workflows where
    *  the terminal is the only bridge to the local clipboard. Defaults to
    *  false because OSC 52 is a classic data-exfiltration vector (any
    *  process piping untrusted output into the terminal — `cat attacker.log`
@@ -2638,6 +2713,9 @@ export type GlobalSettings = {
   /** Experimental: native chat surface for Claude/Codex terminal sessions.
    *  Off by default while the desktop UX is still being exercised. */
   experimentalNativeChat?: boolean
+  /** Last explicit native-chat model and model-scoped option selections. Live
+   * panes still require an applied/dispatched record before showing a value. */
+  nativeChatSessionOptions?: PersistedNativeChatSessionOptions
   /** Extra launcher rows for the worktree "Open in" submenu. VS Code is always shown first. */
   openInApplications?: OpenInApplication[]
   /** Deprecated: migration/backward-compat only. Use PersistedUIState.rightSidebarOpen. */
@@ -2664,6 +2742,9 @@ export type GlobalSettings = {
   /** Why: Orca Mobile remains reachable from Settings; this only controls
    *  whether the top-level sidebar shortcut is shown. */
   showMobileButton?: boolean
+  /** Why: pinned workspaces default to one sidebar location; users can opt
+   *  back into seeing them in their natural groups too. */
+  showPinnedWorktreesInGroups?: boolean
   /** Controls how Ctrl+Tab chooses the next visible tab. Optional for
    *  profiles saved before this setting existed; readers default to MRU. */
   ctrlTabOrderMode?: CtrlTabOrderMode
@@ -2695,6 +2776,11 @@ export type GlobalSettings = {
   diffDefaultView: 'inline' | 'side-by-side'
   diffWordWrap: boolean
   combinedDiffFileTreeVisibleByDefault: boolean
+  /** Comment author logins the user manually marked as bots (stored lowercased).
+   *  Why: some review bots use regular user accounts that defeat both provider
+   *  metadata and login heuristics, so the Humans/Bots comment filter needs a
+   *  user-supplied escape hatch. */
+  prBotAuthorOverrides: string[]
   notifications: NotificationSettings
   /** When true, a countdown timer is shown after a Claude agent becomes idle,
    *  indicating time remaining before the prompt cache expires. Disabled by default. */
@@ -2721,6 +2807,28 @@ export type GlobalSettings = {
    *  does not surface commands from other worktrees. Defaults to true.
    *  Disable to revert to shared global shell history. */
   terminalScopeHistoryByWorktree: boolean
+  /** Kill switch for hidden terminal view parking — unmounting long-hidden
+   *  terminal panes while a pane-less watcher keeps PTY side effects alive.
+   *  Defaults to true; `false` disables parking entirely.
+   *  See docs/reference/terminal-hidden-view-parking.md. */
+  terminalHiddenViewParking?: boolean
+  /** Kill switch for main-process terminal side-effect authority: when true
+   *  (default), local-daemon/SSH PTY title/bell/agent facts are consumed from
+   *  the `pty:sideEffect` channel and renderer byte parsers stay unregistered
+   *  for those PTYs; `false` restores renderer byte parsing.
+   *  See docs/reference/terminal-side-effect-authority.md. */
+  terminalMainSideEffectAuthority?: boolean
+  /** Kill switch for main's hidden-delivery gate (Phase 4): when true
+   *  (default) AND terminalMainSideEffectAuthority is on, main drops PTY byte
+   *  delivery to hidden renderer views after model ingestion; reveal restores
+   *  from the model snapshot. `false` restores hidden byte delivery. */
+  terminalHiddenDeliveryGate?: boolean
+  /** Kill switch for the main model query responder (Phase 5): when true
+   *  (default) AND both Phase-4 gate switches are on, main answers terminal
+   *  queries (DA1/CPR/DECRPM, …) embedded in hidden-dropped chunks from the
+   *  runtime emulator. `false` silences the responder without changing drops.
+   *  See docs/reference/terminal-query-authority.md. */
+  terminalModelQueryAuthority?: boolean
   /** Which agent to pre-select in the new-workspace composer.
    *  - null: auto (first detected agent)
    *  - 'blank': blank terminal (no agent launched)
@@ -2806,6 +2914,9 @@ export type GlobalSettings = {
   /** Why: disabling must persist so startup does not reinstall global agent
    *  hook entries right after the user removes them from Settings or CLI. */
   agentStatusHooksEnabled: boolean
+  /** Dismissed freshness tuples grant no write authority; they only keep the
+   *  same exact official placement/revision from nudging more than once. */
+  dismissedSkillFreshnessNudges?: string[]
   /** Why: generated tab titles are semantic but subjective, so they stay opt-in
    *  and manual renames remain the stronger user intent. */
   tabAutoGenerateTitle: boolean
@@ -2887,13 +2998,6 @@ export type GlobalSettings = {
   /** Legacy persisted key from the Experimental rollout. New writes use
    *  compactWorktreeCards. */
   experimentalCompactWorktreeCards?: boolean
-  /** Experimental: when creating a worktree, automatically symlink a
-   *  user-configured set of files/folders from the primary checkout (e.g.
-   *  `.env`, `node_modules`) into the new worktree. Opt-in while the
-   *  configuration surface and edge cases (conflicts with existing paths,
-   *  cleanup on worktree delete) are still being worked out. */
-  experimentalWorktreeSymlinks: boolean
-
   /** Active non-local runtime environment for client-routed RPC. `null`
    *  preserves the current local desktop behavior. */
   activeRuntimeEnvironmentId?: string | null
@@ -2938,6 +3042,12 @@ export type GlobalSettings = {
      *  false for fresh installs (no first-launch surface). */
     existedBeforeTelemetryRelease: boolean
   }
+  /** One-shot cohort marker for the tab-switch keybinding convention swap.
+   *  Absent before the migration runs. Set once on first boot after the swap:
+   *  `'pending'` for pre-existing installs (a seed then pins the old chords in
+   *  keybindings.json before flipping this to `'done'`), or `'done'` for fresh
+   *  installs, which adopt the new registry defaults with no seed. */
+  tabSwitchKeybindingSeed?: 'pending' | 'done'
   /** Local voice/dictation configuration (Phase 1 voice feature). Optional
    *  because profiles created before voice landed won't have the key;
    *  `getDefaultSettings()` hydrates `getDefaultVoiceSettings()` via the
@@ -3151,9 +3261,11 @@ export type StatusBarItem =
   | 'claude'
   | 'codex'
   | 'gemini'
+  | 'antigravity'
   | 'opencode-go'
   | 'kimi'
   | 'minimax'
+  | 'grok'
   | 'ssh'
   | 'resource-usage'
   | 'ports'
@@ -3193,10 +3305,30 @@ export type ProjectOrderBy = 'manual' | 'recent'
 export type WorkspaceHostScope = 'all' | 'local' | `ssh:${string}` | `runtime:${string}`
 export type VisibleWorkspaceHostIds = Exclude<WorkspaceHostScope, 'all'>[] | null
 export type WorkspaceHostOrder = Exclude<WorkspaceHostScope, 'all'>[]
+export type ManualRepoOrderEntry = {
+  hostId: WorkspaceHostOrder[number]
+  repoId: string
+}
+
+/** The active top-level section shown in the main content area. */
+export type TopLevelView =
+  | 'terminal'
+  | 'settings'
+  | 'tasks'
+  | 'activity'
+  | 'automations'
+  | 'space'
+  | 'skills'
+  | 'mobile'
 
 export type PersistedUIState = {
   lastActiveRepoId: string | null
   lastActiveWorktreeId: string | null
+  /** Active top-level view at save time, restored on reload/relaunch so the app
+   *  reopens where the user left off instead of snapping back to the terminal.
+   *  Sanitized on hydration (unknown value or a now-gated view falls back to
+   *  'terminal'). */
+  activeView: TopLevelView
   sidebarWidth: number
   rightSidebarOpen: boolean
   rightSidebarTab: RightSidebarTab
@@ -3224,6 +3356,9 @@ export type PersistedUIState = {
   /** User-defined sidebar order for host sections. Missing/new hosts append in
    *  the discovered host order. */
   workspaceHostOrder?: WorkspaceHostOrder
+  /** Desktop-owned all-host repo order. Host-qualified identities preserve a
+   *  manual cross-host interleaving while each host owns its local permutation. */
+  manualRepoOrder?: ManualRepoOrderEntry[]
   /** Deprecated legacy positive-form setting. Ignored on hydration. */
   showSleepingWorkspaces?: boolean
   /** Deprecated legacy name used by a short-lived build. Ignored on hydration. */
@@ -3269,8 +3404,14 @@ export type PersistedUIState = {
   _kimiStatusBarDefaultAdded?: boolean
   /** One-shot migration flag for adding the default-on MiniMax status item. */
   _minimaxStatusBarDefaultAdded?: boolean
+  /** One-shot migration flag for adding the default-on Antigravity status item. */
+  _antigravityStatusBarDefaultAdded?: boolean
+  /** One-shot migration flag for adding the default-on Grok status item. */
+  _grokStatusBarDefaultAdded?: boolean
   statusBarItems: StatusBarItem[]
   statusBarVisible: boolean
+  /** Why: this is client-side presentation, not a provider/account or execution-host setting. */
+  usagePercentageDisplay?: UsagePercentageDisplay
   dismissedUpdateVersion: string | null
   lastUpdateCheckAt: number | null
   pendingUpdateNudgeId?: string | null
@@ -3314,6 +3455,10 @@ export type PersistedUIState = {
   /** One-shot rollout notice for manual project ordering becoming the default.
    *  Absent or true means the sidebar callout stays hidden. */
   projectOrderManualDefaultNoticeDismissed?: boolean
+  /** One-shot notice that status-bar usage meters now show percent used (not
+   *  remaining). Absent is resolved on load: brand-new profiles default to
+   *  dismissed; upgraded profiles see the notice once. */
+  usagePercentageDisplayChangeNoticeDismissed?: boolean
   /** User-hidden empty-state usage CTA in the status bar. Permanently hides the
    *  "Connect AI accounts to see usage" prompt even if all providers are later
    *  disconnected — a dismissed teaching nudge stays dismissed. */
@@ -3471,6 +3616,8 @@ export type CustomPet = {
 export type SpriteAnimation = {
   row: number
   frames: number
+  /** Per-frame holds in ms (length === frames). Absent means uniform sheet fps. */
+  frameDurationsMs?: number[]
 }
 
 export type PersistedTrustedOrcaHookEntry = {
@@ -3492,7 +3639,10 @@ export type PersistedTrustedOrcaHooks = Record<string, PersistedTrustedOrcaHookR
 
 export type LegacyPaneKeyAliasEntry = {
   ptyId: string
+  /** Physical pane key retained by the live process. Field name is persisted
+   *  for compatibility; UUID keys are used after pane-to-tab detach. */
   legacyPaneKey: string
+  /** Current logical owner pane key. May belong to another tab after detach. */
   stablePaneKey: string
   updatedAt: number
 }
@@ -3635,6 +3785,13 @@ export type GitDiffBinaryResult = {
   isImage?: boolean
   /** MIME type for binary preview rendering, e.g. "image/png" or "application/pdf" */
   mimeType?: string
+  /**
+   * True only when the modified side is a proven deletion (working-tree file gone
+   * or absent from the index) — distinct from an empty modified side caused by a
+   * read failure or size cap. Lets previewers fall back to the original bytes for
+   * a deletion without showing a stale image on a failed read.
+   */
+  modifiedDeleted?: boolean
 } & (
   | { originalIsBinary: true; modifiedIsBinary: boolean }
   | { originalIsBinary: boolean; modifiedIsBinary: true }
