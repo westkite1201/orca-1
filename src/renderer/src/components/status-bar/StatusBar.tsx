@@ -57,7 +57,7 @@ import {
 } from './tooltip'
 import { ClaudeIcon, GeminiIcon, MiniMaxIcon, OpenAIIcon, OpenCodeGoIcon } from './icons'
 import { AgentIcon } from '@/lib/agent-catalog'
-import { formatWindowLabel } from '@/lib/window-label-formatter'
+import { formatRateLimitWindowChipLabel } from '@/lib/window-label-formatter'
 import { markLiveCodexSessionsForRestart } from '@/lib/codex-session-restart'
 import { UpdateStatusSegment } from './UpdateStatusSegment'
 import productProfile from '../../../../shared/product-profile.json'
@@ -82,6 +82,7 @@ import {
 } from '@/runtime/runtime-provider-accounts-client'
 import { translate } from '@/i18n/i18n'
 import {
+  getDisplayedUsagePercentage,
   normalizeUsagePercentageDisplay,
   type UsagePercentageDisplay
 } from '../../../../shared/usage-percentage-display'
@@ -945,15 +946,21 @@ function ClaudeSwitcherMenu({
 }
 
 // ---------------------------------------------------------------------------
-// Mini progress bar (shows consumption / % used, grey)
+// Mini progress bar (follows the selected usage percentage meaning, grey)
 // ---------------------------------------------------------------------------
 
-function MiniBar({ usedPct }: { usedPct: number }): React.JSX.Element {
+function MiniBar({
+  usedPct,
+  display
+}: {
+  usedPct: number
+  display: UsagePercentageDisplay
+}): React.JSX.Element {
   return (
     <div className="w-[48px] h-[6px] rounded-full bg-muted overflow-hidden flex-shrink-0">
       <div
         className="h-full rounded-full transition-all duration-300 bg-muted-foreground/40"
-        style={{ width: `${clampUsedPercent(usedPct)}%` }}
+        style={{ width: `${getDisplayedUsagePercentage(usedPct, display)}%` }}
       />
     </div>
   )
@@ -973,8 +980,6 @@ export function InlineUsageBars({
   const display = normalizeUsagePercentageDisplay(
     useAppStore((state) => state.usagePercentageDisplay)
   )
-  // Why: the preference changes copy, while bar fill stays consumption-based
-  // so empty/green and full/red keep the meter semantics introduced in #8167.
   const usageWindows = [
     limits.session
       ? {
@@ -1009,9 +1014,10 @@ export function InlineUsageBars({
       {usageWindows.map((window) => (
         <div key={window.key} className="flex min-w-0 items-center gap-1">
           <div className="h-[4px] min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+            {/* Why: fill follows the selected percentage; color still signals consumption urgency. */}
             <div
               className={`h-full rounded-full ${barColor(window.used)}`}
-              style={{ width: `${window.used}%` }}
+              style={{ width: `${getDisplayedUsagePercentage(window.used, display)}%` }}
             />
           </div>
           <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
@@ -1115,7 +1121,7 @@ function WindowLabel({
 // the rest (Flash Lite, experimental) are secondary and would clutter the bar.
 const STATUS_BAR_BUCKET_NAMES = new Set(['Flash', 'Pro', '1.5 Pro'])
 
-function ProviderSegment({
+export function ProviderSegment({
   p,
   compact,
   display
@@ -1138,7 +1144,7 @@ function ProviderSegment({
   }
 
   // Fetching with no prior data
-  if (p.status === 'fetching' && !p.session && !p.weekly && !p.fableWeekly) {
+  if (p.status === 'fetching' && !p.session && !p.weekly && !p.fableWeekly && !p.monthly) {
     return (
       <span className="inline-flex items-center gap-1 text-muted-foreground">
         <ProviderIcon provider={provider} />
@@ -1157,7 +1163,7 @@ function ProviderSegment({
   }
 
   // Error with no data
-  if (p.status === 'error' && !p.session && !p.weekly && !p.fableWeekly) {
+  if (p.status === 'error' && !p.session && !p.weekly && !p.fableWeekly && !p.monthly) {
     return (
       <span className="inline-flex items-center gap-1 text-muted-foreground">
         <ProviderIcon provider={provider} />
@@ -1186,7 +1192,7 @@ function ProviderSegment({
         {visibleBuckets.length === 0 && p.session && (
           <WindowLabel
             w={p.session}
-            label={formatWindowLabel(p.session.windowMinutes)}
+            label={formatRateLimitWindowChipLabel(p.session)}
             display={display}
           />
         )}
@@ -1200,14 +1206,14 @@ function ProviderSegment({
       ? {
           key: 'session',
           window: p.session,
-          label: formatWindowLabel(p.session.windowMinutes)
+          label: formatRateLimitWindowChipLabel(p.session)
         }
       : null,
     p.weekly
       ? {
           key: 'weekly',
           window: p.weekly,
-          label: formatWindowLabel(p.weekly.windowMinutes)
+          label: formatRateLimitWindowChipLabel(p.weekly)
         }
       : null,
     p.fableWeekly
@@ -1216,13 +1222,25 @@ function ProviderSegment({
           window: p.fableWeekly,
           label: translate('auto.components.status.bar.StatusBar.a79c64f87e', 'Fable')
         }
+      : null,
+    // Why: monthly is chip-visible only when it's the sole window (Grok
+    // unified billing); providers with session/weekly data (OpenCode Go)
+    // keep monthly tooltip-only so the chip stays uncluttered.
+    p.monthly && !p.session && !p.weekly
+      ? {
+          key: 'monthly',
+          window: p.monthly,
+          label: formatRateLimitWindowChipLabel(p.monthly)
+        }
       : null
   ].filter((w): w is { key: string; window: RateLimitWindow; label: string } => w !== null)
 
   return (
     <span className="inline-flex items-center gap-1.5">
       <ProviderIcon provider={provider} />
-      {p.session && !compact && <MiniBar usedPct={clampUsedPercent(p.session.usedPercent)} />}
+      {p.session && !compact && (
+        <MiniBar usedPct={clampUsedPercent(p.session.usedPercent)} display={display} />
+      )}
       {visibleWindows.map((window, index) => (
         <React.Fragment key={window.key}>
           {index > 0 && <span className="text-muted-foreground">·</span>}
@@ -1784,7 +1802,7 @@ export function ProviderDetailsMenu({
           {iconOnly ? (
             <span className="inline-flex items-center gap-1">
               <span
-                className={`inline-block h-2 w-2 rounded-full ${provider.session || provider.weekly || provider.fableWeekly ? 'bg-muted-foreground/60' : 'bg-muted-foreground/30'}`}
+                className={`inline-block h-2 w-2 rounded-full ${provider.session || provider.weekly || provider.fableWeekly || provider.monthly ? 'bg-muted-foreground/60' : 'bg-muted-foreground/30'}`}
               />
               <span className="text-muted-foreground">
                 {provider.provider === 'claude'
