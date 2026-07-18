@@ -451,6 +451,35 @@ describe('web settings preload API', () => {
     expect(runtimeCalls).toEqual([{ method: 'settings.get', params: undefined }])
   })
 
+  it('hydrates bot-author overrides from paired runtime settings', async () => {
+    const runtimeCalls: { method: string; params: unknown }[] = []
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(method: string, params?: unknown): Promise<RuntimeRpcResponse<unknown>> {
+          runtimeCalls.push({ method, params })
+          return Promise.resolve({
+            id: 'call-1',
+            ok: true,
+            result: { settings: { prBotAuthorOverrides: [' GretelFlux ', 'gretelflux'] } },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    const settings = await globals.window.api.settings.get()
+
+    expect(settings.prBotAuthorOverrides).toEqual(['gretelflux'])
+    expect(runtimeCalls).toEqual([{ method: 'settings.get', params: undefined }])
+  })
+
   it('forwards compact worktree card updates to a paired runtime', async () => {
     const runtimeCalls: { method: string; params: unknown }[] = []
     vi.doMock('./web-runtime-client', () => ({
@@ -569,6 +598,187 @@ describe('web settings preload API', () => {
           minimaxGroupId: 'group-42',
           minimaxUsageModels: 'general,abab6.5'
         }
+      }
+    ])
+  })
+
+  it('forwards normalized bot-author overrides to a paired runtime', async () => {
+    const runtimeCalls: { method: string; params: unknown }[] = []
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(method: string, params?: unknown): Promise<RuntimeRpcResponse<unknown>> {
+          runtimeCalls.push({ method, params })
+          return Promise.resolve({
+            id: 'call-1',
+            ok: true,
+            result: { settings: { prBotAuthorOverrides: ['gretelflux'] } },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    const settings = await globals.window.api.settings.set({
+      prBotAuthorOverrides: [' GretelFlux ', 'gretelflux']
+    })
+
+    expect(settings.prBotAuthorOverrides).toEqual(['gretelflux'])
+    expect(runtimeCalls).toEqual([
+      { method: 'settings.update', params: { prBotAuthorOverrides: ['gretelflux'] } }
+    ])
+  })
+
+  it('atomically updates a bot-author override through a paired runtime', async () => {
+    const runtimeCalls: { method: string; params: unknown }[] = []
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(method: string, params?: unknown): Promise<RuntimeRpcResponse<unknown>> {
+          runtimeCalls.push({ method, params })
+          return Promise.resolve({
+            id: 'call-1',
+            ok: true,
+            result: { settings: { prBotAuthorOverrides: ['gretelflux'] } },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    const settings = await globals.window.api.settings.updatePRBotAuthorOverride({
+      author: 'gretelflux',
+      isBot: true
+    })
+
+    expect(settings.prBotAuthorOverrides).toEqual(['gretelflux'])
+    expect(runtimeCalls).toEqual([
+      {
+        method: 'settings.updatePRBotAuthorOverride',
+        params: { author: 'gretelflux', isBot: true }
+      }
+    ])
+  })
+
+  it('does not claim a paired bot-author update succeeded when the runtime rejects it', async () => {
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(): Promise<RuntimeRpcResponse<unknown>> {
+          return Promise.reject(new Error('runtime unavailable'))
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    await expect(
+      globals.window.api.settings.updatePRBotAuthorOverride({
+        author: 'gretelflux',
+        isBot: true
+      })
+    ).rejects.toThrow('runtime unavailable')
+
+    const stored = JSON.parse(globals.storage.getItem('orca.web.settings.v1') ?? '{}') as {
+      prBotAuthorOverrides?: string[]
+    }
+    expect(stored.prBotAuthorOverrides).toBeUndefined()
+  })
+})
+
+describe('web native chat preload API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.doUnmock('./web-runtime-client')
+  })
+
+  it('forwards validated lifecycle metadata from reads and stream frames', async () => {
+    const lifecycle = { state: 'completed', turnId: 'turn-1', timestamp: 42 } as const
+    const message = {
+      id: 'a-1',
+      role: 'assistant' as const,
+      blocks: [{ type: 'text' as const, text: 'done' }],
+      timestamp: 42,
+      source: 'transcript' as const
+    }
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(): Promise<RuntimeRpcResponse<unknown>> {
+          return Promise.resolve({
+            id: 'read-1',
+            ok: true,
+            result: { messages: [message], lifecycle },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+        }
+
+        subscribe(
+          _method: string,
+          _params: unknown,
+          callbacks: { onResponse: (response: RuntimeRpcResponse<unknown>) => void }
+        ): Promise<{ unsubscribe: () => void }> {
+          callbacks.onResponse({
+            id: 'stream-1',
+            ok: true,
+            result: {
+              type: 'snapshot',
+              messages: [message],
+              hasMore: false,
+              lifecycle
+            },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+          return Promise.resolve({ unsubscribe: vi.fn() })
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    await expect(globals.window.api.nativeChat.readSession('claude', 'session-1')).resolves.toEqual(
+      {
+        messages: [message],
+        lifecycle
+      }
+    )
+    const frames: unknown[] = []
+    globals.window.api.nativeChat.subscribe(
+      { subscriptionId: 'sub-1', agent: 'claude', sessionId: 'session-1' },
+      (frame) => frames.push(frame)
+    )
+    await Promise.resolve()
+
+    expect(frames).toEqual([
+      {
+        type: 'snapshot',
+        messages: [message],
+        hasMore: false,
+        lifecycle
       }
     ])
   })
@@ -1652,6 +1862,14 @@ describe('web repos preload API', () => {
     vi.doUnmock('./web-runtime-client')
   })
 
+  it('rejects desktop host-scoped reorders in paired web clients', async () => {
+    const { api } = await installApi('Linux')
+
+    await expect(
+      api.repos.reorderForHost({ hostId: 'ssh:target', orderedIds: ['repo-1'] })
+    ).rejects.toThrow('Host-scoped project reordering is unavailable in paired web clients.')
+  })
+
   it.each([
     ['/home/alice', '/home/alice/orca/projects'],
     ['/', '/orca/projects'],
@@ -1697,6 +1915,60 @@ describe('web worktree preload API', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.doUnmock('./web-runtime-client')
+  })
+
+  it('forwards force and archive-hook intent through worktree removal', async () => {
+    const runtimeCalls: { method: string; params: unknown }[] = []
+    vi.doMock('./web-runtime-client', () => ({
+      WebRuntimeClient: class {
+        call(method: string, params?: unknown): Promise<RuntimeRpcResponse<unknown>> {
+          runtimeCalls.push({ method, params })
+          return Promise.resolve({
+            id: `call-${runtimeCalls.length}`,
+            ok: true,
+            result: { removed: true },
+            _meta: { runtimeId: 'runtime-1' }
+          })
+        }
+
+        close(): void {}
+      }
+    }))
+
+    const globals = installBrowserGlobals('Linux')
+    writeStoredRuntimeEnvironment(globals.storage)
+    const { installWebPreloadApi } = await import('./web-preload-api')
+    installWebPreloadApi()
+
+    await globals.window.api.worktrees.remove({
+      worktreeId: 'repo-1::/workspace/locked',
+      force: true,
+      skipArchive: false
+    })
+    await globals.window.api.worktrees.remove({
+      worktreeId: 'repo-1::/workspace/dirty',
+      force: true,
+      skipArchive: true
+    })
+
+    expect(runtimeCalls).toEqual([
+      {
+        method: 'worktree.rm',
+        params: {
+          worktree: 'id:repo-1::/workspace/locked',
+          force: true,
+          runHooks: true
+        }
+      },
+      {
+        method: 'worktree.rm',
+        params: {
+          worktree: 'id:repo-1::/workspace/dirty',
+          force: true,
+          runHooks: false
+        }
+      }
+    ])
   })
 
   it('falls back to legacy worktree.list when detectedList is unavailable', async () => {
@@ -2331,13 +2603,13 @@ describe('web GitHub preload API', () => {
       },
       {
         key: 'listWorkItems',
-        args: { repoPath, limit: 20, query: 'is:pr', before: 'cursor', noCache: true },
+        args: { repoPath, limit: 20, query: 'is:pr', page: 2, noCache: true },
         expectedMethod: 'github.listWorkItems',
         expectedParams: withRepo({
           repoPath,
           limit: 20,
           query: 'is:pr',
-          before: 'cursor',
+          page: 2,
           noCache: true
         })
       },

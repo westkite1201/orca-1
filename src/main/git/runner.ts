@@ -29,14 +29,28 @@ import {
   notifyGhPrimaryRateLimit
 } from './gh-rate-limit-breaker'
 import { getDefaultWslDistro, parseWslPath, toWindowsWslPath, type WslPathInfo } from '../wsl'
+import { addWslEnvKeys } from '../wsl-env'
+import {
+  appendGitConfigEnv,
+  gitCredentialPromptGuardEnv
+} from '../../shared/git-credential-prompt-env'
 import { getSpawnArgsForWindows, isWindowsBatchScript, resolveWindowsCommand } from '../win32-utils'
 import {
   buildWslLoginShellCommand,
   escapeWslShCommandForWindows,
   quotePosixShell
 } from '../../shared/wsl-login-shell-command'
+import { UNTRANSLATED_GIT_OUTPUT_ENV } from '../../shared/git-output-locale'
+import { endSubprocessStdin } from '../../shared/subprocess-stdin-write'
 
 // ─── Core resolution ────────────────────────────────────────────────
+
+// `LANGUAGE=en LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8` — env-assignment prefix for
+// WSL-routed git, where spawn env cannot cross the wsl.exe boundary. Values are
+// shell-safe unquoted (alnum, dot, dash, underscore only).
+const GIT_OUTPUT_LOCALE_SHELL_PREFIX = Object.entries(UNTRANSLATED_GIT_OUTPUT_ENV)
+  .map(([key, value]) => `${key}=${value}`)
+  .join(' ')
 
 type ResolvedCommand = {
   binary: string
@@ -202,6 +216,10 @@ function resolveCommand(
   }
 
   const translatedArgs = translateArgsForWsl(args)
+  // Why: env set on wsl.exe stays on the Windows side (WSLENV forwards only
+  // named vars), so the untranslated-output locale must ride the command
+  // string for git stderr parsers to work inside the distro (issue #7808).
+  const localePrefix = command === 'git' ? `${GIT_OUTPUT_LOCALE_SHELL_PREFIX} ` : ''
   const escapedCommand = quotePosixShell(command)
   // Why: shell-escape each argument to prevent word splitting / glob expansion
   // inside the bash -c string. Single quotes are safe for all chars except
@@ -214,8 +232,8 @@ function resolveCommand(
   // doesn't need a particular cwd for global calls like `api rate_limit`.
   const linuxCwd = cwdWsl?.linuxPath ?? (cwd && wslDistroOverride ? translateArgForWsl(cwd) : null)
   const shellCmd = linuxCwd
-    ? `cd ${quotePosixShell(linuxCwd)} && ${escapedCommand} ${escapedArgs.join(' ')}`
-    : `${escapedCommand} ${escapedArgs.join(' ')}`
+    ? `cd ${quotePosixShell(linuxCwd)} && ${localePrefix}${escapedCommand} ${escapedArgs.join(' ')}`
+    : `${localePrefix}${escapedCommand} ${escapedArgs.join(' ')}`
 
   if (options.useWslLoginShell) {
     return {
@@ -418,7 +436,7 @@ function execFileCapture(
     child.once('error', (error) => finish(error))
 
     if (options.stdin !== undefined) {
-      child.stdin?.end(options.stdin)
+      endSubprocessStdin(child.stdin, options.stdin)
     }
 
     // Why: Node's native execFile timeout waits for the child to exit after
@@ -545,41 +563,38 @@ export function gitOptionalLocksDisabledEnv(
  * already present in `env` so we never clobber config a caller injected the
  * same way.
  */
-export function appendGitConfigEnv(
-  env: NodeJS.ProcessEnv,
-  entries: readonly (readonly [key: string, value: string])[]
-): NodeJS.ProcessEnv {
-  const parsed = Number.parseInt(env.GIT_CONFIG_COUNT ?? '', 10)
-  const base = Number.isInteger(parsed) && parsed > 0 ? parsed : 0
-  const next = { ...env }
-  entries.forEach(([key, value], index) => {
-    next[`GIT_CONFIG_KEY_${base + index}`] = key
-    next[`GIT_CONFIG_VALUE_${base + index}`] = value
-  })
-  next.GIT_CONFIG_COUNT = String(base + entries.length)
-  return next
+export { appendGitConfigEnv }
+
+/**
+ * Pin Orca-spawned git to untranslated English output so stderr/progress
+ * parsers keep working under any user locale (issue #7808; see
+ * UNTRANSLATED_GIT_OUTPUT_ENV for the full rationale). Terminal git is
+ * untouched. Injected by every git runner in this module; WSL-routed spawns
+ * get the same values via GIT_OUTPUT_LOCALE_SHELL_PREFIX instead.
+ */
+export function untranslatedGitOutputEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, ...UNTRANSLATED_GIT_OUTPUT_ENV }
 }
 
-export function promptGuardGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return appendGitConfigEnv(
-    {
-      ...env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: env.GIT_ASKPASS ?? '',
-      SSH_ASKPASS: env.SSH_ASKPASS ?? '',
-      // Why: Git Credential Manager ignores GIT_TERMINAL_PROMPT / GIT_ASKPASS and
-      // pops a GUI on first auth — the Windows worktree-create hang (STA-1292).
-      // `never` suppresses the prompt while still serving cached credentials.
-      GCM_INTERACTIVE: 'never'
-    },
-    // Why: disable only the *interactive* credential prompt, NOT the helper
-    // itself — an empty credential.helper would break cached-credential auth for
-    // private repos. Harmless on macOS/Linux (no GCM) and on the SSH path.
-    [
-      ['credential.interactive', 'false'],
-      ['credential.guiPrompt', 'false']
-    ]
-  )
+export function promptGuardGitEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  return gitCredentialPromptGuardEnv(untranslatedGitOutputEnv(env), platform)
+}
+
+/**
+ * Credential-prompt guard for a general-purpose shell environment (terminal
+ * PTYs, hook scripts): everything promptGuardGitEnv does EXCEPT the issue-7808
+ * locale pins. Those exist so Orca can parse stderr of git it spawns itself;
+ * forcing LC_ALL/LANG/LANGUAGE onto a user's shell would change the locale of
+ * every child process, not just git's.
+ */
+export function promptGuardShellEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  return gitCredentialPromptGuardEnv(env, platform)
 }
 
 /**
@@ -590,17 +605,28 @@ export function promptGuardGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.
  * stuck calls pile up and the runtime stops answering all clients (issue #5308).
  *
  * - GIT_TERMINAL_PROMPT=0: git refuses to prompt for credentials and errors out.
- * - GIT_ASKPASS / SSH_ASKPASS='': disable any GUI/askpass credential helper that
- *   would otherwise pop a prompt and block.
+ * - GIT_ASKPASS / SSH_ASKPASS: emptied when unset so no GUI/askpass helper can
+ *   pop a prompt and block. A caller-provided askpass is preserved on purpose —
+ *   custom askpass setups commonly *serve* credentials non-interactively, and
+ *   blanking them would break those fetches.
  * - GIT_SSH_COMMAND BatchMode=yes: SSH fails instead of waiting on an
  *   interactive password/host-key prompt. BatchMode does NOT change host trust
  *   (an unknown host still errors, it just won't hang). Only added when the
  *   caller hasn't set its own GIT_SSH_COMMAND.
  */
-export function nonInteractiveGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const next = promptGuardGitEnv(env)
+export function nonInteractiveGitEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  const next = promptGuardGitEnv(env, platform)
   if (!next.GIT_SSH_COMMAND) {
     next.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes'
+    if (platform === 'win32') {
+      // Why: forward across the WSL boundary only when we set the value —
+      // plain `ssh` resolves inside the distro, whereas a caller's
+      // Windows-specific GIT_SSH_COMMAND must not leak into Linux git.
+      addWslEnvKeys(next, ['GIT_SSH_COMMAND'])
+    }
   }
   return next
 }
@@ -751,7 +777,12 @@ async function buildNetworkSshPolicyEnv(options: GitExecOptions): Promise<{
   }
 
   if (!configuredCommand) {
-    return { env: { ...promptEnv, GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, mode: 'fallback' }
+    const env = { ...promptEnv, GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
+    // Why: WSL routing can come from either an explicit distro or a UNC cwd.
+    if (resolved.wsl) {
+      addWslEnvKeys(env, ['GIT_SSH_COMMAND'])
+    }
+    return { env, mode: 'fallback' }
   }
 
   const batchModeCommand = buildOpenSshBatchModeCommand(configuredCommand)
@@ -761,10 +792,11 @@ async function buildNetworkSshPolicyEnv(options: GitExecOptions): Promise<{
     return { env: promptEnv, mode: 'configured-wrapper-passthrough' }
   }
 
-  return {
-    env: { ...promptEnv, GIT_SSH_COMMAND: batchModeCommand },
-    mode: 'configured-openssh'
+  const env = { ...promptEnv, GIT_SSH_COMMAND: batchModeCommand }
+  if (resolved.wsl) {
+    addWslEnvKeys(env, ['GIT_SSH_COMMAND'])
   }
+  return { env, mode: 'configured-openssh' }
 }
 
 /**
@@ -870,7 +902,8 @@ export async function gitExecFileAsyncBuffer(
   const { stdout } = (await execFileCapture(resolved.binary, resolved.args, {
     cwd: resolved.cwd,
     encoding: 'buffer',
-    maxBuffer: options.maxBuffer
+    maxBuffer: options.maxBuffer,
+    env: untranslatedGitOutputEnv()
   })) as { stdout: Buffer }
   return { stdout }
 }
@@ -1051,6 +1084,7 @@ export function gitExecFileSync(
     return execFileSync(resolved.binary, resolved.args, {
       cwd: resolved.cwd,
       encoding: options.encoding ?? 'utf-8',
+      env: untranslatedGitOutputEnv(),
       stdio: options.stdio ?? ['pipe', 'pipe', 'pipe'],
       timeout: options.timeout ?? GIT_EXEC_SYNC_TIMEOUT_MS
     }) as string
@@ -1076,6 +1110,7 @@ export function gitSpawn(
   const spawnStartedAt = performance.now()
   const child = spawn(resolved.binary, resolved.args, {
     ...spawnOptions,
+    env: untranslatedGitOutputEnv(spawnOptions.env ?? process.env),
     cwd: resolved.cwd
   })
   recordSubprocessSpawn(resolved.binary, resolved.args, performance.now() - spawnStartedAt)

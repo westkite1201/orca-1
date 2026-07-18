@@ -1,10 +1,12 @@
 import { WebglAddon } from '@xterm/addon-webgl'
 import type { ManagedPaneInternal } from './pane-manager-types'
+import { recordTerminalWebglDiagnostic } from '../../../../shared/terminal-webgl-diagnostics'
 import { forceRepaintThroughRenderPause } from './terminal-render-pause-release'
 import {
   getTerminalWebglAutoDecision,
   resetTerminalWebglAutoDecision
 } from './terminal-webgl-auto-policy'
+import { safeFitAndThen } from './pane-fit'
 
 export const ENABLE_WEBGL_RENDERER = true
 let suggestedRendererType: 'dom' | undefined
@@ -89,8 +91,11 @@ export function disposeWebgl(
     pane.pendingWebglRefreshRafId = requestAnimationFrame(() => {
       pane.pendingWebglRefreshRafId = null
       try {
-        pane.fitAddon.fit()
-        pane.terminal.refresh(0, pane.terminal.rows - 1)
+        // Why: context loss can coincide with snapshot parsing; refresh only
+        // after the replay-aware fit has authoritative renderer dimensions.
+        safeFitAndThen(pane, 'webgl-fallback-refresh', () => {
+          pane.terminal.refresh(0, pane.terminal.rows - 1)
+        })
       } catch {
         /* ignore — pane may have been disposed in the meantime */
       }
@@ -170,6 +175,10 @@ export function attachWebgl(pane: ManagedPaneInternal): void {
         pane.id,
         '— falling back to DOM renderer'
       )
+      // Why: a lost context is the decisive signal for a post-wake garble
+      // report — it means the glyph atlas was wiped (needs a full reset), not
+      // just a missed repaint. Silent breadcrumb; the console.warn stays.
+      recordTerminalWebglDiagnostic('webgl-context-loss', { paneId: pane.id })
       // Why: Chromium starts reclaiming terminal contexts under pressure.
       // Recreating WebGL for this pane can loop context loss and leave xterm
       // visually blank, so keep the pane on the DOM renderer until the next

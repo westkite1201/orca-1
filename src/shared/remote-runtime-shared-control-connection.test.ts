@@ -346,18 +346,18 @@ describe('RemoteRuntimeSharedControlConnection', () => {
     connection.close()
   })
 
-  it('refreshes pending request timeouts when keepalive frames show server progress', async () => {
+  it('times out a stuck short RPC on its absolute deadline despite keepalive frames', async () => {
+    // Why: a keepalive on the shared socket is armed by an unrelated long-poll,
+    // not by this request. It must NOT extend a stuck short RPC's deadline —
+    // otherwise a hung server call hangs the caller forever (#7948).
     const server = await createServer({
+      silentMethods: ['worktree.hang'],
       sendKeepaliveBeforeResponse: true,
-      keepaliveDelayMs: 25,
-      responseDelayMs: 60
+      keepaliveDelayMs: 20
     })
     const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
 
-    await expect(connection.request('worktree.ps', undefined, 50)).resolves.toMatchObject({
-      ok: true,
-      result: { method: 'worktree.ps' }
-    })
+    await expect(connection.request('worktree.hang', undefined, 60)).rejects.toThrow('Timed out')
 
     connection.close()
   })
@@ -454,32 +454,37 @@ describe('RemoteRuntimeSharedControlConnection', () => {
     connection.close()
   })
 
-  it('tears down the socket when a request times out and reconnects active subscriptions', async () => {
-    const server = await createServer({ silentMethods: ['worktree.hang'] })
-    const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
-    const onResponse = vi.fn()
-    const onClose = vi.fn()
-
-    await connection.subscribe('runtime.clientEvents.subscribe', null, 1000, {
-      onResponse,
-      onError: vi.fn(),
-      onClose
+  it('keeps unrelated pending requests alive when one request times out', async () => {
+    const server = await createServer({
+      silentMethods: ['worktree.hang'],
+      delayedMethods: ['worktree.ps']
     })
-    await vi.waitFor(() => expect(onResponse).toHaveBeenCalled())
+    const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
 
-    // Why: mirrors RemoteRuntimeRequestConnection — a request the server never
-    // answered marks the socket as suspect and must not leave it 'ready'.
-    await expect(connection.request('worktree.hang', undefined, 50)).rejects.toThrow('Timed out')
-
-    await vi.waitFor(() => expect(server.connectionCount()).toBe(2), { timeout: 5000 })
-    await vi.waitFor(
-      () =>
-        expect(
-          server.requests.filter((request) => request.method === 'runtime.clientEvents.subscribe')
-        ).toHaveLength(2),
-      { timeout: 5000 }
+    const timedOut = connection.request('worktree.hang', undefined, 250)
+    void timedOut.catch(() => undefined)
+    await vi.waitFor(() =>
+      expect(server.requests.map(({ method }) => method)).toContain('worktree.hang')
     )
-    expect(onClose).not.toHaveBeenCalled()
+    const survivor = connection.request('worktree.ps', undefined, 1000).then(
+      (response) => ({ ok: true as const, response }),
+      (error: unknown) => ({ ok: false as const, error })
+    )
+    await vi.waitFor(() =>
+      expect(server.requests.map(({ method }) => method)).toContain('worktree.ps')
+    )
+
+    await expect(timedOut).rejects.toThrow('Timed out')
+    // Why: a single slow method is not evidence that a shared socket is dead;
+    // liveness monitoring owns connection-wide failure detection.
+    expect(connection.getDiagnostics()).toMatchObject({ state: 'ready', pendingRequestCount: 1 })
+
+    server.flushDelayedResponses()
+    await expect(survivor).resolves.toMatchObject({
+      ok: true,
+      response: { ok: true, result: { method: 'worktree.ps' } }
+    })
+    expect(server.connectionCount()).toBe(1)
 
     connection.close()
   })
@@ -515,6 +520,7 @@ async function createServer(
     // Why: half-open simulation — the socket stays open but never answers
     // protocol pings, like a wedged tunnel that swallows frames silently.
     disableAutoPong?: boolean
+    delayedMethods?: string[]
     silentMethods?: string[]
   } = {}
 ): Promise<TestServer> {
@@ -613,11 +619,21 @@ function handleRequest(
     sendUnknownResponseBeforeResponse?: boolean
     closeAfterStreamingResponse?: () => boolean
     closeBeforeResponse?: boolean
+    delayedMethods?: string[]
     silentMethods?: string[]
   },
   delayedResponses: (() => void)[]
 ): void {
   requests.push(request)
+  // Why: keepalives are armed by an unrelated long-poll and keep flowing even
+  // while a method is deliberately silent — emit them before the silent return.
+  if (options.sendKeepaliveBeforeResponse && options.keepaliveDelayMs !== undefined) {
+    const timer = setInterval(
+      () => sendEncrypted(ws, sharedKey, { _keepalive: true }),
+      options.keepaliveDelayMs
+    )
+    ws.once('close', () => clearInterval(timer))
+  }
   if (options.silentMethods?.includes(request.method)) {
     return
   }
@@ -647,15 +663,16 @@ function handleRequest(
     })
   }
   const closeAfterResponse = streaming && options.closeAfterStreamingResponse?.() === true
-  if (options.sendKeepaliveBeforeResponse) {
-    const sendKeepalive = (): void => sendEncrypted(ws, sharedKey, { _keepalive: true })
-    if (options.keepaliveDelayMs !== undefined) {
-      setTimeout(sendKeepalive, options.keepaliveDelayMs)
-    } else {
-      sendKeepalive()
-    }
+  // Delayed/periodic keepalives are handled by the interval above; here we only
+  // cover the immediate single-keepalive-before-response case.
+  if (options.sendKeepaliveBeforeResponse && options.keepaliveDelayMs === undefined) {
+    sendEncrypted(ws, sharedKey, { _keepalive: true })
   }
   if (options.delaySubscriptionReady && streaming) {
+    delayedResponses.push(sendResponse)
+    return
+  }
+  if (options.delayedMethods?.includes(request.method)) {
     delayedResponses.push(sendResponse)
     return
   }

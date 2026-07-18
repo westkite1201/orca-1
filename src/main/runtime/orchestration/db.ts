@@ -15,6 +15,18 @@ import type {
   CoordinatorRun
 } from './types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
+import { parsePaneKey } from '../../../shared/stable-pane-id'
+
+// Why: leaf UUID is the remint-stable pane identity; the tab half changes on
+// break-out. Exact string match covers legacy/unparseable keys.
+function isEquivalentPaneKey(a: string, b: string): boolean {
+  if (a === b) {
+    return true
+  }
+  const aLeaf = parsePaneKey(a)?.leafId
+  const bLeaf = parsePaneKey(b)?.leafId
+  return Boolean(aLeaf && bLeaf && aLeaf === bLeaf)
+}
 
 export type {
   MessageType,
@@ -34,6 +46,45 @@ function generateId(prefix: string): string {
   return `${prefix}_${randomBytes(6).toString('hex')}`
 }
 
+function addLifecycleRejectionMarker(payload: string | null, reason: string): string {
+  let parsed: Record<string, unknown> = {}
+  try {
+    const value: unknown = payload ? JSON.parse(payload) : {}
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>
+    }
+  } catch {
+    // Authority reconciliation only reaches this path with object payloads.
+  }
+  return JSON.stringify({
+    ...parsed,
+    _orcaLifecycleRejection: { code: 'sender_not_assignee', reason }
+  })
+}
+
+const SQLITE_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/
+
+function exposeUtcTimestamp(timestamp: string | null): string | null {
+  if (!timestamp || !SQLITE_UTC_TIMESTAMP_RE.test(timestamp)) {
+    return timestamp
+  }
+  return `${timestamp.replace(' ', 'T')}Z`
+}
+
+function exposeMessageTimestamps(message: MessageRow): MessageRow {
+  // Why: SQLite stores UTC as a timezone-less space format for internal SQL
+  // ordering, but RPC/CLI consumers need an explicit offset to interpret it.
+  return {
+    ...message,
+    created_at: exposeUtcTimestamp(message.created_at) ?? message.created_at,
+    delivered_at: exposeUtcTimestamp(message.delivered_at)
+  }
+}
+
+function exposeMessageListTimestamps(messages: MessageRow[]): MessageRow[] {
+  return messages.map(exposeMessageTimestamps)
+}
+
 // Why: v1 → v2 added `'heartbeat'` to messages.type CHECK + `last_heartbeat_at`
 // column (preamble-hardening PR). v2 → v3 adds `delivered_at` column so
 // push-on-idle can distinguish queued-but-undelivered from user-acknowledged
@@ -41,7 +92,10 @@ function generateId(prefix: string): string {
 // the terminal that created a task so task-record worktree creation can infer
 // the parent workspace even when no dispatch context exists. v4 → v5 adds
 // explicit task_title/display_name fields for orchestration worker UI labels.
-const SCHEMA_VERSION = 5
+// v5 → v6 adds pane-identity columns (dispatch_contexts.assignee_pane_key,
+// messages.sender_pane_key) so worker_done ownership survives terminal handle
+// remints without accepting completions from unrelated panes.
+const SCHEMA_VERSION = 6
 
 export class OrchestrationDb {
   private db: Database.Database
@@ -75,7 +129,8 @@ export class OrchestrationDb {
         read          INTEGER NOT NULL DEFAULT 0,
         sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-        delivered_at  TEXT
+        delivered_at  TEXT,
+        sender_pane_key TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -107,6 +162,7 @@ export class OrchestrationDb {
         id                  TEXT PRIMARY KEY,
         task_id             TEXT NOT NULL,
         assignee_handle     TEXT,
+        assignee_pane_key   TEXT,
         status              TEXT NOT NULL DEFAULT 'pending'
           CHECK(status IN ('pending', 'dispatched', 'completed', 'failed', 'circuit_broken')),
         failure_count       INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +302,14 @@ export class OrchestrationDb {
           this.db.exec(`ALTER TABLE tasks ADD COLUMN display_name TEXT`)
         }
       }
+      if (current < 6) {
+        if (!this.hasColumn('dispatch_contexts', 'assignee_pane_key')) {
+          this.db.exec(`ALTER TABLE dispatch_contexts ADD COLUMN assignee_pane_key TEXT`)
+        }
+        if (!this.hasColumn('messages', 'sender_pane_key')) {
+          this.db.exec(`ALTER TABLE messages ADD COLUMN sender_pane_key TEXT`)
+        }
+      }
       this.createUndeliveredInboxIndexIfPossible()
 
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`)
@@ -293,11 +357,12 @@ export class OrchestrationDb {
     priority?: MessagePriority
     threadId?: string
     payload?: string
+    senderPaneKey?: string
   }): MessageRow {
     const id = generateId('msg')
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, from_handle, to_handle, subject, body, type, priority, thread_id, payload)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, from_handle, to_handle, subject, body, type, priority, thread_id, payload, sender_pane_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -308,23 +373,51 @@ export class OrchestrationDb {
       msg.type ?? 'status',
       msg.priority ?? 'normal',
       msg.threadId ?? null,
-      msg.payload ?? null
+      msg.payload ?? null,
+      msg.senderPaneKey ?? null
     )
-    return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+    return exposeMessageTimestamps(
+      this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+    )
   }
 
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND type IN (${placeholders}) ORDER BY sequence`
-        )
-        .all(toHandle, ...types) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND type IN (${placeholders}) ORDER BY sequence`
+          )
+          .all(toHandle, ...types) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? AND read = 0 ORDER BY sequence')
-      .all(toHandle) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE to_handle = ? AND read = 0 ORDER BY sequence')
+        .all(toHandle) as MessageRow[]
+    )
+  }
+
+  convertLifecycleMessageToRejection(messageId: string, reason: string): MessageRow | undefined {
+    const message = this.getMessageById(messageId)
+    if (!message || (message.type !== 'worker_done' && message.type !== 'heartbeat')) {
+      return message
+    }
+
+    const originalBody = message.body ? `\n\nOriginal body:\n${message.body}` : ''
+    const body = `Orca rejected this ${message.type}: ${reason}${originalBody}`
+    const payload = addLifecycleRejectionMarker(message.payload, reason)
+    // Why: rejected lifecycle signals must remain auditable without reaching
+    // later read paths as actionable completion or liveness events.
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET priority = 'high', subject = ?, body = ?, payload = ?
+         WHERE id = ?`
+      )
+      .run(`Rejected ${message.type}: ${message.subject}`, body, payload, messageId)
+    return this.getMessageById(messageId)
   }
 
   // Why: push-on-idle delivery must not replay messages that were already
@@ -336,27 +429,36 @@ export class OrchestrationDb {
   getUndeliveredUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL AND type IN (${placeholders}) ORDER BY sequence`
-        )
-        .all(toHandle, ...types) as MessageRow[]
-    }
-    return this.db
-      .prepare(
-        'SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL ORDER BY sequence'
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL AND type IN (${placeholders}) ORDER BY sequence`
+          )
+          .all(toHandle, ...types) as MessageRow[]
       )
-      .all(toHandle) as MessageRow[]
+    }
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare(
+          'SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL ORDER BY sequence'
+        )
+        .all(toHandle) as MessageRow[]
+    )
   }
 
   getAllMessages(toHandle: string, limit = 20): MessageRow[] {
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
-      .all(toHandle, limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
+        .all(toHandle, limit) as MessageRow[]
+    )
   }
 
   getMessageById(id: string): MessageRow | undefined {
-    return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | undefined
+    const message = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as
+      | MessageRow
+      | undefined
+    return message ? exposeMessageTimestamps(message) : undefined
   }
 
   markAsRead(ids: string[]): void {
@@ -382,10 +484,26 @@ export class OrchestrationDb {
       .run(...ids)
   }
 
+  markAsReadAndDelivered(ids: string[]): void {
+    if (ids.length === 0) {
+      return
+    }
+    const placeholders = ids.map(() => '?').join(',')
+    // Why: superseded lifecycle messages stay queryable through history but
+    // must not be consumed or injected after their dispatch has finished.
+    this.db
+      .prepare(
+        `UPDATE messages SET read = 1, delivered_at = COALESCE(delivered_at, datetime('now')) WHERE id IN (${placeholders})`
+      )
+      .run(...ids)
+  }
+
   getInbox(limit = 20): MessageRow[] {
-    return this.db
-      .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
-      .all(limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
+        .all(limit) as MessageRow[]
+    )
   }
 
   // Why: used by `check --all` and `inbox --terminal <handle>` — returns every
@@ -395,15 +513,19 @@ export class OrchestrationDb {
   getAllMessagesForHandle(toHandle: string, limit = 100, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
-        )
-        .all(toHandle, ...types, limit) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
+          )
+          .all(toHandle, ...types, limit) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
-      .all(toHandle, limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
+        .all(toHandle, limit) as MessageRow[]
+    )
   }
 
   // Why: thread-scoped read for the `orchestration.ask` wait loop. Filtered
@@ -414,15 +536,21 @@ export class OrchestrationDb {
   // the existing idx_thread index (see createTables) — no new index.
   getThreadMessagesFor(threadId: string, toHandle: string, afterSequence?: number): MessageRow[] {
     if (afterSequence !== undefined) {
-      return this.db
-        .prepare(
-          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
-        )
-        .all(threadId, toHandle, afterSequence) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
+          )
+          .all(threadId, toHandle, afterSequence) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC')
-      .all(threadId, toHandle) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare(
+          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC'
+        )
+        .all(threadId, toHandle) as MessageRow[]
+    )
   }
 
   // ── Tasks ──
@@ -568,7 +696,14 @@ export class OrchestrationDb {
 
   // ── Dispatch Contexts ──
 
-  createDispatchContext(taskId: string, assigneeHandle: string): DispatchContextRow {
+  createDispatchContext(
+    taskId: string,
+    assigneeHandle: string,
+    // Why: the pane key is the remint-stable identity behind the handle;
+    // recording it at dispatch time lets worker_done ownership survive
+    // restarts that reissue the handle.
+    assigneePaneKey?: string
+  ): DispatchContextRow {
     const task = this.getTask(taskId)
     if (!task) {
       throw new Error(`Task not found: ${taskId}`)
@@ -577,11 +712,11 @@ export class OrchestrationDb {
       throw new Error(`Task ${taskId} is ${task.status}; only ready tasks can be dispatched`)
     }
 
-    const existing = this.db
-      .prepare(
-        "SELECT * FROM dispatch_contexts WHERE assignee_handle = ? AND status IN ('pending', 'dispatched')"
-      )
-      .get(assigneeHandle) as DispatchContextRow | undefined
+    // Why: handle match covers legacy rows without pane keys; when both the
+    // new assignee and an active row have usable pane keys, also lock on
+    // equivalent pane identity so a reminted handle cannot open a second
+    // concurrent dispatch on the same pane.
+    const existing = this.findActiveDispatchForAssignee(assigneeHandle, assigneePaneKey)
 
     if (existing) {
       throw new Error(
@@ -599,10 +734,10 @@ export class OrchestrationDb {
     const id = generateId('ctx')
     this.db
       .prepare(
-        `INSERT INTO dispatch_contexts (id, task_id, assignee_handle, status, failure_count, dispatched_at)
-         VALUES (?, ?, ?, 'dispatched', ?, datetime('now'))`
+        `INSERT INTO dispatch_contexts (id, task_id, assignee_handle, assignee_pane_key, status, failure_count, dispatched_at)
+         VALUES (?, ?, ?, ?, 'dispatched', ?, datetime('now'))`
       )
-      .run(id, taskId, assigneeHandle, priorFailures)
+      .run(id, taskId, assigneeHandle, assigneePaneKey ?? null, priorFailures)
 
     this.db.prepare("UPDATE tasks SET status = 'dispatched' WHERE id = ?").run(taskId)
 
@@ -624,11 +759,38 @@ export class OrchestrationDb {
   }
 
   getActiveDispatchForTerminal(handle: string): DispatchContextRow | undefined {
-    return this.db
+    return this.findActiveDispatchForAssignee(handle)
+  }
+
+  private findActiveDispatchForAssignee(
+    assigneeHandle: string,
+    assigneePaneKey?: string
+  ): DispatchContextRow | undefined {
+    const byHandle = this.db
       .prepare(
         "SELECT * FROM dispatch_contexts WHERE assignee_handle = ? AND status IN ('pending', 'dispatched') LIMIT 1"
       )
-      .get(handle) as DispatchContextRow | undefined
+      .get(assigneeHandle) as DispatchContextRow | undefined
+    if (byHandle) {
+      return byHandle
+    }
+
+    if (!assigneePaneKey) {
+      return undefined
+    }
+
+    const actives = this.db
+      .prepare(
+        "SELECT * FROM dispatch_contexts WHERE assignee_pane_key IS NOT NULL AND status IN ('pending', 'dispatched')"
+      )
+      .all() as DispatchContextRow[]
+
+    for (const row of actives) {
+      if (row.assignee_pane_key && isEquivalentPaneKey(row.assignee_pane_key, assigneePaneKey)) {
+        return row
+      }
+    }
+    return undefined
   }
 
   getLatestDispatchForTerminal(handle: string): DispatchContextRow | undefined {
@@ -686,17 +848,20 @@ export class OrchestrationDb {
   // failed / circuit_broken row with an old-or-null last_heartbeat_at would
   // warn every tick (warning storm). Without `dispatched_at < :threshold`,
   // a freshly-dispatched worker would trip the warning during its first
-  // heartbeat interval (false positive). Callers supply the threshold as an
-  // ISO timestamp so the SQLite string-compare ordering works correctly
-  // (ISO-8601 compares lexicographically in time order).
+  // heartbeat interval (false positive). The stored columns are space-format
+  // (datetime('now'), "2026-07-12 12:00:00") while the threshold is ISO-Z, so
+  // raw TEXT ordering compares ' ' (0x20) below 'T' (0x54) at index 10 and
+  // flags fresh same-date rows as stale (#8452). julianday() parses both
+  // formats as UTC for a correct numeric comparison; a malformed timestamp
+  // yields NULL, so that row simply isn't flagged.
   getStaleDispatches(thresholdIso: string): DispatchContextRow[] {
     return this.db
       .prepare(
         `SELECT * FROM dispatch_contexts
          WHERE status = 'dispatched'
            AND dispatched_at IS NOT NULL
-           AND dispatched_at < ?
-           AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)`
+           AND julianday(dispatched_at) < julianday(?)
+           AND (last_heartbeat_at IS NULL OR julianday(last_heartbeat_at) < julianday(?))`
       )
       .all(thresholdIso, thresholdIso) as DispatchContextRow[]
   }

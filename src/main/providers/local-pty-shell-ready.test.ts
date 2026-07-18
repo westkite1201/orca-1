@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import type * as pty from 'node-pty'
 import type * as LocalPtyShellReadyModule from './local-pty-shell-ready'
 import {
@@ -724,6 +724,43 @@ describePosix('local PTY shell-ready launch config', () => {
     // Fallback chain: discovered → normalized spawn-env path → HOME
     expect(zshenv).toContain('${_orca_discovered_zdotdir:-${_orca_user_zdotdir:-$HOME}}')
   })
+
+  it('restores wrapper ZDOTDIR from the runtime sourced path, not the baked literal', async () => {
+    // Why: issue #8003 — WSL sources Windows-generated wrappers via /mnt/c,
+    // so the generation-time path baked into .zshenv does not exist there.
+    const { getShellReadyLaunchConfig } = await importFreshLocalPtyShellReady()
+
+    getShellReadyLaunchConfig('/bin/zsh')
+
+    const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
+
+    // Why: derive the wrapper dir from %x (zsh's internal script name), not the
+    // env-imported $ZDOTDIR — zsh corrupts environment values whose UTF-8 bytes
+    // fall in its 0x84-0x9D token range (non-ASCII Windows usernames), which
+    // would fail the self-check and fall back to the unusable baked literal.
+    expect(zshenv).toContain('_orca_wrapper_zdotdir_self="${${(%):-%x}:h}"')
+    // Keep $ZDOTDIR only as a fallback when %x expansion yields nothing. The
+    // final restore below re-validates with -f before trusting the value, so no
+    // stat is needed here.
+    expect(zshenv).toContain(
+      'if [[ -z "${_orca_wrapper_zdotdir_self:-}" ]]; then\n' +
+        '  _orca_wrapper_zdotdir_self="${ZDOTDIR:-}"\n' +
+        'fi'
+    )
+    // The runtime path is only trusted when it still holds a wrapper .zshenv;
+    // otherwise the generation-time literal remains as the fallback.
+    expect(zshenv).toContain(
+      'if [[ -n "${_orca_wrapper_zdotdir_self:-}" && -f "${_orca_wrapper_zdotdir_self:-}/.zshenv" ]]; then\n' +
+        '  export ZDOTDIR="${_orca_wrapper_zdotdir_self:-}"\n' +
+        'else\n' +
+        `  export ZDOTDIR='${join(userDataPath, 'shell-ready', 'zsh')}'\n` +
+        'fi'
+    )
+    // Capture must happen before the wrapper unsets ZDOTDIR to source user files.
+    expect(zshenv.indexOf('_orca_wrapper_zdotdir_self="${${(%):-%x}:h}"')).toBeLessThan(
+      zshenv.indexOf('unset ZDOTDIR')
+    )
+  })
 })
 
 // Why: end-to-end validation that wrapper ZDOTDIR discovery preserves top-level
@@ -810,6 +847,107 @@ path=(/custom/bin $path)
       const output = result.stdout
       expect(output).toContain(`ORCA_ORIG_ZDOTDIR=${xdgZshDir}`)
       expect(output).toContain('PATH_HAS_CUSTOM=/custom/bin')
+    })
+
+    it('loads user .zshrc when wrappers are sourced from a different runtime path (WSL simulation)', async () => {
+      // Why: issue #8003 — on Windows the wrappers are generated under the
+      // native userData path but WSL sources them via /mnt/c, where the baked
+      // generation-time path does not exist. Renaming the userData dir after
+      // generation reproduces that split: runtime ZDOTDIR resolves, the baked
+      // literal does not.
+      writeFileSync(join(testHome, '.zshrc'), 'export USER_ZSHRC_LOADED=yes\n')
+
+      const { getShellReadyLaunchConfig } = await importFreshLocalPtyShellReady()
+      getShellReadyLaunchConfig('/bin/zsh')
+
+      const movedUserData = `${userDataPath}-wsl-view`
+      renameSync(userDataPath, movedUserData)
+      try {
+        const cleanEnv: Record<string, string | undefined> = {
+          ...process.env,
+          HOME: testHome,
+          PATH: '/usr/bin:/bin'
+        }
+        delete cleanEnv.ZDOTDIR
+        delete cleanEnv.ORCA_ORIG_ZDOTDIR
+        delete cleanEnv.ORCA_ATTRIBUTION_SHIM_DIR
+        delete cleanEnv.USER_ZSHRC_LOADED
+        cleanEnv.ZDOTDIR = join(movedUserData, 'shell-ready', 'zsh')
+
+        // Production WSL launches a login shell (`exec zsh -l`); also cover the
+        // non-login flow used by local panes so both restore paths stay pinned.
+        // Login must still load user .zshrc (via wrapper .zshrc after .zprofile)
+        // and leave final ZDOTDIR at the user home after .zlogin restore.
+        for (const args of [['-i'], ['-l', '-i']] as const) {
+          const result = spawnSync(
+            'zsh',
+            [
+              ...args,
+              '-c',
+              'echo "USER_ZSHRC_LOADED=${USER_ZSHRC_LOADED:-no}" && echo "FINAL_ZDOTDIR=${ZDOTDIR:-unset}" && echo "IS_LOGIN=$([[ -o login ]] && echo yes || echo no)"'
+            ],
+            {
+              env: cleanEnv as NodeJS.ProcessEnv,
+              encoding: 'utf8'
+            }
+          )
+
+          expect(result.status, `zsh ${args.join(' ')} failed: ${result.stderr}`).toBe(0)
+          expect(result.stdout).toContain('USER_ZSHRC_LOADED=yes')
+          expect(result.stdout).toContain(`FINAL_ZDOTDIR=${testHome}`)
+          // Why: `as const` makes .includes('-l') reject the union of tuple
+          // element types; check the login flag by position instead.
+          expect(result.stdout).toContain(args[0] === '-l' ? 'IS_LOGIN=yes' : 'IS_LOGIN=no')
+        }
+      } finally {
+        rmSync(movedUserData, { recursive: true, force: true })
+      }
+    })
+
+    it('loads user .zshrc when the wrapper dir contains a non-ASCII (token-range) path', async () => {
+      // Why: issue #8003 second trigger — a non-ASCII Windows username (e.g. a
+      // Korean login) puts UTF-8 bytes in zsh's 0x84-0x9D token range into the
+      // wrapper path. zsh corrupts the env-imported $ZDOTDIR while processing
+      // startup files, so deriving the wrapper dir from $ZDOTDIR fails the
+      // self-check and falls back to the unusable baked literal, leaving the
+      // user's .zshrc unloaded. Deriving from %x sidesteps the corruption.
+      writeFileSync(join(testHome, '.zshrc'), 'export USER_ZSHRC_LOADED=yes\n')
+
+      const { getShellReadyLaunchConfig } = await importFreshLocalPtyShellReady()
+      getShellReadyLaunchConfig('/bin/zsh')
+
+      // Move the generated wrappers under a non-ASCII runtime root so the baked
+      // literal is unusable and the runtime $ZDOTDIR gets corrupted on import.
+      const nonAsciiUserData = join(dirname(userDataPath), '홍길동-wsl-view')
+      renameSync(userDataPath, nonAsciiUserData)
+      try {
+        const cleanEnv: Record<string, string | undefined> = {
+          ...process.env,
+          HOME: testHome,
+          PATH: '/usr/bin:/bin'
+        }
+        delete cleanEnv.ZDOTDIR
+        delete cleanEnv.ORCA_ORIG_ZDOTDIR
+        delete cleanEnv.ORCA_ATTRIBUTION_SHIM_DIR
+        delete cleanEnv.USER_ZSHRC_LOADED
+        cleanEnv.ZDOTDIR = join(nonAsciiUserData, 'shell-ready', 'zsh')
+
+        for (const args of [['-i'], ['-l', '-i']] as const) {
+          const result = spawnSync(
+            'zsh',
+            [...args, '-c', 'echo "USER_ZSHRC_LOADED=${USER_ZSHRC_LOADED:-no}"'],
+            {
+              env: cleanEnv as NodeJS.ProcessEnv,
+              encoding: 'utf8'
+            }
+          )
+
+          expect(result.status, `zsh ${args.join(' ')} failed: ${result.stderr}`).toBe(0)
+          expect(result.stdout).toContain('USER_ZSHRC_LOADED=yes')
+        }
+      } finally {
+        rmSync(nonAsciiUserData, { recursive: true, force: true })
+      }
     })
 
     it('preserves top-level .zshenv path and function side effects', async () => {

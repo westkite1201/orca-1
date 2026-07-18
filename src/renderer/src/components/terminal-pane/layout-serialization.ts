@@ -7,6 +7,8 @@ import { isTerminalLeafId } from '../../../../shared/stable-pane-id'
 import type { PaneManager } from '@/lib/pane-manager/pane-manager'
 import { replayIntoTerminal, type ReplayingPanesRef } from './replay-guard'
 import type { RestoredViewportBlankingPanesRef } from './terminal-restored-viewport'
+import { isXtermInstanceDisposed } from '@/lib/pane-manager/xterm-instance-disposed'
+import { recordRendererCrashBreadcrumb } from '@/lib/crash-breadcrumb-recorder'
 import {
   getLeftmostLeafId,
   normalizeTerminalLayoutSnapshot,
@@ -264,7 +266,21 @@ export function restoreScrollbackBuffers(
     if (!pane) {
       continue
     }
+    // Why this breadcrumb: a restore write into an already-disposed xterm is
+    // fully silent (no throw; completion callbacks are dropped) and is the
+    // suspected deterministic producer of zombie panes at startup — the field
+    // signature is a wedged-release drip with zero error breadcrumbs. Naming
+    // the moment here turns the last unproven link into a logged fact.
+    if (isXtermInstanceDisposed(pane.terminal)) {
+      recordRendererCrashBreadcrumb('terminal_restore_write_target_disposed', {
+        paneId: pane.id
+      })
+      continue
+    }
     try {
+      const renderOptions = {
+        shouldRefreshViewportSynchronously: () => !manager.hasWebglRenderer(pane.id)
+      }
       let buf = buffer
       // If buffer ends in alt-screen mode (agent TUI was running at
       // shutdown), exit alt-screen so the user sees a usable terminal.
@@ -278,20 +294,26 @@ export function restoreScrollbackBuffers(
         // sequences from the prior session (DA1, DECRQM, OSC 10/11, focus,
         // CPR). Writing those through xterm.write would trigger auto-replies
         // that land in the new shell's stdin. See replay-guard.ts.
-        replayIntoTerminal(pane, replayingPanesRef, buf)
+        replayIntoTerminal(pane, replayingPanesRef, buf, renderOptions)
         // Ensure cursor is on a new line so the new shell prompt
         // doesn't trigger zsh's PROMPT_EOL_MARK (%) indicator.
-        replayIntoTerminal(pane, replayingPanesRef, '\r\n')
+        replayIntoTerminal(pane, replayingPanesRef, '\r\n', renderOptions)
         // Clear any mode bits the serialized buffer replayed into xterm.
         // The shell underneath is fresh and has no TUI consuming these modes.
         // See POST_REPLAY_MODE_RESET comment.
-        replayIntoTerminal(pane, replayingPanesRef, POST_REPLAY_MODE_RESET)
+        replayIntoTerminal(pane, replayingPanesRef, POST_REPLAY_MODE_RESET, renderOptions)
         // Why: connection resolution happens after layout replay; only the
         // fresh-shell paths should move these visible rows into scrollback.
         restoredViewportBlankingPanesRef?.current.add(pane.id)
       }
-    } catch {
-      // If restore fails, continue with blank terminal.
+    } catch (error: unknown) {
+      // If restore fails, continue with blank terminal — but leave a trace:
+      // this catch was fully silent while zombie panes went undiagnosed.
+      recordRendererCrashBreadcrumb('terminal_restore_write_failed', {
+        paneId: pane.id,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error)
+      })
     }
   }
 }
