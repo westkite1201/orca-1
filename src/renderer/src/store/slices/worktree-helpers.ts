@@ -20,7 +20,8 @@ import type {
   WorktreeMeta,
   WorkspaceKey
 } from '../../../../shared/types'
-import type { TerminalGitHubPRLink } from '@/lib/terminal-github-pr-link-detector'
+import type { WorktreeForceDeleteReason } from '../../../../shared/worktree-removal'
+import type { TerminalGitHubPRLink } from '../../../../shared/terminal-github-pr-link-detector'
 import type {
   PendingWorktreeCreation,
   WorktreeCreationPhase
@@ -33,12 +34,16 @@ export type WorktreeDeleteState = {
   phase?: 'deleting' | 'queued'
   error: string | null
   canForceDelete: boolean
+  forceDeleteReason: WorktreeForceDeleteReason | null
+  lockReason?: string | null
 }
 
 export type WorktreeMetaUpdateGuard = (worktree: Worktree | DetectedWorktree | undefined) => boolean
 
 export type WorktreeMetaUpdateOptions = {
   shouldApply?: WorktreeMetaUpdateGuard
+  /** Skip the automatic review refetch when the caller owns an equivalent refresh. */
+  suppressHostedReviewRefresh?: boolean
 }
 
 export type WorktreeRenameRequest = {
@@ -182,7 +187,10 @@ export type WorktreeSlice = {
     // 'forget-local' drops the workspace from Orca only (no remote Git/FS work)
     // for workspaces pinned to a removed/disconnected SSH host. Reuses the same
     // renderer-side teardown/purge as a normal remove.
-    options?: { mode?: 'remove' | 'forget-local'; suppressPreservedBranchToast?: boolean }
+    options?: {
+      mode?: 'remove' | 'forget-local'
+      suppressPreservedBranchToast?: boolean
+    }
   ) => Promise<({ ok: true } & RemoveWorktreeResult) | { ok: false; error: string }>
   markWorktreesDeleting: (worktreeIds: readonly string[]) => void
   markWorktreesQueuedForDeletion: (worktreeIds: readonly string[]) => void
@@ -237,6 +245,14 @@ export type WorktreeSlice = {
    */
   seedActiveWorktreeLastVisitedIfMissing: () => void
   setActiveWorktree: (worktreeId: string | null) => void
+  /**
+   * Health-driven remount of one terminal tab: bumps the tab's generation so
+   * TerminalPane unmounts, detaches (preserving a live PTY), and remounts with
+   * a fresh xterm that reattaches and replays. Used by terminal-pane-recovery
+   * when a pane's write pipeline is certified dead or its input is
+   * undeliverable while the PTY is alive. Returns false when the tab is gone.
+   */
+  remountTerminalTabForRecovery: (tabId: string) => boolean
   setActiveFolderWorkspace: (folderWorkspaceId: string) => void
   setRenamingWorktreeId: (request: string | WorktreeRenameRequest | null) => void
   allWorktrees: () => Worktree[]

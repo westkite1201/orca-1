@@ -31,7 +31,9 @@ export function buildWslLoginShellCommand(command: string): string {
     'case "$_orca_wsl_shell_name" in',
     `  sh|dash) exec "$_orca_wsl_shell" -lc ${quotedCommand} ;;`,
     `  bash|zsh|ksh|mksh|ash) exec "$_orca_wsl_shell" -ilc ${quotedCommand} ;;`,
-    `  *) exec /bin/sh -lc ${quotedCommand} ;;`,
+    // Why: SSH/WSL users can configure fish, tcsh, or another executable
+    // login shell; falling back to sh would lose that shell's profile PATH.
+    `  *) exec "$_orca_wsl_shell" -lc ${quotedCommand} ;;`,
     'esac'
   ].join('\n')
 }

@@ -4,18 +4,25 @@ import type { RuntimeStatus } from '../../../shared/runtime-types'
 import type { RuntimeCapability } from '../../../shared/protocol-version'
 import { withBrowserPaneUiRuntimeRpcSource } from '../../../shared/runtime-rpc-feature-interaction-source'
 import { assertRuntimeStatusCompatible } from './runtime-protocol-compat'
+import {
+  callAbortableRuntimeEnvironment,
+  createRuntimeRpcAbortError
+} from './abortable-runtime-environment-call'
 
 export type RuntimeClientTarget = { kind: 'local' } | { kind: 'environment'; environmentId: string }
 
 const RUNTIME_COMPATIBILITY_CACHE_MAX = 32
 const RECENT_RUNTIME_COMPATIBILITY_FAILURE_TTL_MS = 60_000
+// Why: capability verdicts must eventually follow a saved environment's version changes.
+const RUNTIME_CAPABILITY_STATUS_TTL_MS = 60_000
 
 type RuntimeCompatibilityCacheEntry = {
   check: Promise<void>
   failedAt: number | null
-  // True only once status.get settled and proved compatible. Stays false while
-  // the probe is in flight, so a recovery clear can drop a doomed pending probe.
+  // False while probing so recovery can drop a doomed pending compatibility check.
   provenCompatible: boolean
+  status: RuntimeStatus | null
+  statusCheckedAt: number | null
 }
 
 const runtimeCompatibilityChecks = new Map<string, RuntimeCompatibilityCacheEntry>()
@@ -68,32 +75,36 @@ export async function callRuntimeRpc<TResult>(
     timeoutMs?: number
     suppressFeatureInteraction?: boolean
     reuseRecentCompatibilityFailure?: boolean
+    signal?: AbortSignal
   } = {}
 ): Promise<TResult> {
   if (target.kind === 'environment' && method !== 'status.get') {
     await ensureRuntimeEnvironmentCompatible(target.environmentId, options)
   }
-  const nextParams = addFeatureInteractionSource(params, options)
+  if (options.signal?.aborted) {
+    throw createRuntimeRpcAbortError()
+  }
+  const nextParams = options.suppressFeatureInteraction
+    ? withBrowserPaneUiRuntimeRpcSource(params)
+    : params
   const response =
     target.kind === 'local'
       ? await window.api.runtime.call({ method, params: nextParams })
-      : await window.api.runtimeEnvironments.call({
-          selector: target.environmentId,
-          method,
-          params: nextParams,
-          timeoutMs: options.timeoutMs
-        })
+      : options.signal
+        ? await callAbortableRuntimeEnvironment(
+            target.environmentId,
+            method,
+            nextParams,
+            options.timeoutMs,
+            options.signal
+          )
+        : await window.api.runtimeEnvironments.call({
+            selector: target.environmentId,
+            method,
+            params: nextParams,
+            timeoutMs: options.timeoutMs
+          })
   return unwrapRuntimeRpcResult<TResult>(response as RuntimeRpcResponse<TResult>)
-}
-
-function addFeatureInteractionSource(
-  params: unknown,
-  options: { suppressFeatureInteraction?: boolean }
-): unknown {
-  if (!options.suppressFeatureInteraction) {
-    return params
-  }
-  return withBrowserPaneUiRuntimeRpcSource(params)
 }
 
 async function ensureRuntimeEnvironmentCompatible(
@@ -108,7 +119,9 @@ async function ensureRuntimeEnvironmentCompatible(
   const entry: RuntimeCompatibilityCacheEntry = {
     check: Promise.resolve(),
     failedAt: null,
-    provenCompatible: false
+    provenCompatible: false,
+    status: null,
+    statusCheckedAt: null
   }
   const check = (async () => {
     const response = await window.api.runtimeEnvironments.call({
@@ -120,6 +133,8 @@ async function ensureRuntimeEnvironmentCompatible(
       response as RuntimeRpcResponse<RuntimeStatus>
     )
     assertRuntimeStatusCompatible(status)
+    entry.status = status
+    entry.statusCheckedAt = Date.now()
   })()
   entry.check = check
   rememberRuntimeEnvironmentCompatibility(environmentId, entry)
@@ -178,11 +193,8 @@ function rememberRuntimeEnvironmentCompatibility(
   }
 }
 
-// Why: a live status.get answer proves any cached compatibility verdict that is
-// not a settled success is stale. Drop settled failures AND still-pending probes
-// (a probe queued on the dropped connection is doomed, and a reachability-
-// triggered refresh must not coalesce onto it) so the refresh re-probes. Only
-// proven-compatible successes stay cached.
+// Why: a live status answer invalidates failures and pending probes from the
+// dropped connection; only proven-compatible successes remain reusable.
 export function clearRecentRuntimeCompatibilityFailure(environmentId: string): void {
   const trimmed = environmentId.trim()
   if (!trimmed) {
@@ -211,7 +223,9 @@ export function markRuntimeEnvironmentCompatible(environmentId: string): void {
   rememberRuntimeEnvironmentCompatibility(trimmed, {
     check: Promise.resolve(),
     failedAt: null,
-    provenCompatible: true
+    provenCompatible: true,
+    status: null,
+    statusCheckedAt: null
   })
 }
 
@@ -219,17 +233,87 @@ export async function getRuntimeEnvironmentStatus(
   environmentId: string,
   timeoutMs?: number
 ): Promise<RuntimeStatus> {
-  const response = await window.api.runtimeEnvironments.call({
-    selector: environmentId,
-    method: 'status.get',
-    timeoutMs
-  })
-  const status = unwrapRuntimeRpcResult<RuntimeStatus>(
-    response as RuntimeRpcResponse<RuntimeStatus>
-  )
-  assertRuntimeStatusCompatible(status)
-  markRuntimeEnvironmentCompatible(environmentId)
-  return status
+  const trimmed = environmentId.trim()
+  const entry: RuntimeCompatibilityCacheEntry = {
+    check: Promise.resolve(),
+    failedAt: null,
+    provenCompatible: false,
+    status: null,
+    statusCheckedAt: null
+  }
+  // Why: publish the in-flight probe before awaiting so concurrent cold-cache
+  // capability lookups coalesce onto this one status.get (via the cache-hit path
+  // in runtimeEnvironmentSupportsCapability) instead of each firing their own.
+  const check = (async () => {
+    const response = await window.api.runtimeEnvironments.call({
+      selector: trimmed,
+      method: 'status.get',
+      timeoutMs
+    })
+    const status = unwrapRuntimeRpcResult<RuntimeStatus>(
+      response as RuntimeRpcResponse<RuntimeStatus>
+    )
+    assertRuntimeStatusCompatible(status)
+    entry.status = status
+    entry.statusCheckedAt = Date.now()
+    entry.provenCompatible = true
+  })()
+  entry.check = check
+  rememberRuntimeEnvironmentCompatibility(trimmed, entry)
+  try {
+    await check
+  } catch (error) {
+    // Why: this probe always re-fetches, so a failure must not linger as a
+    // cached verdict; drop the entry so the next call re-probes cleanly.
+    if (runtimeCompatibilityChecks.get(trimmed) === entry) {
+      runtimeCompatibilityChecks.delete(trimmed)
+    }
+    throw error
+  }
+  if (!entry.status) {
+    // Unreachable: a resolved probe always assigns status; narrows the type.
+    throw new Error('Runtime status probe resolved without a status.')
+  }
+  return entry.status
+}
+
+export async function runtimeEnvironmentSupportsCapability(
+  environmentId: string,
+  capability: RuntimeCapability,
+  timeoutMs?: number
+): Promise<boolean> {
+  const trimmed = environmentId.trim()
+  const cached = runtimeCompatibilityChecks.get(trimmed)
+  // Why: callRuntimeRpc re-probes after failed status checks by default. Capability
+  // lookups must not pin to a rejected cache promise or they block recovery for
+  // the full failure TTL even though the next RPC would re-probe successfully.
+  if (cached && cached.failedAt === null) {
+    try {
+      await cached.check
+      if (
+        runtimeCompatibilityChecks.get(trimmed) === cached &&
+        cached.status &&
+        cached.statusCheckedAt !== null &&
+        Date.now() - cached.statusCheckedAt < RUNTIME_CAPABILITY_STATUS_TTL_MS
+      ) {
+        const supported = cached.status.capabilities?.includes(capability) === true
+        if (!supported) {
+          // Why: an unsupported verdict must not survive a remote upgrade. The
+          // next explicit retry re-probes instead of pinning the old capability set.
+          runtimeCompatibilityChecks.delete(trimmed)
+        }
+        return supported
+      }
+    } catch {
+      // Fall through to a fresh status.get that refreshes the cache.
+    }
+  }
+  const status = await getRuntimeEnvironmentStatus(trimmed, timeoutMs)
+  const supported = status.capabilities?.includes(capability) === true
+  if (!supported && runtimeCompatibilityChecks.get(trimmed)?.status === status) {
+    runtimeCompatibilityChecks.delete(trimmed)
+  }
+  return supported
 }
 
 export async function assertRuntimeEnvironmentCapability(

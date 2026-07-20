@@ -5,6 +5,7 @@ import type {
   MessageType,
   MessagePriority,
   TaskStatus,
+  TaskExecutionKind,
   DispatchStatus,
   GateStatus,
   CoordinatorStatus,
@@ -15,11 +16,24 @@ import type {
   CoordinatorRun
 } from './types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
+import { parsePaneKey } from '../../../shared/stable-pane-id'
+
+// Why: leaf UUID is the remint-stable pane identity; the tab half changes on
+// break-out. Exact string match covers legacy/unparseable keys.
+function isEquivalentPaneKey(a: string, b: string): boolean {
+  if (a === b) {
+    return true
+  }
+  const aLeaf = parsePaneKey(a)?.leafId
+  const bLeaf = parsePaneKey(b)?.leafId
+  return Boolean(aLeaf && bLeaf && aLeaf === bLeaf)
+}
 
 export type {
   MessageType,
   MessagePriority,
   TaskStatus,
+  TaskExecutionKind,
   DispatchStatus,
   GateStatus,
   CoordinatorStatus,
@@ -34,6 +48,45 @@ function generateId(prefix: string): string {
   return `${prefix}_${randomBytes(6).toString('hex')}`
 }
 
+function addLifecycleRejectionMarker(payload: string | null, reason: string): string {
+  let parsed: Record<string, unknown> = {}
+  try {
+    const value: unknown = payload ? JSON.parse(payload) : {}
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>
+    }
+  } catch {
+    // Authority reconciliation only reaches this path with object payloads.
+  }
+  return JSON.stringify({
+    ...parsed,
+    _orcaLifecycleRejection: { code: 'sender_not_assignee', reason }
+  })
+}
+
+const SQLITE_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/
+
+function exposeUtcTimestamp(timestamp: string | null): string | null {
+  if (!timestamp || !SQLITE_UTC_TIMESTAMP_RE.test(timestamp)) {
+    return timestamp
+  }
+  return `${timestamp.replace(' ', 'T')}Z`
+}
+
+function exposeMessageTimestamps(message: MessageRow): MessageRow {
+  // Why: SQLite stores UTC as a timezone-less space format for internal SQL
+  // ordering, but RPC/CLI consumers need an explicit offset to interpret it.
+  return {
+    ...message,
+    created_at: exposeUtcTimestamp(message.created_at) ?? message.created_at,
+    delivered_at: exposeUtcTimestamp(message.delivered_at)
+  }
+}
+
+function exposeMessageListTimestamps(messages: MessageRow[]): MessageRow[] {
+  return messages.map(exposeMessageTimestamps)
+}
+
 // Why: v1 → v2 added `'heartbeat'` to messages.type CHECK + `last_heartbeat_at`
 // column (preamble-hardening PR). v2 → v3 adds `delivered_at` column so
 // push-on-idle can distinguish queued-but-undelivered from user-acknowledged
@@ -41,7 +94,11 @@ function generateId(prefix: string): string {
 // the terminal that created a task so task-record worktree creation can infer
 // the parent workspace even when no dispatch context exists. v4 → v5 adds
 // explicit task_title/display_name fields for orchestration worker UI labels.
-const SCHEMA_VERSION = 5
+// v5 → v6 adds pane-identity columns (dispatch_contexts.assignee_pane_key,
+// messages.sender_pane_key) so worker_done ownership survives terminal handle
+// remints without accepting completions from unrelated panes. v6 → v7 adds
+// task execution metadata and the actual worktree used by each dispatch.
+const SCHEMA_VERSION = 7
 
 export class OrchestrationDb {
   private db: Database.Database
@@ -53,6 +110,20 @@ export class OrchestrationDb {
     this.db.pragma('busy_timeout = 5000')
     this.createTables()
     this.migrate()
+  }
+
+  private runImmediateTransaction<T>(action: () => T): T {
+    // Why: lifecycle rows must never expose half of a task/dispatch transition,
+    // and taking the writer lock before reads also serializes competing dispatches.
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = action()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   private createTables(): void {
@@ -75,7 +146,8 @@ export class OrchestrationDb {
         read          INTEGER NOT NULL DEFAULT 0,
         sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-        delivered_at  TEXT
+        delivered_at  TEXT,
+        sender_pane_key TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -88,6 +160,8 @@ export class OrchestrationDb {
         created_by_terminal_handle TEXT,
         task_title    TEXT,
         display_name  TEXT,
+        execution_kind TEXT,
+        agent_slot    TEXT,
         spec          TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'pending'
           CHECK(status IN (
@@ -107,6 +181,8 @@ export class OrchestrationDb {
         id                  TEXT PRIMARY KEY,
         task_id             TEXT NOT NULL,
         assignee_handle     TEXT,
+        assignee_pane_key   TEXT,
+        assignee_worktree_id TEXT,
         status              TEXT NOT NULL DEFAULT 'pending'
           CHECK(status IN ('pending', 'dispatched', 'completed', 'failed', 'circuit_broken')),
         failure_count       INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +322,25 @@ export class OrchestrationDb {
           this.db.exec(`ALTER TABLE tasks ADD COLUMN display_name TEXT`)
         }
       }
+      if (current < 6) {
+        if (!this.hasColumn('dispatch_contexts', 'assignee_pane_key')) {
+          this.db.exec(`ALTER TABLE dispatch_contexts ADD COLUMN assignee_pane_key TEXT`)
+        }
+        if (!this.hasColumn('messages', 'sender_pane_key')) {
+          this.db.exec(`ALTER TABLE messages ADD COLUMN sender_pane_key TEXT`)
+        }
+      }
+      if (current < 7) {
+        if (!this.hasColumn('tasks', 'execution_kind')) {
+          this.db.exec(`ALTER TABLE tasks ADD COLUMN execution_kind TEXT`)
+        }
+        if (!this.hasColumn('tasks', 'agent_slot')) {
+          this.db.exec(`ALTER TABLE tasks ADD COLUMN agent_slot TEXT`)
+        }
+        if (!this.hasColumn('dispatch_contexts', 'assignee_worktree_id')) {
+          this.db.exec(`ALTER TABLE dispatch_contexts ADD COLUMN assignee_worktree_id TEXT`)
+        }
+      }
       this.createUndeliveredInboxIndexIfPossible()
 
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`)
@@ -293,11 +388,12 @@ export class OrchestrationDb {
     priority?: MessagePriority
     threadId?: string
     payload?: string
+    senderPaneKey?: string
   }): MessageRow {
     const id = generateId('msg')
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, from_handle, to_handle, subject, body, type, priority, thread_id, payload)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, from_handle, to_handle, subject, body, type, priority, thread_id, payload, sender_pane_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -308,23 +404,51 @@ export class OrchestrationDb {
       msg.type ?? 'status',
       msg.priority ?? 'normal',
       msg.threadId ?? null,
-      msg.payload ?? null
+      msg.payload ?? null,
+      msg.senderPaneKey ?? null
     )
-    return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+    return exposeMessageTimestamps(
+      this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+    )
   }
 
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND type IN (${placeholders}) ORDER BY sequence`
-        )
-        .all(toHandle, ...types) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND type IN (${placeholders}) ORDER BY sequence`
+          )
+          .all(toHandle, ...types) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? AND read = 0 ORDER BY sequence')
-      .all(toHandle) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE to_handle = ? AND read = 0 ORDER BY sequence')
+        .all(toHandle) as MessageRow[]
+    )
+  }
+
+  convertLifecycleMessageToRejection(messageId: string, reason: string): MessageRow | undefined {
+    const message = this.getMessageById(messageId)
+    if (!message || (message.type !== 'worker_done' && message.type !== 'heartbeat')) {
+      return message
+    }
+
+    const originalBody = message.body ? `\n\nOriginal body:\n${message.body}` : ''
+    const body = `Orca rejected this ${message.type}: ${reason}${originalBody}`
+    const payload = addLifecycleRejectionMarker(message.payload, reason)
+    // Why: rejected lifecycle signals must remain auditable without reaching
+    // later read paths as actionable completion or liveness events.
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET priority = 'high', subject = ?, body = ?, payload = ?
+         WHERE id = ?`
+      )
+      .run(`Rejected ${message.type}: ${message.subject}`, body, payload, messageId)
+    return this.getMessageById(messageId)
   }
 
   // Why: push-on-idle delivery must not replay messages that were already
@@ -336,27 +460,36 @@ export class OrchestrationDb {
   getUndeliveredUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL AND type IN (${placeholders}) ORDER BY sequence`
-        )
-        .all(toHandle, ...types) as MessageRow[]
-    }
-    return this.db
-      .prepare(
-        'SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL ORDER BY sequence'
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL AND type IN (${placeholders}) ORDER BY sequence`
+          )
+          .all(toHandle, ...types) as MessageRow[]
       )
-      .all(toHandle) as MessageRow[]
+    }
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare(
+          'SELECT * FROM messages WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL ORDER BY sequence'
+        )
+        .all(toHandle) as MessageRow[]
+    )
   }
 
   getAllMessages(toHandle: string, limit = 20): MessageRow[] {
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
-      .all(toHandle, limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
+        .all(toHandle, limit) as MessageRow[]
+    )
   }
 
   getMessageById(id: string): MessageRow | undefined {
-    return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | undefined
+    const message = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as
+      | MessageRow
+      | undefined
+    return message ? exposeMessageTimestamps(message) : undefined
   }
 
   markAsRead(ids: string[]): void {
@@ -382,28 +515,54 @@ export class OrchestrationDb {
       .run(...ids)
   }
 
+  markAsReadAndDelivered(ids: string[]): void {
+    if (ids.length === 0) {
+      return
+    }
+    const placeholders = ids.map(() => '?').join(',')
+    // Why: superseded lifecycle messages stay queryable through history but
+    // must not be consumed or injected after their dispatch has finished.
+    this.db
+      .prepare(
+        `UPDATE messages SET read = 1, delivered_at = COALESCE(delivered_at, datetime('now')) WHERE id IN (${placeholders})`
+      )
+      .run(...ids)
+  }
+
   getInbox(limit = 20): MessageRow[] {
-    return this.db
-      .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
-      .all(limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
+        .all(limit) as MessageRow[]
+    )
   }
 
   // Why: used by `check --all` and `inbox --terminal <handle>` — returns every
   // message for a handle regardless of read/delivered state; never touches the
   // read bit. Stale-handle safe: if the handle no longer exists, the query
   // just returns whatever historical rows remain (§3.3).
-  getAllMessagesForHandle(toHandle: string, limit = 100, types?: MessageType[]): MessageRow[] {
+  getAllMessagesForHandle(
+    toHandle: string,
+    limit: number | null = 100,
+    types?: MessageType[]
+  ): MessageRow[] {
+    const limitClause = limit === null ? '' : ' LIMIT ?'
+    const limitParams = limit === null ? [] : [limit]
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
-      return this.db
-        .prepare(
-          `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
-        )
-        .all(toHandle, ...types, limit) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC${limitClause}`
+          )
+          .all(toHandle, ...types, ...limitParams) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
-      .all(toHandle, limit) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare(`SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC${limitClause}`)
+        .all(toHandle, ...limitParams) as MessageRow[]
+    )
   }
 
   // Why: thread-scoped read for the `orchestration.ask` wait loop. Filtered
@@ -414,15 +573,21 @@ export class OrchestrationDb {
   // the existing idx_thread index (see createTables) — no new index.
   getThreadMessagesFor(threadId: string, toHandle: string, afterSequence?: number): MessageRow[] {
     if (afterSequence !== undefined) {
-      return this.db
-        .prepare(
-          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
-        )
-        .all(threadId, toHandle, afterSequence) as MessageRow[]
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
+          )
+          .all(threadId, toHandle, afterSequence) as MessageRow[]
+      )
     }
-    return this.db
-      .prepare('SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC')
-      .all(threadId, toHandle) as MessageRow[]
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare(
+          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC'
+        )
+        .all(threadId, toHandle) as MessageRow[]
+    )
   }
 
   // ── Tasks ──
@@ -431,34 +596,106 @@ export class OrchestrationDb {
     spec: string
     taskTitle?: string
     displayName?: string
+    executionKind?: TaskExecutionKind
+    agentSlot?: string
     deps?: string[]
     parentId?: string
     createdByTerminalHandle?: string
   }): TaskRow {
     const id = generateId('task')
-    const depsJson = JSON.stringify(task.deps ?? [])
-    const hasDeps = (task.deps ?? []).length > 0
-    const status: TaskStatus = hasDeps ? 'pending' : 'ready'
+    const deps = task.deps ?? []
+    const depsJson = JSON.stringify(deps)
     const display = buildOrchestrationTaskDisplayMetadata({
       spec: task.spec,
       taskTitle: task.taskTitle,
       displayName: task.displayName
     })
-    this.db
-      .prepare(
-        'INSERT INTO tasks (id, parent_id, created_by_terminal_handle, task_title, display_name, spec, status, deps) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      )
-      .run(
-        id,
-        task.parentId ?? null,
-        task.createdByTerminalHandle ?? null,
-        display.taskTitle || null,
-        display.displayName || null,
-        task.spec,
-        status,
-        depsJson
-      )
-    return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow
+    return this.runImmediateTransaction(() => {
+      this.assertTaskDependenciesValid(deps)
+      const dependencyRows = deps.map((dependencyId) => this.getTask(dependencyId)!)
+      const failedDependency = dependencyRows.find((dependency) => dependency.status === 'failed')
+      const status: TaskStatus = failedDependency
+        ? 'failed'
+        : dependencyRows.every((dependency) => dependency.status === 'completed')
+          ? 'ready'
+          : 'pending'
+      const result = failedDependency
+        ? `Blocked by failed dependency ${failedDependency.id}: ${failedDependency.result ?? `Task ${failedDependency.id} failed.`}`
+        : null
+      const completedAt = failedDependency ? new Date().toISOString() : null
+      if (
+        task.executionKind !== undefined &&
+        task.executionKind !== 'read-only' &&
+        task.executionKind !== 'worktree'
+      ) {
+        throw new Error(`Invalid task execution kind: ${String(task.executionKind)}`)
+      }
+      if (task.agentSlot !== undefined && task.agentSlot.trim().length === 0) {
+        throw new Error('Task agent slot must not be empty.')
+      }
+      this.db
+        .prepare(
+          `INSERT INTO tasks (
+             id, parent_id, created_by_terminal_handle, task_title, display_name,
+             execution_kind, agent_slot, spec, status, deps, result, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          task.parentId ?? null,
+          task.createdByTerminalHandle ?? null,
+          display.taskTitle || null,
+          display.displayName || null,
+          task.executionKind ?? null,
+          task.agentSlot?.trim() ?? null,
+          task.spec,
+          status,
+          depsJson,
+          result,
+          completedAt
+        )
+      return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow
+    })
+  }
+
+  private assertTaskDependenciesValid(dependencyIds: string[]): void {
+    if (dependencyIds.some((id) => id.trim().length === 0)) {
+      throw new Error('Task dependencies must be non-empty task IDs.')
+    }
+    if (new Set(dependencyIds).size !== dependencyIds.length) {
+      throw new Error('Task dependencies must be unique.')
+    }
+
+    const visiting = new Set<string>()
+    const visited = new Set<string>()
+    const visit = (taskId: string): void => {
+      if (visiting.has(taskId)) {
+        throw new Error(`Task dependency graph contains a cycle at ${taskId}.`)
+      }
+      if (visited.has(taskId)) {
+        return
+      }
+      const dependency = this.getTask(taskId)
+      if (!dependency) {
+        throw new Error(`Dependency task not found: ${taskId}`)
+      }
+      visiting.add(taskId)
+      const nested: unknown = JSON.parse(dependency.deps)
+      if (!Array.isArray(nested) || !nested.every((id) => typeof id === 'string')) {
+        throw new Error(`Task ${taskId} has invalid dependency data.`)
+      }
+      for (const nestedId of nested) {
+        visit(nestedId)
+      }
+      visiting.delete(taskId)
+      visited.add(taskId)
+    }
+
+    // Why: new tasks can reference only existing IDs, while this traversal also
+    // fails closed if an upgraded database already contains a corrupt cycle.
+    for (const dependencyId of dependencyIds) {
+      visit(dependencyId)
+    }
   }
 
   getTask(id: string): TaskRow | undefined {
@@ -524,20 +761,38 @@ export class OrchestrationDb {
   }
 
   updateTaskStatus(id: string, status: TaskStatus, result?: string): TaskRow | undefined {
-    const completedAt =
-      status === 'completed' || status === 'failed' ? new Date().toISOString() : null
+    return this.runImmediateTransaction(() => {
+      if (status === 'failed') {
+        this.failTaskTerminally(id, result ?? `Task ${id} failed.`)
+        return this.getTask(id)
+      }
+      const completedAt = status === 'completed' ? new Date().toISOString() : null
+      this.db
+        .prepare(
+          'UPDATE tasks SET status = ?, result = COALESCE(?, result), completed_at = COALESCE(?, completed_at) WHERE id = ?'
+        )
+        .run(status, result ?? null, completedAt, id)
+
+      if (status === 'completed') {
+        this.promoteReadyTasks(id)
+        this.completeActiveDispatchForTask(id)
+      }
+
+      return this.getTask(id)
+    })
+  }
+
+  private failTaskTerminally(taskId: string, error: string): void {
     this.db
       .prepare(
-        'UPDATE tasks SET status = ?, result = COALESCE(?, result), completed_at = COALESCE(?, completed_at) WHERE id = ?'
+        `UPDATE tasks
+         SET status = 'failed', result = COALESCE(?, result),
+             completed_at = COALESCE(completed_at, ?)
+         WHERE id = ?`
       )
-      .run(status, result ?? null, completedAt, id)
-
-    if (status === 'completed') {
-      this.promoteReadyTasks(id)
-      this.completeActiveDispatchForTask(id)
-    }
-
-    return this.getTask(id)
+      .run(error, new Date().toISOString(), taskId)
+    this.failActiveDispatchTerminally(taskId, error)
+    this.failDependentTasks(taskId, error)
   }
 
   // Why: when a task completes, check if any pending tasks that depended on it
@@ -566,49 +821,118 @@ export class OrchestrationDb {
     }
   }
 
+  // Why: a failed dependency can never become satisfiable; fail its pending
+  // descendants atomically so they cannot remain hidden in the DAG forever.
+  // ponytail: task DAGs are small; index dependencies if this scan becomes hot.
+  private failDependentTasks(failedTaskId: string, error: string): void {
+    const failed = [failedTaskId]
+    for (const dependencyId of failed) {
+      const candidates = this.db
+        .prepare("SELECT * FROM tasks WHERE status IN ('pending', 'ready')")
+        .all() as TaskRow[]
+      for (const task of candidates) {
+        const deps: string[] = JSON.parse(task.deps)
+        if (!deps.includes(dependencyId)) {
+          continue
+        }
+        const reason = `Blocked by failed dependency ${dependencyId}: ${error}`
+        this.db
+          .prepare(
+            "UPDATE tasks SET status = 'failed', result = COALESCE(result, ?), completed_at = datetime('now') WHERE id = ?"
+          )
+          .run(reason, task.id)
+        failed.push(task.id)
+      }
+    }
+  }
+
   // ── Dispatch Contexts ──
 
-  createDispatchContext(taskId: string, assigneeHandle: string): DispatchContextRow {
-    const task = this.getTask(taskId)
-    if (!task) {
-      throw new Error(`Task not found: ${taskId}`)
-    }
-    if (task.status !== 'ready') {
-      throw new Error(`Task ${taskId} is ${task.status}; only ready tasks can be dispatched`)
-    }
+  createDispatchContext(
+    taskId: string,
+    assigneeHandle: string,
+    // Why: the pane key is the remint-stable identity behind the handle;
+    // recording it at dispatch time lets worker_done ownership survive
+    // restarts that reissue the handle.
+    assigneePaneKey?: string,
+    options: {
+      assigneeWorktreeId?: string
+      harnessConcurrency?: { rootTaskId: string; maxConcurrent: number }
+    } = {}
+  ): DispatchContextRow {
+    return this.runImmediateTransaction(() => {
+      const task = this.getTask(taskId)
+      if (!task) {
+        throw new Error(`Task not found: ${taskId}`)
+      }
+      if (task.status !== 'ready') {
+        throw new Error(`Task ${taskId} is ${task.status}; only ready tasks can be dispatched`)
+      }
 
-    const existing = this.db
-      .prepare(
-        "SELECT * FROM dispatch_contexts WHERE assignee_handle = ? AND status IN ('pending', 'dispatched')"
-      )
-      .get(assigneeHandle) as DispatchContextRow | undefined
+      // Why: handle match covers legacy rows without pane keys; when both the
+      // new assignee and an active row have usable pane keys, also lock on
+      // equivalent pane identity so a reminted handle cannot open a second
+      // concurrent dispatch on the same pane.
+      const existing = this.findActiveDispatchForAssignee(assigneeHandle, assigneePaneKey)
 
-    if (existing) {
-      throw new Error(
-        `Terminal ${assigneeHandle} already has an active dispatch (${existing.id} for task ${existing.task_id})`
-      )
-    }
+      if (existing) {
+        throw new Error(
+          `Terminal ${assigneeHandle} already has an active dispatch (${existing.id} for task ${existing.task_id})`
+        )
+      }
 
-    // Carry forward failure_count from prior contexts so the circuit breaker
-    // accumulates across retries for the same task.
-    const prior = this.db
-      .prepare('SELECT MAX(failure_count) as max_failures FROM dispatch_contexts WHERE task_id = ?')
-      .get(taskId) as { max_failures: number | null } | undefined
-    const priorFailures = prior?.max_failures ?? 0
+      if (options.harnessConcurrency) {
+        const { rootTaskId, maxConcurrent } = options.harnessConcurrency
+        if (task.parent_id !== rootTaskId) {
+          throw new Error(`Task ${taskId} is not a direct child of Harness root ${rootTaskId}.`)
+        }
+        const active = this.db
+          .prepare(
+            `SELECT COUNT(DISTINCT t.id) AS count
+             FROM tasks t
+             JOIN dispatch_contexts dc ON dc.task_id = t.id
+             WHERE t.parent_id = ? AND dc.status IN ('pending', 'dispatched')`
+          )
+          .get(rootTaskId) as { count: number }
+        if (active.count >= maxConcurrent) {
+          throw new Error(
+            `Harness root ${rootTaskId} already has ${active.count} active lanes; maximum is ${maxConcurrent}.`
+          )
+        }
+      }
 
-    const id = generateId('ctx')
-    this.db
-      .prepare(
-        `INSERT INTO dispatch_contexts (id, task_id, assignee_handle, status, failure_count, dispatched_at)
-         VALUES (?, ?, ?, 'dispatched', ?, datetime('now'))`
-      )
-      .run(id, taskId, assigneeHandle, priorFailures)
+      // Carry forward failure_count from prior contexts so the circuit breaker
+      // accumulates across retries for the same task.
+      const prior = this.db
+        .prepare(
+          'SELECT MAX(failure_count) as max_failures FROM dispatch_contexts WHERE task_id = ?'
+        )
+        .get(taskId) as { max_failures: number | null } | undefined
+      const priorFailures = prior?.max_failures ?? 0
 
-    this.db.prepare("UPDATE tasks SET status = 'dispatched' WHERE id = ?").run(taskId)
+      const id = generateId('ctx')
+      this.db
+        .prepare(
+          `INSERT INTO dispatch_contexts (
+             id, task_id, assignee_handle, assignee_pane_key, assignee_worktree_id,
+             status, failure_count, dispatched_at
+           ) VALUES (?, ?, ?, ?, ?, 'dispatched', ?, datetime('now'))`
+        )
+        .run(
+          id,
+          taskId,
+          assigneeHandle,
+          assigneePaneKey ?? null,
+          options.assigneeWorktreeId ?? null,
+          priorFailures
+        )
 
-    return this.db
-      .prepare('SELECT * FROM dispatch_contexts WHERE id = ?')
-      .get(id) as DispatchContextRow
+      this.db.prepare("UPDATE tasks SET status = 'dispatched' WHERE id = ?").run(taskId)
+
+      return this.db
+        .prepare('SELECT * FROM dispatch_contexts WHERE id = ?')
+        .get(id) as DispatchContextRow
+    })
   }
 
   getDispatchContext(taskId: string): DispatchContextRow | undefined {
@@ -623,12 +947,58 @@ export class OrchestrationDb {
       | undefined
   }
 
-  getActiveDispatchForTerminal(handle: string): DispatchContextRow | undefined {
-    return this.db
+  recordDispatchAssigneeWorktree(dispatchId: string, worktreeId: string): DispatchContextRow {
+    this.db
+      .prepare(
+        'UPDATE dispatch_contexts SET assignee_worktree_id = ? WHERE id = ? AND assignee_worktree_id IS NULL'
+      )
+      .run(worktreeId, dispatchId)
+    const dispatch = this.getDispatchContextById(dispatchId)
+    if (!dispatch) {
+      throw new Error(`Dispatch context not found: ${dispatchId}`)
+    }
+    if (dispatch.assignee_worktree_id !== worktreeId) {
+      throw new Error(`Dispatch ${dispatchId} is assigned to a different worktree.`)
+    }
+    return dispatch
+  }
+
+  getActiveDispatchForTerminal(
+    handle: string,
+    assigneePaneKey?: string
+  ): DispatchContextRow | undefined {
+    return this.findActiveDispatchForAssignee(handle, assigneePaneKey)
+  }
+
+  private findActiveDispatchForAssignee(
+    assigneeHandle: string,
+    assigneePaneKey?: string
+  ): DispatchContextRow | undefined {
+    const byHandle = this.db
       .prepare(
         "SELECT * FROM dispatch_contexts WHERE assignee_handle = ? AND status IN ('pending', 'dispatched') LIMIT 1"
       )
-      .get(handle) as DispatchContextRow | undefined
+      .get(assigneeHandle) as DispatchContextRow | undefined
+    if (byHandle) {
+      return byHandle
+    }
+
+    if (!assigneePaneKey) {
+      return undefined
+    }
+
+    const actives = this.db
+      .prepare(
+        "SELECT * FROM dispatch_contexts WHERE assignee_pane_key IS NOT NULL AND status IN ('pending', 'dispatched')"
+      )
+      .all() as DispatchContextRow[]
+
+    for (const row of actives) {
+      if (row.assignee_pane_key && isEquivalentPaneKey(row.assignee_pane_key, assigneePaneKey)) {
+        return row
+      }
+    }
+    return undefined
   }
 
   getLatestDispatchForTerminal(handle: string): DispatchContextRow | undefined {
@@ -658,6 +1028,22 @@ export class OrchestrationDb {
     }
   }
 
+  // Why: worker-declared failure is terminal, unlike transport failure retries
+  // handled by failDispatch, so this must not return the task to ready.
+  private failActiveDispatchTerminally(taskId: string, error: string): void {
+    this.db
+      .prepare(
+        `UPDATE dispatch_contexts
+         SET status = 'failed', failure_count = failure_count + 1, last_failure = ?
+         WHERE id = (
+           SELECT id FROM dispatch_contexts
+           WHERE task_id = ? AND status IN ('pending', 'dispatched')
+           ORDER BY rowid DESC LIMIT 1
+         )`
+      )
+      .run(error, taskId)
+  }
+
   failActiveDispatchForTask(taskId: string, error: string): DispatchContextRow | undefined {
     const active = this.db
       .prepare(
@@ -676,9 +1062,14 @@ export class OrchestrationDb {
   recordHeartbeat(dispatchId: string, at: string): void {
     this.db
       .prepare(
-        "UPDATE dispatch_contexts SET last_heartbeat_at = ? WHERE id = ? AND status = 'dispatched'"
+        `UPDATE dispatch_contexts
+         SET last_heartbeat_at = CASE
+           WHEN last_heartbeat_at IS NULL OR julianday(?) > julianday(last_heartbeat_at) THEN ?
+           ELSE last_heartbeat_at
+         END
+         WHERE id = ? AND status = 'dispatched'`
       )
-      .run(at, dispatchId)
+      .run(at, at, dispatchId)
   }
 
   // Why: the query restricts to currently-dispatched contexts AND respects a
@@ -686,48 +1077,61 @@ export class OrchestrationDb {
   // failed / circuit_broken row with an old-or-null last_heartbeat_at would
   // warn every tick (warning storm). Without `dispatched_at < :threshold`,
   // a freshly-dispatched worker would trip the warning during its first
-  // heartbeat interval (false positive). Callers supply the threshold as an
-  // ISO timestamp so the SQLite string-compare ordering works correctly
-  // (ISO-8601 compares lexicographically in time order).
+  // heartbeat interval (false positive). The stored columns are space-format
+  // (datetime('now'), "2026-07-12 12:00:00") while the threshold is ISO-Z, so
+  // raw TEXT ordering compares ' ' (0x20) below 'T' (0x54) at index 10 and
+  // flags fresh same-date rows as stale (#8452). julianday() parses both
+  // formats as UTC for a correct numeric comparison; a malformed timestamp
+  // yields NULL, so that row simply isn't flagged.
   getStaleDispatches(thresholdIso: string): DispatchContextRow[] {
     return this.db
       .prepare(
         `SELECT * FROM dispatch_contexts
          WHERE status = 'dispatched'
            AND dispatched_at IS NOT NULL
-           AND dispatched_at < ?
-           AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)`
+           AND julianday(dispatched_at) < julianday(?)
+           AND (last_heartbeat_at IS NULL OR julianday(last_heartbeat_at) < julianday(?))`
       )
       .all(thresholdIso, thresholdIso) as DispatchContextRow[]
   }
 
   failDispatch(ctxId: string, error: string): DispatchContextRow | undefined {
-    const ctx = this.db.prepare('SELECT * FROM dispatch_contexts WHERE id = ?').get(ctxId) as
-      | DispatchContextRow
-      | undefined
-    if (!ctx) {
-      return undefined
-    }
+    return this.runImmediateTransaction(() => {
+      const ctx = this.db.prepare('SELECT * FROM dispatch_contexts WHERE id = ?').get(ctxId) as
+        | DispatchContextRow
+        | undefined
+      if (!ctx) {
+        return undefined
+      }
+      if (ctx.status !== 'pending' && ctx.status !== 'dispatched') {
+        // Why: delayed callbacks for an old attempt must not count twice or
+        // overwrite a newer active dispatch for the same task.
+        return ctx
+      }
 
-    const newFailureCount = ctx.failure_count + 1
-    const newStatus: DispatchStatus = newFailureCount >= 3 ? 'circuit_broken' : 'failed'
+      const newFailureCount = ctx.failure_count + 1
+      const newStatus: DispatchStatus = newFailureCount >= 3 ? 'circuit_broken' : 'failed'
 
-    this.db
-      .prepare(
-        'UPDATE dispatch_contexts SET status = ?, failure_count = ?, last_failure = ? WHERE id = ?'
-      )
-      .run(newStatus, newFailureCount, error, ctxId)
+      this.db
+        .prepare(
+          'UPDATE dispatch_contexts SET status = ?, failure_count = ?, last_failure = ? WHERE id = ?'
+        )
+        .run(newStatus, newFailureCount, error, ctxId)
 
-    // Why: set the task back to 'ready' (not 'pending') so the coordinator can
-    // re-dispatch it on the next tick. The task's deps are already satisfied —
-    // setting it to 'pending' would strand it since promoteReadyTasks only runs
-    // when a dep completes.
-    const taskStatus: TaskStatus = newStatus === 'circuit_broken' ? 'failed' : 'ready'
-    this.db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(taskStatus, ctx.task_id)
+      // Why: set the task back to 'ready' (not 'pending') so the coordinator can
+      // re-dispatch it on the next tick. The task's deps are already satisfied —
+      // setting it to 'pending' would strand it since promoteReadyTasks only runs
+      // when a dep completes.
+      if (newStatus === 'circuit_broken') {
+        this.failTaskTerminally(ctx.task_id, error)
+      } else {
+        this.db.prepare("UPDATE tasks SET status = 'ready' WHERE id = ?").run(ctx.task_id)
+      }
 
-    return this.db.prepare('SELECT * FROM dispatch_contexts WHERE id = ?').get(ctxId) as
-      | DispatchContextRow
-      | undefined
+      return this.db.prepare('SELECT * FROM dispatch_contexts WHERE id = ?').get(ctxId) as
+        | DispatchContextRow
+        | undefined
+    })
   }
 
   // ── Decision Gates ──

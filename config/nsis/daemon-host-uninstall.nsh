@@ -1,7 +1,7 @@
 ; Clean up the relocated terminal daemon on a REAL uninstall.
 ;
 ; Why: the daemon host is deliberately copied to a distinct image name
-; (orca-terminal-daemon.exe) under %LOCALAPPDATA%\Orca\daemon-host so that app
+; (orca-terminal-daemon.exe) under %LOCALAPPDATA%\Jaws\daemon-host so that app
 ; UPDATES cannot kill it — that relocation is what keeps terminals alive across
 ; updates. The same design means a normal uninstall's process sweep and file
 ; removal both miss it, leaving an orphaned daemon plus its runtime copy behind.
@@ -18,6 +18,6 @@
     nsExec::Exec 'taskkill /F /IM orca-terminal-daemon.exe'
     ; Give the OS a moment to release the image lock before removing the tree.
     Sleep 500
-    RMDir /r "$LOCALAPPDATA\Orca\daemon-host"
+    RMDir /r "$LOCALAPPDATA\Jaws\daemon-host"
   ${endIf}
 !macroend

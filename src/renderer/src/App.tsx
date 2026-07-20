@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type SetStateAction
 } from 'react'
 import { lazyWithRetry as lazy } from '@/lib/lazy-with-retry'
@@ -19,7 +20,8 @@ import {
   PanelLeft,
   PanelRight
 } from 'lucide-react'
-import logo from '../../../resources/logo.svg'
+import logo from '../../../resources/jaws-logo.png'
+import productProfile from '../../shared/product-profile.json'
 import { SYNC_FIT_PANES_EVENT, TOGGLE_TERMINAL_PANE_EXPAND_EVENT } from '@/constants/terminal'
 import { syncZoomCSSVar } from '@/lib/ui-zoom'
 import { resolveLeftSidebarStyleVariables } from '@/lib/left-sidebar-appearance'
@@ -58,6 +60,8 @@ import RightSidebar from './components/right-sidebar'
 import { StarNagCard } from './components/StarNagCard'
 import { StarNagAgentValueMomentObserver } from './components/star-nag/StarNagAgentValueMomentObserver'
 import { StarNagToastHost } from './components/star-nag/StarNagToastHost'
+import { SkillFreshnessNudge } from './components/skills/SkillFreshnessNudge'
+import { SkillFreshnessUpdateDialog } from './components/skills/SkillFreshnessUpdateDialog'
 import { TelemetryFirstLaunchSurface } from './components/TelemetryFirstLaunchSurface'
 import { ZoomOverlay } from './components/ZoomOverlay'
 import { onOnboardingReopened } from './components/onboarding/show-onboarding-event'
@@ -127,8 +131,11 @@ import {
   timeRendererStartupStep,
   timeRendererStartupSyncStep
 } from './startup/startup-diagnostics'
+import { reconnectSshTargetForRendererStartup } from './startup/ssh-startup-reconnect'
 import { shouldRenderPetOverlay } from './components/pet/pet-overlay-visibility'
 import { applyDocumentTheme } from './lib/document-theme'
+import { getSystemPrefersDark } from './lib/terminal-theme'
+import { publishTerminalViewAttributesAtAppStart } from './components/terminal-pane/terminal-appearance'
 import { isEditableTarget } from './lib/editable-target'
 import { getSelectedTextForFileSearch } from './lib/file-search-selection'
 import { useShortcutLabel } from './hooks/useShortcutLabel'
@@ -160,7 +167,11 @@ import {
   type KeybindingContext,
   type PhysicalModifierToken
 } from '../../shared/keybindings'
-import { toRuntimeExecutionHostId, type ExecutionHostId } from '../../shared/execution-host'
+import {
+  isRuntimeOwnedSshTargetId,
+  toRuntimeExecutionHostId,
+  type ExecutionHostId
+} from '../../shared/execution-host'
 import {
   ModifierDoubleTapDetector,
   toModifierDoubleTapEvent
@@ -170,6 +181,15 @@ import { showTerminalShortcutCaptureNotification } from '@/lib/terminal-shortcut
 import { resolveMountedLazyModalIds, type LazyModalId } from './lazy-modal-mount-state'
 import { translate } from '@/i18n/i18n'
 import PinnedTabCloseDialog from './components/terminal-pane/PinnedTabCloseDialog'
+import {
+  hasRequestedBackgroundTerminalWorktreeMount,
+  subscribeBackgroundTerminalWorktreeMountRequests
+} from './components/terminal/background-terminal-worktree-mount'
+
+// Why: agents alive during a hard kill (crash, forced update install) need a
+// reasonably fresh resume record on disk; one minute bounds the lost window
+// without measurable per-tick cost (the capture skips unchanged records).
+const SLEEPING_AGENT_RESUME_CAPTURE_INTERVAL_MS = 60_000
 
 const isMac = navigator.userAgent.includes('Mac')
 const isWindows = !isMac && navigator.userAgent.includes('Windows')
@@ -481,6 +501,11 @@ function App(): React.JSX.Element {
   const worktreeSidebarScrollAnchorRef = useRef<VirtualizedScrollAnchor>(null)
   const floatingVisibleTabCount = useAppStore(selectFloatingVisibleTabCount)
   const workspaceSessionReady = useAppStore((s) => s.workspaceSessionReady)
+  const backgroundTerminalMountRequested = useSyncExternalStore(
+    subscribeBackgroundTerminalWorktreeMountRequests,
+    hasRequestedBackgroundTerminalWorktreeMount,
+    hasRequestedBackgroundTerminalWorktreeMount
+  )
   const keybindings = useAppStore((s) => s.keybindings)
   const updateStatus = useAppStore((s) => s.updateStatus)
   const activeContextualTourId = useAppStore((s) => s.activeContextualTourId)
@@ -497,14 +522,16 @@ function App(): React.JSX.Element {
     floatingTerminalEnabled &&
     (floatingTerminalTriggerLocation === 'floating-button' || !statusBarVisible)
   const hasMountedTerminalWorkbenchRef = useRef(false)
-  if (activeWorktreeId !== null) {
+  if (activeWorktreeId !== null || backgroundTerminalMountRequested) {
     hasMountedTerminalWorkbenchRef.current = true
   }
   // Why: skip the terminal bundle on the no-workspace landing path, but once a
   // workspace has mounted, keep Terminal-owned hidden panes alive through sleep
   // and shutdown transitions where activeWorktreeId can briefly become null.
   const shouldMountTerminalWorkbench =
-    activeWorktreeId !== null || hasMountedTerminalWorkbenchRef.current
+    activeWorktreeId !== null ||
+    backgroundTerminalMountRequested ||
+    hasMountedTerminalWorkbenchRef.current
   // Why: visible worktree creation owns its faux tab strip from start to finish;
   // the previous workspace must stay mounted for retention without rendering
   // real chrome.
@@ -626,7 +653,8 @@ function App(): React.JSX.Element {
   const persistedUIReady = useAppStore((s) => s.persistedUIReady)
   const shouldMountContextualTourOverlay = activeContextualTourId !== null
   const shouldMountSetupGuideTelemetryObserver = persistedUIReady
-  const shouldMountUpdateCard = shouldMountUpdateCardForStatus(updateStatus)
+  const shouldMountUpdateCard =
+    productProfile.updatesEnabled && shouldMountUpdateCardForStatus(updateStatus)
   const rightSidebarWidth = useAppStore((s) => s.rightSidebarWidth)
   const markdownTocPanelWidth = useAppStore((s) => s.markdownTocPanelWidth)
   const rightSidebarOpen = useAppStore((s) => s.rightSidebarOpen)
@@ -874,6 +902,14 @@ function App(): React.JSX.Element {
         // Load settings first so a persisted remote runtime does not boot against
         // the local filesystem and then hydrate stale local workspace state.
         await timeRendererStartupStep('fetch-settings', () => actions.fetchSettings())
+        // Why here: hidden-at-launch PTYs (background terminal reconnects,
+        // agent sessions) can query OSC 10/11 before any terminal pane mounts
+        // and main's responder is silent-until-first-push. Publish composed
+        // view attributes as soon as settings exist, before any spawn below.
+        publishTerminalViewAttributesAtAppStart(
+          useAppStore.getState().settings,
+          getSystemPrefersDark()
+        )
         // Why: keybindings + onboarding are main-side reads with no dependency
         // on the catalog/session steps below, so start them now and await them
         // at their original positions — the round-trips overlap the local
@@ -973,7 +1009,13 @@ function App(): React.JSX.Element {
           // tabs through pty.attach on the relay. Passphrase-protected targets
           // are deferred to tab focus to avoid stacking credential dialogs at
           // startup before the user has context.
-          const connectionIds = sessionRead.session.activeConnectionIdsAtShutdown ?? []
+          // Why: runtime-owned (ephemeral-VM) targets must never be dialed from
+          // the renderer — ssh.connect would dispose the runtime layer's live
+          // relay session. Main's windowless-promotion path can persist such
+          // ids into this list, so filter at the consumption boundary too.
+          const connectionIds = (sessionRead.session.activeConnectionIdsAtShutdown ?? []).filter(
+            (targetId) => !isRuntimeOwnedSshTargetId(targetId)
+          )
           if (connectionIds.length > 0) {
             try {
               const SSH_RECONNECT_TIMEOUT_MS = 15_000
@@ -1003,25 +1045,21 @@ function App(): React.JSX.Element {
               await timeRendererStartupStep(
                 'ssh-reconnect',
                 () =>
-                  Promise.allSettled(
-                    eagerTargets.map(({ targetId }) =>
-                      Promise.race([
-                        window.api.ssh.connect({ targetId }),
-                        new Promise((_, reject) =>
-                          setTimeout(
-                            () => reject(new Error('SSH reconnect timeout')),
-                            SSH_RECONNECT_TIMEOUT_MS
-                          )
-                        )
-                      ]).catch((err) => {
-                        const isTimeout =
-                          err instanceof Error && err.message === 'SSH reconnect timeout'
-                        if (isTimeout) {
-                          timedOutTargets.push(targetId)
+                  Promise.all(
+                    eagerTargets.map(async ({ targetId }) => {
+                      const result = await reconnectSshTargetForRendererStartup({
+                        targetId,
+                        timeoutMs: SSH_RECONNECT_TIMEOUT_MS,
+                        connect: (id) => window.api.ssh.connect({ targetId: id }),
+                        publishState: actions.setSshConnectionState,
+                        onFailure: (id, error) => {
+                          console.warn(`SSH auto-reconnect failed for ${id}:`, error)
                         }
-                        console.warn(`SSH auto-reconnect failed for ${targetId}:`, err)
                       })
-                    )
+                      if (result.timedOut) {
+                        timedOutTargets.push(targetId)
+                      }
+                    })
                   ),
                 {
                   eagerTargets: eagerTargets.length,
@@ -1035,11 +1073,9 @@ function App(): React.JSX.Element {
                 ])
               }
 
-              // Why: ssh.connect() resolves before the ssh:state-changed IPC
-              // event updates sshConnectionStates in the store. Without this,
-              // reconnectPersistedTerminals reads stale state and misclassifies
-              // successfully connected targets as disconnected, stranding their
-              // persisted PTYs. Polling getState ensures the store is current.
+              // Why: connect's returned state is published above, but older or
+              // wrapped providers may return no state. Poll main once as a
+              // compatibility fallback before terminal restoration.
               for (const { targetId } of eagerTargets) {
                 if (timedOutTargets.includes(targetId)) {
                   continue
@@ -1124,7 +1160,7 @@ function App(): React.JSX.Element {
           // UI writer and clobber ui.json (sidebar width, sort, filters, etc.).
           const fallbackUI = getStartupErrorFallbackUI(uiHydrated)
           if (fallbackUI) {
-            actions.hydratePersistedUI(fallbackUI)
+            actions.hydratePersistedUI(fallbackUI, 'startup')
           }
           // Why (issue #1158): surface a sticky, dismissible toast so the
           // user knows they're in degraded "no-save" mode. Without this, every
@@ -1337,7 +1373,7 @@ function App(): React.JSX.Element {
       // which is in-memory. Capture them into the persisted sleeping-session
       // map so a daemon/session death while the app is closed can still
       // cold-restore via the agent's resume command (#5232).
-      useAppStore.getState().captureAllSleepingAgentSessions()
+      useAppStore.getState().captureAllSleepingAgentSessions('quit')
       // Why: re-read state after capture() calls populated scrollback buffers
       // into the store via Zustand setters. The earlier read is only for the
       // gating flags and would miss those updates.
@@ -1351,6 +1387,22 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('beforeunload', captureAndFlush)
     return () => window.removeEventListener('beforeunload', captureAndFlush)
+  }, [])
+
+  // Why: beforeunload never fires on a hard kill (crash, forced update
+  // install, TerminateProcess), so agents alive at that moment would leave no
+  // resume record. This periodic capture stores only agent session ids — not
+  // scrollback, see the no-periodic-scrollback note below — and the store
+  // action skips unchanged records, so idle ticks write nothing; real changes
+  // flow through the debounced session-write subscriber.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!shouldPersistWorkspaceSession(useAppStore.getState())) {
+        return
+      }
+      useAppStore.getState().captureAllSleepingAgentSessions('periodic')
+    }, SLEEPING_AGENT_RESUME_CAPTURE_INTERVAL_MS)
+    return () => window.clearInterval(timer)
   }, [])
 
   // Own the single window-close-request subscription at the always-mounted App
@@ -1398,6 +1450,10 @@ function App(): React.JSX.Element {
         hideAutomationGeneratedWorkspaces,
         showDotfilesByWorktree,
         filterRepoIds,
+        // Why: persist the active view so a reload restores it. openTaskPage etc.
+        // mutate activeView directly (not via setActiveView), so the value-keyed
+        // writer is what catches every transition.
+        activeView,
         // Why: rides the same debounced save so dashboard auto-acks (which fire
         // on focus/visibility) and the in-memory ack cleanup paths in
         // agent-status.ts (close/dismiss) both flow to disk through map
@@ -1424,6 +1480,7 @@ function App(): React.JSX.Element {
     hideAutomationGeneratedWorkspaces,
     showDotfilesByWorktree,
     filterRepoIds,
+    activeView,
     acknowledgedAgentsByPaneKey
   ])
 
@@ -2010,13 +2067,8 @@ function App(): React.JSX.Element {
             {settings?.showTitlebarAppName !== false && (
               <ContextMenu>
                 <ContextMenuTrigger asChild>
-                  <div
-                    className="titlebar-app-name"
-                    aria-label={translate('auto.App.5096cbbc86', 'Orca')}
-                  >
-                    <span className="titlebar-app-name-main">
-                      {translate('auto.App.5096cbbc86', 'Orca')}
-                    </span>
+                  <div className="titlebar-app-name" aria-label={productProfile.name}>
+                    <span className="titlebar-app-name-main">{productProfile.name}</span>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
@@ -2775,10 +2827,20 @@ function App(): React.JSX.Element {
             >
               <RecentTabSwitcher />
             </RecoverableRenderErrorBoundary>
+            {/* Why: the dialog hosts a live terminal pane, which requires the
+                link-routing preference context; mounting outside crashes it. */}
+            <RecoverableRenderErrorBoundary
+              boundaryId="overlay.skill-freshness-update-dialog"
+              surface="overlay"
+              compact
+            >
+              <SkillFreshnessUpdateDialog />
+            </RecoverableRenderErrorBoundary>
           </LinkRoutingPreferenceDialogProvider>
         </ConfirmationDialogProvider>
       </TooltipProvider>
       <Toaster closeButton toastOptions={{ className: 'font-sans text-sm' }} />
+      <SkillFreshnessNudge />
       <PinnedTabCloseDialog />
       {/* Why: rendered last so it sits after all -webkit-app-region:drag elements
           in DOM order. Electron's hit-test for drag regions is DOM-order-based and

@@ -39,7 +39,7 @@ describe('ensure-native-runtime', () => {
 
       expect(result.status, result.stderr).toBe(0)
       const log = readFileSync(logPath, 'utf8')
-      expect(log).toContain('pnpm rebuild node-pty\n')
+      expect(log).toContain('pnpm rebuild node-pty build_from_source=unset\n')
       expect(log.split('\n').filter((line) => line.startsWith('node-pty child '))).toEqual([
         expect.stringMatching(/^node-pty child (?:conpty|pty) marker=false$/),
         expect.stringMatching(/^node-pty child (?:conpty|pty) marker=true$/)
@@ -77,7 +77,9 @@ describe('ensure-native-runtime', () => {
         expect(result.stderr).toContain(
           'Patched node-pty build artifacts are missing; rebuilding native deps.'
         )
-        expect(readFileSync(logPath, 'utf8')).toContain('pnpm rebuild node-pty\n')
+        expect(readFileSync(logPath, 'utf8')).toContain(
+          'pnpm rebuild node-pty build_from_source=true\n'
+        )
       } finally {
         rmSync(projectDir, { recursive: true, force: true })
       }
@@ -111,7 +113,43 @@ describe('ensure-native-runtime', () => {
 
         expect(result.status, result.stderr).toBe(0)
         expect(result.stderr).toContain("expected build/Release so Orca's node-pty patch is active")
-        expect(readFileSync(logPath, 'utf8')).toContain('pnpm rebuild node-pty\n')
+        expect(readFileSync(logPath, 'utf8')).toContain(
+          'pnpm rebuild node-pty build_from_source=true\n'
+        )
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the fast path when the platform-specific patched artifacts exist',
+    () => {
+      const projectDir = mkTempProject()
+
+      try {
+        const scriptPath = join(projectDir, 'config', 'scripts', 'ensure-native-runtime.mjs')
+        const logPath = join(projectDir, 'native-runtime.log')
+        const markerPath = join(projectDir, 'rebuilt.marker')
+        const binDir = join(projectDir, 'bin')
+        copyFileSync(sourceScriptPath, scriptPath)
+        writeLoadableNativeModules(projectDir, { nativeDir: '../build/Release/' })
+        writeNodePtyPatchFile(projectDir)
+        writePatchedNodePtyBuildArtifacts(projectDir)
+        writeFakePnpm(binDir)
+
+        const result = spawnSync(process.execPath, [scriptPath, '--runtime=node'], {
+          cwd: projectDir,
+          encoding: 'utf8',
+          env: envWithPrependedPath(binDir, {
+            ORCA_NATIVE_TEST_LOG: logPath,
+            ORCA_NATIVE_TEST_MARKER: markerPath
+          })
+        })
+
+        expect(result.status, result.stderr).toBe(0)
+        expect(result.stderr).not.toContain('Patched node-pty build artifacts are missing')
+        expect(readFileSync(logPath, 'utf8')).not.toContain('pnpm rebuild node-pty')
       } finally {
         rmSync(projectDir, { recursive: true, force: true })
       }
@@ -161,7 +199,7 @@ exports.loadNativeModule = function loadNativeModule(nativeName) {
   )
 }
 
-function writeLoadableNativeModules(projectDir) {
+function writeLoadableNativeModules(projectDir, { nativeDir = null } = {}) {
   const nodePtyDir = join(projectDir, 'node_modules', 'node-pty')
   mkdirSync(join(nodePtyDir, 'lib'), { recursive: true })
 
@@ -173,7 +211,8 @@ const { appendFileSync, existsSync } = require('node:fs')
 
 exports.loadNativeModule = function loadNativeModule(nativeName) {
   const rebuilt = existsSync(process.env.ORCA_NATIVE_TEST_MARKER)
-  const dir = rebuilt ? '../build/Release/' : '../prebuilds/' + process.platform + '-' + process.arch + '/'
+  const dir = ${JSON.stringify(nativeDir)} ??
+    (rebuilt ? '../build/Release/' : '../prebuilds/' + process.platform + '-' + process.arch + '/')
   appendFileSync(process.env.ORCA_NATIVE_TEST_LOG, \`node-pty load \${nativeName} dir=\${dir}\\n\`)
   return { dir, module: {} }
 }
@@ -190,7 +229,9 @@ function writePatchedNodePtyBuildArtifacts(projectDir) {
   const buildDir = join(projectDir, 'node_modules', 'node-pty', 'build', 'Release')
   mkdirSync(buildDir, { recursive: true })
   writeFileSync(join(buildDir, 'pty.node'), '')
-  writeFileSync(join(buildDir, 'spawn-helper'), '')
+  if (process.platform === 'darwin') {
+    writeFileSync(join(buildDir, 'spawn-helper'), '')
+  }
 }
 
 function writeFakePnpm(binDir) {
@@ -201,7 +242,10 @@ function writeFakePnpm(binDir) {
     `
 const { appendFileSync, writeFileSync } = require('node:fs')
 
-appendFileSync(process.env.ORCA_NATIVE_TEST_LOG, \`pnpm \${process.argv.slice(2).join(' ')}\\n\`)
+appendFileSync(
+  process.env.ORCA_NATIVE_TEST_LOG,
+  \`pnpm \${process.argv.slice(2).join(' ')} build_from_source=\${process.env.npm_config_build_from_source ?? 'unset'}\\n\`
+)
 writeFileSync(process.env.ORCA_NATIVE_TEST_MARKER, 'rebuilt')
 `
   )

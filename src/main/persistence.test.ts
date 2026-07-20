@@ -21,6 +21,7 @@ import type {
   ProjectGroup,
   ProjectHostSetup,
   Repo,
+  GlobalSettings,
   TerminalPaneLayoutNode,
   TerminalTab,
   WorktreeLineage,
@@ -41,6 +42,7 @@ import { toRuntimeExecutionHostId, toSshExecutionHostId } from '../shared/execut
 import { SshConnectionStore } from './ssh/ssh-connection-store'
 import { setSourceControlActionDefault } from '../shared/source-control-ai-actions'
 import { LEGACY_DEFAULT_SSH_RELAY_GRACE_PERIOD_SECONDS } from '../shared/ssh-types'
+import { closeTerminalTabInWorkspaceSession } from '../shared/workspace-session-terminal-tab-close'
 
 // Shared mutable state so the electron mock can reference a per-test directory
 const testState = { dir: '' }
@@ -337,6 +339,58 @@ describe('Store', () => {
     expect(store.getRepos()).toEqual([])
   }, 15_000)
 
+  it('does not restore a terminal tab after its durable close flush returns', async () => {
+    const store = await createStore()
+    const worktreeId = 'repo-1::/tmp/worktree-1'
+    const tabId = 'terminal-1'
+    const session: WorkspaceSessionState = {
+      ...getDefaultWorkspaceSession(),
+      activeWorktreeId: worktreeId,
+      activeTabId: tabId,
+      tabsByWorktree: {
+        [worktreeId]: [
+          {
+            id: tabId,
+            ptyId: 'pty-1',
+            worktreeId,
+            title: 'Terminal',
+            customTitle: null,
+            color: null,
+            sortOrder: 0,
+            createdAt: 1
+          }
+        ]
+      },
+      terminalLayoutsByTabId: {
+        [tabId]: {
+          root: { type: 'leaf', leafId: TEST_LEAF_1 },
+          activeLeafId: TEST_LEAF_1,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [TEST_LEAF_1]: 'pty-1' }
+        }
+      },
+      activeTabIdByWorktree: { [worktreeId]: tabId },
+      defaultTerminalTabsAppliedByWorktreeId: { [worktreeId]: true }
+    }
+    store.setWorkspaceSession(session)
+    store.flushOrThrow()
+
+    const closed = closeTerminalTabInWorkspaceSession(
+      store.getWorkspaceSession(),
+      worktreeId,
+      tabId
+    )
+    store.setWorkspaceSession(closed.session)
+    store.flushOrThrow()
+
+    const reloaded = await createStore()
+    expect(reloaded.getWorkspaceSession().tabsByWorktree[worktreeId]).toEqual([])
+    expect(reloaded.getWorkspaceSession().terminalLayoutsByTabId[tabId]).toBeUndefined()
+    expect(
+      reloaded.getWorkspaceSession().defaultTerminalTabsAppliedByWorktreeId?.[worktreeId]
+    ).toBe(true)
+  })
+
   it('loads state from an explicit profile data file path', async () => {
     const profileDataDirectory = join(testState.dir, 'profiles', 'local-default')
     const profileDataFile = join(profileDataDirectory, 'orca-data.json')
@@ -535,6 +589,20 @@ describe('Store', () => {
     expect(settings.notifications.suppressWhenFocused).toBe(true)
   })
 
+  it('repairs a persisted terminal line height outside xterm bounds', async () => {
+    const persisted = getDefaultPersistedState(testState.dir)
+    writeDataFile({
+      ...persisted,
+      settings: { ...persisted.settings, terminalLineHeight: 0.85 }
+    })
+
+    const store = await createStore()
+
+    expect(store.getSettings().terminalLineHeight).toBe(1)
+    store.flush()
+    expect((readDataFile() as PersistedState).settings.terminalLineHeight).toBe(1)
+  })
+
   it('returns default UI state when no data file exists', async () => {
     const store = await createStore()
     const ui = store.getUI()
@@ -548,6 +616,50 @@ describe('Store', () => {
     expect(ui.setupGuideSidebarDismissed).toBe(false)
     expect(ui.setupGuideBrowserMilestoneMigrated).toBe(true)
     expect(ui.setupGuideBrowserMilestoneLegacyComplete).toBe(false)
+    // Why: brand-new profiles never saw remaining-as-default.
+    expect(ui.usagePercentageDisplayChangeNoticeDismissed).toBe(true)
+  })
+
+  it('surfaces the usage percentage display change notice for upgraded profiles', async () => {
+    const persisted = getDefaultPersistedState(testState.dir)
+    writeDataFile({
+      ...persisted,
+      onboarding: {
+        ...persisted.onboarding,
+        closedAt: 1,
+        outcome: 'completed'
+      },
+      ui: {
+        ...persisted.ui,
+        // Why: omit the notice key so load resolves eligibility for existing profiles.
+        usagePercentageDisplayChangeNoticeDismissed: undefined
+      }
+    })
+
+    const store = await createStore()
+
+    expect(store.getUI().usagePercentageDisplayChangeNoticeDismissed).toBe(false)
+  })
+
+  it('keeps the usage percentage display change notice dismissed when remaining was chosen', async () => {
+    const persisted = getDefaultPersistedState(testState.dir)
+    writeDataFile({
+      ...persisted,
+      onboarding: {
+        ...persisted.onboarding,
+        closedAt: 1,
+        outcome: 'completed'
+      },
+      ui: {
+        ...persisted.ui,
+        usagePercentageDisplay: 'remaining',
+        usagePercentageDisplayChangeNoticeDismissed: undefined
+      }
+    })
+
+    const store = await createStore()
+
+    expect(store.getUI().usagePercentageDisplayChangeNoticeDismissed).toBe(true)
   })
 
   it('defaults minimizeToTrayOnClose to false when unset', async () => {
@@ -578,6 +690,31 @@ describe('Store', () => {
     expect(store.getSettings().minimizeToTrayOnClose).toBe(false)
   })
 
+  it('persists native chat session options with per-model isolation', async () => {
+    const store = await createStore()
+    store.updateSettings({
+      nativeChatSessionOptions: {
+        claude: {
+          model: 'opus',
+          valuesByModel: {
+            opus: { effort: 'xhigh', fastMode: true },
+            sonnet: { effort: 'medium' }
+          }
+        }
+      }
+    })
+    store.flush()
+
+    const reloaded = await createStore()
+    expect(reloaded.getSettings().nativeChatSessionOptions?.claude).toEqual({
+      model: 'opus',
+      valuesByModel: {
+        opus: { effort: 'xhigh', fastMode: true },
+        sonnet: { effort: 'medium' }
+      }
+    })
+  })
+
   it('coerces non-boolean minimizeToTrayOnClose payloads to a strict boolean', async () => {
     const store = await createStore()
     // Why: a renderer-supplied non-bool must never persist as a truthy non-bool
@@ -588,6 +725,72 @@ describe('Store', () => {
     expect(store.getSettings().minimizeToTrayOnClose).toBe(false)
     store.updateSettings({ minimizeToTrayOnClose: null as unknown as boolean })
     expect(store.getSettings().minimizeToTrayOnClose).toBe(false)
+  })
+
+  it('defaults the menu bar icon on regardless of platform', async () => {
+    await withPlatform('darwin', async () => {
+      const store = await createStore()
+      expect(store.getSettings().showMenuBarIcon).toBe(true)
+    })
+
+    await withPlatform('linux', async () => {
+      const store = await createStore()
+      expect(store.getSettings().showMenuBarIcon).toBe(true)
+    })
+  })
+
+  it('enables the menu bar icon when an existing macOS profile has no stored value', async () => {
+    await withPlatform('darwin', async () => {
+      const persisted = getDefaultPersistedState(testState.dir)
+      delete (persisted.settings as Partial<GlobalSettings>).showMenuBarIcon
+      writeDataFile(persisted)
+
+      const store = await createStore()
+
+      expect(store.getSettings().showMenuBarIcon).toBe(true)
+    })
+  })
+
+  it('persists an explicit macOS menu bar opt-out', async () => {
+    await withPlatform('darwin', async () => {
+      const store = await createStore()
+      store.updateSettings({ showMenuBarIcon: false })
+      store.flush()
+
+      expect((readDataFile() as PersistedState).settings.showMenuBarIcon).toBe(false)
+      expect((await createStore()).getSettings().showMenuBarIcon).toBe(false)
+    })
+  })
+
+  it('normalizes menu bar icon writes to a strict boolean', async () => {
+    await withPlatform('darwin', async () => {
+      const store = await createStore()
+      store.updateSettings({ showMenuBarIcon: 'true' as unknown as boolean })
+      expect(store.getSettings().showMenuBarIcon).toBe(false)
+      store.updateSettings({ showMenuBarIcon: true })
+      expect(store.getSettings().showMenuBarIcon).toBe(true)
+    })
+  })
+
+  it('round-trips a macOS menu bar opt-out through a non-mac host unchanged', async () => {
+    await withPlatform('darwin', async () => {
+      const store = await createStore()
+      store.updateSettings({ showMenuBarIcon: false })
+      store.flush()
+    })
+
+    // Why: a profile opened on another OS must not rewrite the mac preference
+    // on its next flush; only the darwin consumers act on the value.
+    await withPlatform('win32', async () => {
+      const store = await createStore()
+      store.updateSettings({ minimizeToTrayOnClose: true })
+      store.flush()
+      expect((readDataFile() as PersistedState).settings.showMenuBarIcon).toBe(false)
+    })
+
+    await withPlatform('darwin', async () => {
+      expect((await createStore()).getSettings().showMenuBarIcon).toBe(false)
+    })
   })
 
   it('defaults trayMinimizeNoticeShown to false and persists it strictly', async () => {
@@ -1427,6 +1630,399 @@ describe('Store', () => {
     })
   })
 
+  it('defaults missing Harness history to an empty list', async () => {
+    const persisted: Partial<PersistedState> = getDefaultPersistedState(testState.dir)
+    delete persisted.harnessRuns
+    writeDataFile(persisted)
+
+    const store = await createStore()
+
+    expect(store.listHarnessRuns()).toEqual([])
+  })
+
+  it('persists comparison runs with fixed Codex and Claude candidates', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: '  Implement the comparison view  ',
+      verificationCommand: '  pnpm test  ',
+      baseSha: 'a'.repeat(40)
+    })
+
+    expect(run).toMatchObject({
+      mode: 'comparison',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40),
+      fatalError: null,
+      candidates: [
+        { agent: 'codex', status: 'pending' },
+        { agent: 'claude', status: 'pending' }
+      ]
+    })
+
+    const reloaded = await createStore()
+    expect(reloaded.listHarnessRuns()).toEqual([run])
+    expect(reloaded.getHarnessRun(run.id)).toEqual(run)
+    expect(reloaded.getHarnessRun('missing-run')).toBeNull()
+    expect(reloaded.listHarnessRuns('another-repo')).toEqual([])
+  })
+
+  it('persists an orchestrator run with one Codex coordinator', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the issue',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+
+    expect(run).toMatchObject({
+      mode: 'orchestrator',
+      candidates: [{ agent: 'codex', status: 'pending' }]
+    })
+    expect(run.candidates).toHaveLength(1)
+    expect((await createStore()).getHarnessRun(run.id)).toEqual(run)
+  })
+
+  it('timestamps a failed single-candidate orchestrator run as terminal', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Coordinate the issue',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+
+    const failed = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'failed',
+      error: 'Coordinator stopped.'
+    })
+
+    expect(failed.completedAt).not.toBeNull()
+  })
+
+  it('normalizes newly required Harness candidate fields without replacing valid data', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const persisted = readDataFile() as PersistedState
+    const legacyRun = persisted.harnessRuns[0] as unknown as Record<string, unknown>
+    delete legacyRun.mode
+    const legacyCandidate = persisted.harnessRuns[0].candidates[0] as unknown as Record<
+      string,
+      unknown
+    >
+    delete legacyCandidate.agentTerminalPaneKey
+    delete legacyCandidate.verificationTerminalHandle
+    delete legacyCandidate.verificationTerminalPaneKey
+    delete legacyCandidate.verificationTerminalOwnership
+    delete legacyCandidate.workerResult
+    delete legacyCandidate.recoveryStartedAt
+    const currentCandidate = persisted.harnessRuns[0].candidates[1]
+    const paneKey = makePaneKey('tab-claude', TEST_LEAF_1)
+    const workerResult = {
+      messageId: 'message-claude',
+      subject: 'worker_done',
+      body: 'Finished the task.',
+      payload: '{"ok":true}',
+      receivedAt: 123
+    }
+    currentCandidate.agentTerminalPaneKey = paneKey
+    currentCandidate.verificationTerminalHandle = 'verify-h1'
+    currentCandidate.verificationTerminalPaneKey = paneKey
+    currentCandidate.verificationTerminalOwnership = 'owned'
+    currentCandidate.workerResult = workerResult
+    currentCandidate.recoveryStartedAt = 456
+    writeDataFile(persisted)
+
+    const reloaded = await createStore()
+
+    expect(reloaded.getHarnessRun(run.id)).toMatchObject({ mode: 'comparison' })
+    expect(reloaded.getHarnessRun(run.id)?.candidates).toMatchObject([
+      {
+        agentTerminalPaneKey: null,
+        verificationTerminalHandle: null,
+        verificationTerminalPaneKey: null,
+        verificationTerminalOwnership: null,
+        workerResult: null,
+        recoveryStartedAt: null
+      },
+      {
+        agentTerminalPaneKey: paneKey,
+        verificationTerminalHandle: 'verify-h1',
+        verificationTerminalPaneKey: paneKey,
+        verificationTerminalOwnership: 'owned',
+        workerResult,
+        recoveryStartedAt: 456
+      }
+    ])
+    reloaded.flush()
+    const rewritten = readDataFile() as PersistedState
+    expect(rewritten.harnessRuns[0].candidates[0]).toMatchObject({
+      agentTerminalPaneKey: null,
+      verificationTerminalHandle: null,
+      verificationTerminalPaneKey: null,
+      verificationTerminalOwnership: null,
+      workerResult: null,
+      recoveryStartedAt: null
+    })
+  })
+
+  it('throws and rolls back a required Harness lifecycle write on disk failure', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Verify durable lifecycle writes',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const before = store.getHarnessRun(run.id)
+
+    rmSync(testState.dir, { recursive: true, force: true })
+    writeFileSync(testState.dir, 'block the data directory', 'utf-8')
+    try {
+      expect(() =>
+        store.updateHarnessCandidate(
+          run.id,
+          'codex',
+          { verificationTerminalOwnership: 'owned' },
+          { durability: 'required' }
+        )
+      ).toThrow()
+      expect(store.getHarnessRun(run.id)).toEqual(before)
+    } finally {
+      rmSync(testState.dir, { force: true })
+      mkdirSync(testState.dir, { recursive: true })
+    }
+  })
+
+  it('does not expose a Harness run when its initial durable write fails', async () => {
+    const store = await createStore()
+    rmSync(testState.dir, { recursive: true, force: true })
+    writeFileSync(testState.dir, 'block the data directory', 'utf-8')
+    try {
+      expect(() =>
+        store.createHarnessRun({
+          repoId: 'repo-1',
+          sourceWorktreeId: 'repo-1::/repo',
+          sourceWorktreePath: '/repo',
+          goal: 'Do not launch from an in-memory run',
+          verificationCommand: 'pnpm test',
+          baseSha: 'a'.repeat(40)
+        })
+      ).toThrow()
+      expect(store.listHarnessRuns()).toEqual([])
+    } finally {
+      rmSync(testState.dir, { force: true })
+      mkdirSync(testState.dir, { recursive: true })
+    }
+  })
+
+  it('keeps active Harness runs and only the 50 newest terminal runs on load', async () => {
+    const store = await createStore()
+    store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const persisted = readDataFile() as PersistedState
+    const template = persisted.harnessRuns[0]
+    const active = {
+      ...template,
+      id: 'active-old',
+      createdAt: -1,
+      updatedAt: -1,
+      candidates: template.candidates.map((candidate) => ({
+        ...candidate,
+        id: `active-${candidate.agent}`,
+        createdAt: -1,
+        updatedAt: -1
+      })) as typeof template.candidates
+    }
+    const terminalRuns = Array.from({ length: 52 }, (_, index) => ({
+      ...template,
+      id: `terminal-${index}`,
+      fatalError: 'Finished.',
+      createdAt: index,
+      updatedAt: index,
+      completedAt: index,
+      candidates: template.candidates.map((candidate) => ({
+        ...candidate,
+        id: `terminal-${index}-${candidate.agent}`,
+        createdAt: index,
+        updatedAt: index
+      })) as typeof template.candidates
+    }))
+    persisted.harnessRuns = [active, ...terminalRuns]
+    writeDataFile(persisted)
+
+    const reloaded = await createStore()
+    const retained = reloaded.listHarnessRuns()
+
+    expect(retained).toHaveLength(51)
+    expect(retained.some((run) => run.id === active.id)).toBe(true)
+    expect(retained.some((run) => run.id === 'terminal-0')).toBe(false)
+    expect(retained.some((run) => run.id === 'terminal-1')).toBe(false)
+    expect(retained.some((run) => run.id === 'terminal-2')).toBe(true)
+    reloaded.flush()
+    expect((readDataFile() as PersistedState).harnessRuns).toHaveLength(51)
+  })
+
+  it('prunes terminal Harness history as runs finish', async () => {
+    let now = 1_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now++)
+    const store = await createStore()
+    const terminalRunIds: string[] = []
+    try {
+      for (let index = 0; index < 52; index += 1) {
+        const run = store.createHarnessRun({
+          repoId: 'repo-1',
+          sourceWorktreeId: 'repo-1::/repo',
+          sourceWorktreePath: '/repo',
+          goal: `Implement comparison ${index}`,
+          verificationCommand: 'pnpm test',
+          baseSha: 'a'.repeat(40)
+        })
+        terminalRunIds.push(run.id)
+        if (index % 2 === 0) {
+          store.failHarnessRun(run.id, 'Stopped.')
+        } else {
+          store.updateHarnessCandidate(run.id, 'codex', { status: 'failed', error: 'Stopped.' })
+          store.updateHarnessCandidate(run.id, 'claude', { status: 'failed', error: 'Stopped.' })
+        }
+      }
+
+      const active = store.createHarnessRun({
+        repoId: 'repo-1',
+        sourceWorktreeId: 'repo-1::/repo',
+        sourceWorktreePath: '/repo',
+        goal: 'Keep this run active',
+        verificationCommand: 'pnpm test',
+        baseSha: 'a'.repeat(40)
+      })
+      const retained = store.listHarnessRuns()
+
+      expect(retained).toHaveLength(51)
+      expect(retained.some((run) => run.id === active.id)).toBe(true)
+      expect(retained.some((run) => run.id === terminalRunIds[0])).toBe(false)
+      expect(retained.some((run) => run.id === terminalRunIds[1])).toBe(false)
+      expect(retained.filter((run) => run.completedAt !== null)).toHaveLength(50)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('updates one Harness candidate without overwriting its sibling', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the comparison view',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    const originalClaude = run.candidates[1]
+
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'creating',
+      worktreeId: 'repo-1::/repo-codex',
+      worktreePath: '/repo-codex',
+      branch: 'jaws/run-codex',
+      agentTerminalHandle: 'term-codex'
+    })
+    store.updateHarnessCandidate(run.id, 'codex', { status: 'ready' })
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'running',
+      taskId: 'task-codex',
+      dispatchId: 'dispatch-codex'
+    })
+    const workerDone = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'worker_done',
+      workerResult: {
+        messageId: 'message-codex',
+        subject: 'worker_done',
+        body: 'Implemented the comparison view.',
+        payload: null,
+        receivedAt: Date.now()
+      }
+    })
+    const workerCompletedAt = workerDone.candidates[0].workerCompletedAt!
+    store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'verifying',
+      verificationTerminalHandle: 'term-verify-codex'
+    })
+    const verified = store.updateHarnessCandidate(run.id, 'codex', {
+      status: 'verified',
+      verification: {
+        command: 'pnpm test',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 25,
+        outputTail: 'passed',
+        outputTruncated: false,
+        error: null,
+        startedAt: workerCompletedAt + 1,
+        completedAt: workerCompletedAt + 26
+      },
+      diff: {
+        headSha: 'b'.repeat(40),
+        diffStat: '1 file changed, 1 insertion(+)',
+        changedFiles: [{ path: 'src/harness.ts', status: 'modified' }],
+        untrackedPaths: [],
+        capturedAt: workerCompletedAt + 26,
+        error: null
+      }
+    })
+
+    expect(verified.candidates[0]).toMatchObject({
+      status: 'verified',
+      worktreeId: 'repo-1::/repo-codex',
+      branch: 'jaws/run-codex',
+      taskId: 'task-codex',
+      dispatchId: 'dispatch-codex'
+    })
+    expect(verified.candidates[1]).toEqual(originalClaude)
+    expect(() => store.updateHarnessCandidate(run.id, 'claude', { status: 'running' })).toThrow(
+      'Invalid Harness candidate transition'
+    )
+
+    const completed = store.updateHarnessCandidate(run.id, 'claude', {
+      status: 'failed',
+      error: 'Claude authentication is required.'
+    })
+    expect(completed.completedAt).not.toBeNull()
+    expect(() =>
+      store.updateHarnessCandidate(run.id, 'claude', { error: 'rewritten evidence' })
+    ).toThrow('immutable after completion')
+
+    const reloaded = await createStore()
+    expect(reloaded.listHarnessRuns()[0]).toEqual(completed)
+  })
+
   it('can clear an automation back to the project default branch', async () => {
     const store = await createStore()
     store.addRepo(makeRepo({ worktreeBaseRef: 'origin/main' }))
@@ -1683,6 +2279,128 @@ describe('Store', () => {
     })
     expect(migratedRun?.runContext).toEqual(migratedAutomation?.runContext)
     expect(migratedRun?.sourceContext).toEqual(migratedAutomation?.sourceContext)
+  })
+
+  it('shrinks an oversized automationRuns file on load without any later mutation', async () => {
+    const seed = await createStore()
+    seed.addRepo(
+      makeRepo({
+        upstream: { owner: 'stablyai', repo: 'orca' },
+        connectionId: 'builder'
+      })
+    )
+    const automation = seed.createAutomation({
+      name: 'Every minute',
+      prompt: 'Run checks',
+      agentId: 'claude',
+      projectId: 'r1',
+      workspaceMode: 'new_per_run',
+      timezone: 'UTC',
+      rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+      dtstart: new Date('2026-05-13T00:00:00Z').getTime()
+    })
+    seed.createAutomationRun(automation, new Date('2026-05-13T09:00:00Z').getTime())
+    seed.flush()
+
+    // Why: a fresh store never stamps the one-shot UI migration flags, so a
+    // second load+flush settles them — otherwise they, not the prune, mark dirty.
+    const warm = await createStore()
+    warm.flush()
+
+    const persisted = readDataFile() as { automationRuns: Record<string, unknown>[] }
+    const template = persisted.automationRuns[0]
+    persisted.automationRuns = Array.from({ length: 250 }, (_, i) => {
+      const legacy: Record<string, unknown> = {
+        ...template,
+        id: `legacy-run-${i}`,
+        // Only final runs are evictable; the real-world blowup was skipped_precheck rows.
+        status: 'skipped_precheck',
+        createdAt: 1_000 + i,
+        scheduledFor: 1_000 + i
+      }
+      // A real legacy file predates runNumber; backfill must run BEFORE the prune
+      // so survivors keep their true ordinals instead of restarting at 1.
+      delete legacy.runNumber
+      return legacy
+    })
+    writeDataFile(persisted)
+
+    vi.useFakeTimers()
+    try {
+      const reloaded = await createStore()
+      expect(reloaded.listAutomationRuns(automation.id)).toHaveLength(100)
+
+      // The load-path prune must mark state dirty on its own; nothing else here saves.
+      vi.advanceTimersByTime(1000)
+      await reloaded.waitForPendingWrite()
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const healed = readDataFile() as { automationRuns: Record<string, unknown>[] }
+    expect(healed.automationRuns).toHaveLength(100)
+    expect(healed.automationRuns.at(-1)?.id).toBe('legacy-run-249')
+    // Survivors carry their true lifetime ordinals (151..250), not restarted ones.
+    expect(healed.automationRuns[0]?.runNumber).toBe(151)
+    expect(healed.automationRuns.at(-1)?.runNumber).toBe(250)
+  })
+
+  it('does not strand an in-flight run whose completion lands after the retention cap', async () => {
+    const store = await createStore()
+    store.addRepo(
+      makeRepo({
+        upstream: { owner: 'stablyai', repo: 'orca' },
+        connectionId: 'builder'
+      })
+    )
+    const automation = store.createAutomation({
+      name: 'Every minute',
+      prompt: 'Run checks',
+      agentId: 'claude',
+      projectId: 'r1',
+      workspaceMode: 'new_per_run',
+      timezone: 'UTC',
+      rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+      dtstart: new Date('2026-05-13T00:00:00Z').getTime()
+    })
+    const base = new Date('2026-05-13T09:00:00Z').getTime()
+    const inFlight = store.createAutomationRun(automation, base)
+    store.updateAutomationRun({
+      runId: inFlight.id,
+      status: 'dispatched',
+      workspaceId: null,
+      error: null
+    })
+
+    // 120 later runs reach a final status while the first one is still dispatched.
+    let firstCompletedId = ''
+    for (let i = 1; i <= 120; i++) {
+      const later = store.createAutomationRun(automation, base + i * 60_000)
+      firstCompletedId ||= later.id
+      store.updateAutomationRun({
+        runId: later.id,
+        status: 'completed',
+        workspaceId: null,
+        error: null
+      })
+    }
+
+    // The late completion must still find its row.
+    const completed = store.updateAutomationRun({
+      runId: inFlight.id,
+      status: 'completed',
+      workspaceId: null,
+      error: null
+    })
+    expect(completed.id).toBe(inFlight.id)
+
+    const runs = store.listAutomationRuns(automation.id)
+    expect(runs.some((run) => run.id === inFlight.id)).toBe(true)
+    // Final runs beyond the cap were still evicted. The store can briefly hold
+    // cap + 2: the last-created run finalizes after the prune at its creation,
+    // and the late completion lands without a prune of its own.
+    expect(runs.some((run) => run.id === firstCompletedId)).toBe(false)
+    expect(runs.length).toBeLessThanOrEqual(102)
   })
 
   it('persists automation precheck config and run results', async () => {
@@ -2183,7 +2901,7 @@ describe('Store', () => {
     })
     expect(persisted.settings.sourceControlAi.actions.branchName).toEqual({
       agentId: 'claude',
-      commandInputTemplate: '{basePrompt}\n\nRollback commit prompt'
+      commandInputTemplate: 'Rollback commit prompt\n\n{basePrompt}'
     })
   })
 
@@ -3137,6 +3855,62 @@ describe('Store', () => {
     expect(store.getWorktreeMeta('shared::/remote/repo/wt')).toBeUndefined()
   })
 
+  it('reorderReposForHost independently reorders local and SSH rows with shared ids', async () => {
+    const store = await createStore()
+    store.addRepo(makeRepo({ id: 'shared', path: '/local/shared' }))
+    store.addRepo(
+      makeRepo({
+        id: 'shared',
+        path: '/ssh/shared',
+        connectionId: 'target'
+      })
+    )
+    store.addRepo(makeRepo({ id: 'local-two', path: '/local/two' }))
+    store.addRepo(
+      makeRepo({
+        id: 'ssh-two',
+        path: '/ssh/two',
+        connectionId: 'target'
+      })
+    )
+
+    expect(store.reorderReposForHost(['local-two', 'shared'], 'local')).toBe(true)
+    expect(store.getRepos().map((repo) => repo.path)).toEqual([
+      '/local/two',
+      '/ssh/shared',
+      '/local/shared',
+      '/ssh/two'
+    ])
+
+    expect(store.reorderReposForHost(['ssh-two', 'shared'], 'ssh:target')).toBe(true)
+    expect(store.getRepos().map((repo) => repo.path)).toEqual([
+      '/local/two',
+      '/ssh/two',
+      '/local/shared',
+      '/ssh/shared'
+    ])
+  })
+
+  it('reorderReposForHost rejects stale or duplicate host permutations without mutation', async () => {
+    const store = await createStore()
+    store.addRepo(makeRepo({ id: 'local-one', path: '/local/one' }))
+    store.addRepo(makeRepo({ id: 'local-two', path: '/local/two' }))
+    store.addRepo(
+      makeRepo({
+        id: 'ssh-one',
+        path: '/ssh/one',
+        connectionId: 'target',
+        executionHostId: 'ssh:target'
+      })
+    )
+    const originalPaths = store.getRepos().map((repo) => repo.path)
+
+    expect(store.reorderReposForHost(['local-two'], 'local')).toBe(false)
+    expect(store.reorderReposForHost(['local-one', 'local-one'], 'local')).toBe(false)
+    expect(store.reorderReposForHost(['missing', 'local-two'], 'local')).toBe(false)
+    expect(store.getRepos().map((repo) => repo.path)).toEqual(originalPaths)
+  })
+
   it('removeProjectForHost prunes the SSH host meta (tagged hostId) for a shared id', async () => {
     const store = await createStore()
     store.addRepo(makeRepo({ id: 'shared', path: '/local/repo' }))
@@ -3181,9 +3955,9 @@ describe('Store', () => {
     store.addRepo(makeRepo({ id: 'r1', connectionId: 'ssh-old', executionHostId: 'ssh:ssh-old' }))
     store.setWorktreeMeta('r1::/repo/wt', { displayName: 'wt', hostId: 'ssh:ssh-old' })
 
-    const count = store.reassignSshTargetId('ssh-old', 'ssh-new')
+    const repoIds = store.reassignSshTargetId('ssh-old', 'ssh-new')
 
-    expect(count).toBe(1)
+    expect(repoIds).toEqual(['r1'])
     const repo = store.getRepo('r1')!
     expect(repo.connectionId).toBe('ssh-new')
     expect(repo.executionHostId).toBe('ssh:ssh-new')
@@ -3202,9 +3976,9 @@ describe('Store', () => {
       })
     )
 
-    const count = store.reassignSshTargetId('ssh-old', 'ssh-new')
+    const repoIds = store.reassignSshTargetId('ssh-old', 'ssh-new')
 
-    expect(count).toBe(1)
+    expect(repoIds).toEqual(['ssh-repo'])
     expect(store.getRepo('local-repo')!.connectionId).toBeUndefined()
     expect(store.getRepo('ssh-repo')!.connectionId).toBe('ssh-new')
   })
@@ -3214,9 +3988,9 @@ describe('Store', () => {
     // SSH repos created via addRemoteRepoFromPath leave executionHostId unset.
     store.addRepo(makeRepo({ id: 'r1', connectionId: 'ssh-old' }))
 
-    const count = store.reassignSshTargetId('ssh-old', 'ssh-new')
+    const repoIds = store.reassignSshTargetId('ssh-old', 'ssh-new')
 
-    expect(count).toBe(1)
+    expect(repoIds).toEqual(['r1'])
     const repo = store.getRepo('r1')!
     expect(repo.connectionId).toBe('ssh-new')
     // Must not stamp an executionHostId where there wasn't one.
@@ -3229,8 +4003,8 @@ describe('Store', () => {
     // must still be saved, not left in memory only.
     store.setWorktreeMeta('r1::/remote/wt', { displayName: 'wt', hostId: 'ssh:ssh-old' })
 
-    const count = store.reassignSshTargetId('ssh-old', 'ssh-new')
-    expect(count).toBe(0) // no repo matched
+    const repoIds = store.reassignSshTargetId('ssh-old', 'ssh-new')
+    expect(repoIds).toEqual([]) // no repo matched
     store.flush()
 
     const reloaded = await createStore()
@@ -4297,6 +5071,27 @@ describe('Store', () => {
     expect(updated.branchPrefix).toBe('git-username')
   })
 
+  it('normalizes bot-author overrides on load and every settings write', async () => {
+    writeDataFile({
+      settings: {
+        prBotAuthorOverrides: [' GretelFlux ', 'gretelflux', 42, '', 'another-bot']
+      }
+    })
+    const store = await createStore()
+
+    expect(store.getSettings().prBotAuthorOverrides).toEqual(['another-bot', 'gretelflux'])
+
+    const oversized = Array.from(
+      { length: 600 },
+      (_, index) => ` bot-${String(index).padStart(4, '0')} `
+    )
+    const updated = store.updateSettings({ prBotAuthorOverrides: oversized })
+
+    expect(updated.prBotAuthorOverrides).toHaveLength(500)
+    expect(updated.prBotAuthorOverrides[0]).toBe('bot-0000')
+    expect(updated.prBotAuthorOverrides[499]).toBe('bot-0499')
+  })
+
   it('notifies settings listeners with changed keys only', async () => {
     const store = await createStore()
     const listener = vi.fn()
@@ -5097,6 +5892,25 @@ describe('Store', () => {
     expect(ui.dismissedUpdateVersion).toBeNull()
   })
 
+  it('round-trips and normalizes the host-qualified manual repo order', async () => {
+    const store = await createStore()
+    store.updateUI({
+      manualRepoOrder: [
+        { hostId: 'runtime:node-b', repoId: 'shared' },
+        { hostId: 'bogus', repoId: 'ignored' },
+        { hostId: 'runtime:node-b', repoId: 'shared' },
+        { hostId: 'local', repoId: 'alpha' }
+      ] as never
+    })
+    store.flush()
+
+    const reloaded = await createStore()
+    expect(reloaded.getUI().manualRepoOrder).toEqual([
+      { hostId: 'runtime:node-b', repoId: 'shared' },
+      { hostId: 'local', repoId: 'alpha' }
+    ])
+  })
+
   it('updateUI persists sanitized per-worktree dotfile visibility', async () => {
     const store = await createStore()
     store.updateUI({
@@ -5879,6 +6693,65 @@ describe('Store', () => {
     const store = await createStore()
     expect(store.getSettings().terminalMacOptionAsAlt).toBe('auto')
     expect(store.getSettings().terminalMacOptionAsAltMigrated).toBe(true)
+  })
+
+  it('migrates inherited right-click paste to each platform default once', async () => {
+    for (const [platform, expected] of [
+      ['win32', true],
+      ['darwin', false],
+      ['linux', false]
+    ] as const) {
+      await withPlatform(platform, async () => {
+        writeDataFile({
+          schemaVersion: 1,
+          repos: [],
+          worktreeMeta: {},
+          settings: { terminalRightClickToPaste: true },
+          ui: {},
+          githubCache: { pr: {}, issue: {} },
+          workspaceSession: {}
+        })
+        const store = await createStore()
+        expect(store.getSettings().terminalRightClickToPaste).toBe(expected)
+        expect(store.getSettings().terminalRightClickToPasteDefaultedForPlatform).toBe(true)
+      })
+    }
+  })
+
+  it('preserves an explicit Windows right-click paste opt-out during migration', async () => {
+    await withPlatform('win32', async () => {
+      writeDataFile({
+        schemaVersion: 1,
+        repos: [],
+        worktreeMeta: {},
+        settings: { terminalRightClickToPaste: false },
+        ui: {},
+        githubCache: { pr: {}, issue: {} },
+        workspaceSession: {}
+      })
+      const store = await createStore()
+      expect(store.getSettings().terminalRightClickToPaste).toBe(false)
+      expect(store.getSettings().terminalRightClickToPasteDefaultedForPlatform).toBe(true)
+    })
+  })
+
+  it('preserves right-click paste choices after the platform migration', async () => {
+    await withPlatform('darwin', async () => {
+      writeDataFile({
+        schemaVersion: 1,
+        repos: [],
+        worktreeMeta: {},
+        settings: {
+          terminalRightClickToPaste: true,
+          terminalRightClickToPasteDefaultedForPlatform: true
+        },
+        ui: {},
+        githubCache: { pr: {}, issue: {} },
+        workspaceSession: {}
+      })
+      const store = await createStore()
+      expect(store.getSettings().terminalRightClickToPaste).toBe(true)
+    })
   })
 
   it('migrates inherited terminal bar cursor defaults to block on first load', async () => {
@@ -7093,6 +7966,44 @@ describe('Store', () => {
     } finally {
       agentHookServer.stop()
     }
+  })
+
+  it('restores cross-tab pane authority aliases before hook ingestion', async () => {
+    const physicalPaneKey = makePaneKey('tab-source', TEST_LEAF_1)
+    const ownerPaneKey = makePaneKey('tab-target', TEST_LEAF_2)
+    writeDataFile({
+      schemaVersion: 1,
+      repos: [],
+      worktreeMeta: {},
+      settings: {},
+      ui: {},
+      githubCache: { pr: {}, issue: {} },
+      legacyPaneKeyAliasEntries: [
+        {
+          ptyId: 'pty-detached',
+          legacyPaneKey: physicalPaneKey,
+          stablePaneKey: ownerPaneKey,
+          updatedAt: 10
+        }
+      ]
+    })
+
+    await createStore()
+    const { agentHookServer } = await import('./agent-hooks/server')
+    agentHookServer.ingestTerminalStatus({
+      paneKey: physicalPaneKey,
+      tabId: 'tab-source',
+      worktreeId: 'wt1',
+      payload: { state: 'working', prompt: 'detached after restart' }
+    })
+
+    expect(agentHookServer.getStatusSnapshot()).toEqual([
+      expect.objectContaining({
+        paneKey: ownerPaneKey,
+        tabId: 'tab-target',
+        prompt: 'detached after restart'
+      })
+    ])
   })
 
   it('persists fallback aliases when a legacy split layout has no PTY leaf bindings', async () => {
@@ -9276,6 +10187,63 @@ describe('Store', () => {
       installId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       existedBeforeTelemetryRelease: false
     })
+  })
+})
+
+describe('Store.migrateTabSwitchKeybindings', () => {
+  // Freezes the install cohort for the tab-switch convention swap on first load.
+  // Keys on `fileExistedOnLoad` (not field presence) so the verdict is stable
+  // even after a fresh install writes its own data file on later launches.
+
+  beforeEach(() => {
+    testState.dir = mkdtempSync(join(tmpdir(), 'orca-test-'))
+  })
+
+  afterEach(() => {
+    rmSync(testState.dir, { recursive: true, force: true })
+  })
+
+  it('marks a truly fresh install done so it adopts the new defaults', async () => {
+    const store = await createStore()
+    expect(store.getSettings().tabSwitchKeybindingSeed).toBe('done')
+  })
+
+  it('marks a pre-existing install pending so the legacy chords get seeded', async () => {
+    writeDataFile({
+      schemaVersion: 1,
+      repos: [makeRepo()],
+      worktreeMeta: {},
+      settings: { theme: 'dark' },
+      ui: {},
+      githubCache: { pr: {}, issue: {} },
+      workspaceSession: {}
+    })
+    const store = await createStore()
+    expect(store.getSettings().tabSwitchKeybindingSeed).toBe('pending')
+    expect(store.getSettings().theme).toBe('dark')
+  })
+
+  it('treats a corrupt data file as a pre-existing install', async () => {
+    mkdirSync(testState.dir, { recursive: true })
+    writeFileSync(dataFile(), '{{{corrupt json', 'utf-8')
+    const store = await createStore()
+    expect(store.getSettings().tabSwitchKeybindingSeed).toBe('pending')
+  })
+
+  it('preserves an already-frozen cohort on subsequent launches', async () => {
+    writeDataFile({
+      schemaVersion: 1,
+      repos: [],
+      worktreeMeta: {},
+      settings: { tabSwitchKeybindingSeed: 'done' },
+      ui: {},
+      githubCache: { pr: {}, issue: {} },
+      workspaceSession: {}
+    })
+    const store = await createStore()
+    // Existing file but cohort already resolved to 'done' — must not flip to
+    // 'pending' just because the data file happens to exist.
+    expect(store.getSettings().tabSwitchKeybindingSeed).toBe('done')
   })
 })
 

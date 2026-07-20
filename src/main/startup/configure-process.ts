@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
 import { getMainE2EConfig } from '../e2e-config'
+import productProfile from '../../shared/product-profile.json'
 
 const DEV_PARENT_SHUTDOWN_GRACE_MS = 3000
 const HTTP1_COMPATIBILITY_ENV_VAR = 'ORCA_DISABLE_HTTP2'
@@ -176,7 +177,7 @@ export function patchPackagedProcessPath(): void {
   }
 }
 
-export function configureDevUserDataPath(isDev: boolean): void {
+export function configureProductUserDataPath(isDev: boolean): void {
   const e2eConfig = getMainE2EConfig()
   if (e2eConfig.userDataDir) {
     // Why: the E2E suite launches a fresh Electron app for each spec. A
@@ -187,22 +188,22 @@ export function configureDevUserDataPath(isDev: boolean): void {
     return
   }
 
-  if (!isDev) {
-    return
-  }
-  const overrideUserDataPath = process.env.ORCA_DEV_USER_DATA_PATH
-  if (overrideUserDataPath) {
+  const overrideUserDataPath = isDev ? process.env.ORCA_DEV_USER_DATA_PATH : undefined
+  if (isDev && overrideUserDataPath) {
     // Why: automated Electron repros need an isolated profile so persisted
     // tabs/worktrees from the developer's normal `orca-dev` session do not
     // change startup behavior and hide or create window-management bugs.
     app.setPath('userData', overrideUserDataPath)
     return
   }
-  // Why: development runs share the same machine as packaged Orca, and both
-  // publish runtime bootstrap files under userData. Without a dev-only path,
-  // `pnpm dev` can overwrite the packaged app's runtime pointer and make the
-  // public `orca` CLI look broken even though the packaged app is still open.
-  app.setPath('userData', join(app.getPath('appData'), 'orca-dev'))
+  // Why: Jaws intentionally coexists with upstream Orca. Set both packaged
+  // and dev paths explicitly before the single-instance lock and persistence
+  // bootstrap so neither app can overwrite the other's runtime metadata,
+  // settings, credentials, or worktree state.
+  const directoryName = isDev
+    ? productProfile.devUserDataDirectoryName
+    : productProfile.userDataDirectoryName
+  app.setPath('userData', join(app.getPath('appData'), directoryName))
 }
 
 export function configureOrcaUserDataPathEnv(): void {

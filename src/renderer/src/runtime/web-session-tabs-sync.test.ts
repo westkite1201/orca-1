@@ -64,6 +64,7 @@ function makeState(overrides: Partial<WebSessionTabsSyncState> = {}): WebSession
     activeWorktreeId: WT,
     agentStatusByPaneKey: {},
     agentStatusEpoch: 0,
+    browserCertificateFailuresByPageId: {},
     browserPagesByWorkspace: {},
     browserTabsByWorktree: {},
     groupsByWorktree: {},
@@ -1654,6 +1655,57 @@ describe('applyWebSessionTabsSnapshot', () => {
     expect(patch.sortEpoch).toBe(1)
   })
 
+  it('bumps aggregate epochs when a mirrored same-state entry gains attribution', () => {
+    const hostPaneKey = makePaneKey('host-tab-1', LEAF_ID)
+    const snapshot = makeSnapshot([
+      {
+        type: 'terminal',
+        id: HOST_SURFACE_ID,
+        title: 'codex [working]',
+        parentTabId: 'host-tab-1',
+        leafId: LEAF_ID,
+        isActive: true,
+        status: 'ready',
+        terminal: 'terminal-1',
+        agentStatus: {
+          state: 'working',
+          prompt: 'fix web parity',
+          updatedAt: NOW - 100,
+          stateStartedAt: NOW - 1_000,
+          agentType: 'codex',
+          paneKey: hostPaneKey,
+          worktreeId: WT,
+          tabId: 'host-tab-1',
+          stateHistory: []
+        }
+      }
+    ])
+    const initial = applyWebSessionTabsSnapshot(
+      makeState(),
+      snapshot,
+      ENV,
+      NOW
+    ) as Partial<WebSessionTabsSyncState>
+    const mirroredPaneKey = Object.keys(initial.agentStatusByPaneKey ?? {})[0]!
+    const existing = initial.agentStatusByPaneKey![mirroredPaneKey]!
+    const patch = applyWebSessionTabsSnapshot(
+      makeState({
+        ...initial,
+        agentStatusByPaneKey: {
+          [mirroredPaneKey]: { ...existing, worktreeId: 'stale-worktree', tabId: 'stale-tab' }
+        },
+        agentStatusEpoch: 7,
+        sortEpoch: 11
+      }),
+      { ...snapshot, snapshotVersion: 2 },
+      ENV,
+      NOW
+    ) as Partial<WebSessionTabsSyncState>
+
+    expect(patch.agentStatusEpoch).toBe(8)
+    expect(patch.sortEpoch).toBe(12)
+  })
+
   it('keeps mirrored OMP tabs from repainting to Pi-compatible titles', () => {
     const hostPaneKey = makePaneKey('host-tab-1', LEAF_ID)
     const patch = applyWebSessionTabsSnapshot(
@@ -1695,6 +1747,81 @@ describe('applyWebSessionTabsSnapshot', () => {
       agentType: 'omp',
       terminalTitle: 'OMP ready'
     })
+  })
+
+  it('bumps sort epoch for mirrored Command Code same-state turn starts', () => {
+    const hostPaneKey = makePaneKey('host-tab-1', LEAF_ID)
+    const initialPatch = applyWebSessionTabsSnapshot(
+      makeState(),
+      makeSnapshot([
+        {
+          type: 'terminal',
+          id: HOST_SURFACE_ID,
+          title: 'Command Code',
+          parentTabId: 'host-tab-1',
+          leafId: LEAF_ID,
+          isActive: true,
+          status: 'ready',
+          terminal: 'terminal-1',
+          agentStatus: {
+            state: 'working',
+            prompt: 'same prompt',
+            updatedAt: NOW - 1_000,
+            stateStartedAt: NOW - 1_000,
+            agentType: 'command-code',
+            paneKey: hostPaneKey,
+            terminalTitle: 'Command Code',
+            stateHistory: [],
+            promptInteractionKey: 'command-code-transcript-a'
+          }
+        }
+      ]),
+      ENV,
+      NOW
+    ) as Partial<WebSessionTabsSyncState>
+    const initialState = { ...makeState(), ...initialPatch }
+    const mirroredId = initialPatch.tabsByWorktree?.[WT]?.[0]?.id
+    const mirroredPaneKey = makePaneKey(mirroredId!, LEAF_ID)
+
+    const patch = applyWebSessionTabsSnapshot(
+      initialState,
+      makeSnapshot(
+        [
+          {
+            type: 'terminal',
+            id: HOST_SURFACE_ID,
+            title: 'Command Code',
+            parentTabId: 'host-tab-1',
+            leafId: LEAF_ID,
+            isActive: true,
+            status: 'ready',
+            terminal: 'terminal-1',
+            agentStatus: {
+              state: 'working',
+              prompt: 'same prompt',
+              updatedAt: NOW,
+              stateStartedAt: NOW,
+              agentType: 'command-code',
+              paneKey: hostPaneKey,
+              terminalTitle: 'Command Code',
+              stateHistory: [],
+              promptInteractionKey: 'command-code-transcript-b'
+            }
+          }
+        ],
+        { snapshotVersion: 2 }
+      ),
+      ENV,
+      NOW
+    ) as Partial<WebSessionTabsSyncState>
+
+    expect(patch.agentStatusByPaneKey?.[mirroredPaneKey]).toMatchObject({
+      prompt: 'same prompt',
+      stateStartedAt: NOW,
+      promptInteractionKey: 'command-code-transcript-b'
+    })
+    expect(patch.agentStatusEpoch).toBe((initialState.agentStatusEpoch ?? 0) + 1)
+    expect(patch.sortEpoch).toBe((initialState.sortEpoch ?? 0) + 1)
   })
 
   it('hydrates multiple initial host snapshots in one merged patch', () => {
@@ -2233,6 +2360,21 @@ describe('applyWebSessionTabsSnapshot', () => {
             loading: false,
             canGoBack: true,
             canGoForward: false,
+            loadError: {
+              code: -202,
+              description: 'ERR_CERT_AUTHORITY_INVALID',
+              validatedUrl: 'https://localhost:3443/'
+            },
+            certificateFailure: {
+              challengeId: 'challenge-1',
+              browserPageId: 'host-browser-page',
+              errorCode: -202,
+              error: 'ERR_CERT_AUTHORITY_INVALID',
+              origin: 'https://localhost:3443',
+              displayHost: 'localhost:3443',
+              canProceed: true,
+              observedAt: 123
+            },
             color: '#3b82f6',
             isPinned: true,
             isActive: true
@@ -2264,12 +2406,27 @@ describe('applyWebSessionTabsSnapshot', () => {
         worktreeId: WT,
         url: 'https://example.com/',
         title: 'Example Domain',
-        loading: false
+        loading: false,
+        loadError: {
+          code: -202,
+          description: 'ERR_CERT_AUTHORITY_INVALID',
+          validatedUrl: 'https://localhost:3443/'
+        }
       }
     ])
     expect(patch.remoteBrowserPageHandlesByPageId?.['host-browser-page']).toEqual({
       environmentId: ENV,
       remotePageId: 'host-browser-page'
+    })
+    expect(patch.browserCertificateFailuresByPageId?.['host-browser-page']).toEqual({
+      challengeId: 'challenge-1',
+      browserPageId: 'host-browser-page',
+      errorCode: -202,
+      error: 'ERR_CERT_AUTHORITY_INVALID',
+      origin: 'https://localhost:3443',
+      displayHost: 'localhost:3443',
+      canProceed: true,
+      observedAt: 123
     })
     expect(patch.unifiedTabsByWorktree?.[WT]).toEqual(
       expect.arrayContaining([
@@ -2762,6 +2919,18 @@ describe('applyWebSessionTabsSnapshot', () => {
         remoteBrowserPageHandlesByPageId: {
           [page.id]: { environmentId: ENV, remotePageId: 'host-browser-page' }
         },
+        browserCertificateFailuresByPageId: {
+          [page.id]: {
+            challengeId: 'stale-challenge',
+            browserPageId: 'host-browser-page',
+            errorCode: -202,
+            error: 'ERR_CERT_AUTHORITY_INVALID',
+            origin: 'https://localhost:3443',
+            displayHost: 'localhost:3443',
+            canProceed: true,
+            observedAt: 100
+          }
+        },
         openFiles: [file],
         unifiedTabsByWorktree: { [WT]: existingTabs }
       }),
@@ -2819,6 +2988,9 @@ describe('applyWebSessionTabsSnapshot', () => {
         })
       ])
     )
+    // Why: older runtimes omit this transient field. Omission must clear an
+    // earlier challenge instead of leaving an unsafe action wired to stale RPC input.
+    expect(patch.browserCertificateFailuresByPageId).toEqual({})
   })
 
   it('uses local markdown preview file ids while preserving the host unified tab id', () => {

@@ -3603,10 +3603,16 @@ private func isTrustedOrcaApplication(_ pid: pid_t) -> Bool {
     else {
         return false
     }
-    // Why: dev validation runs from per-worktree wrapper apps with stable
-    // Orca-owned bundle ids; the sidecar peer check must still authorize them.
-    return bundleId == "com.stablyai.orca" ||
-        bundleId.hasPrefix("com.stablyai.orca.dev.") ||
+    // Why: derive the owning desktop id from this helper's
+    // `<appId>.computer-use` id so personal forks do not need a second
+    // hard-coded trust list. Dev wrapper apps append `.dev.<hash>`.
+    let helperSuffix = ".computer-use"
+    let helperBundleId = Bundle.main.bundleIdentifier ?? ""
+    let ownerBundleId = helperBundleId.hasSuffix(helperSuffix)
+        ? String(helperBundleId.dropLast(helperSuffix.count))
+        : ""
+    return (!ownerBundleId.isEmpty && bundleId == ownerBundleId) ||
+        (!ownerBundleId.isEmpty && bundleId.hasPrefix("\(ownerBundleId).dev.")) ||
         bundleId == "com.github.Electron"
 }
 

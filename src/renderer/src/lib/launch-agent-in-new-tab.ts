@@ -11,13 +11,11 @@ import { reconcileTabOrder } from '@/components/tab-bar/reconcile-order'
 import { track, tuiAgentToAgentKind } from '@/lib/telemetry'
 import { deliverLaunchPromptToAgentTab } from '@/lib/agent-launch-prompt-delivery'
 import { initialAgentTabViewModeProps } from '@/lib/native-chat-initial-view-mode'
+import { isNativeChatTranscriptLocalReadable } from '@/lib/native-chat-transcript-readability'
 import { getRuntimeEnvironmentIdForWorktree } from '@/lib/worktree-runtime-owner'
 import { getLocalProjectExecutionRuntimeContext } from '@/lib/local-preflight-context'
-import {
-  createWebRuntimeSessionTerminal,
-  isWebRuntimeSessionActive,
-  isWebTerminalSurfaceTabId
-} from '@/runtime/web-runtime-session'
+import { isWebRuntimeSessionActive } from '@/runtime/web-runtime-session'
+import { launchAgentInWebHostTab } from '@/lib/launch-agent-web-host-tab'
 import {
   resolveTuiAgentLaunchArgs,
   resolveTuiAgentLaunchEnv
@@ -29,6 +27,9 @@ import { seedCommandCodeSubmittedPromptStatus } from '@/lib/command-code-prompt-
 import type { TuiAgent } from '../../../shared/types'
 import type { LaunchSource } from '../../../shared/telemetry-events'
 import { translate } from '@/i18n/i18n'
+import { getConnectionIdFromState } from '@/lib/connection-context'
+import { resolveNativeChatSessionOptionDefaults } from '../../../shared/native-chat-session-option-defaults'
+import { seedNativeChatAppliedSessionOptions } from '@/components/native-chat/native-chat-session-option-cache'
 
 export type LaunchAgentInNewTabArgs = {
   agent: TuiAgent
@@ -54,15 +55,6 @@ export type LaunchAgentInNewTabArgs = {
   launchPlatform?: NodeJS.Platform
   /** Called after the prompt is actually delivered to the agent input path. */
   onPromptDelivered?: () => void
-}
-
-function removeStaleLocalAgentTabsForWebHostLaunch(worktreeId: string): void {
-  const state = useAppStore.getState()
-  for (const tab of state.tabsByWorktree[worktreeId] ?? []) {
-    if (tab.launchAgent && !isWebTerminalSurfaceTabId(tab.id)) {
-      state.closeTab(tab.id)
-    }
-  }
 }
 
 export type LaunchAgentInNewTabResult = {
@@ -139,7 +131,11 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
     shell: queuedShell,
     isRemote,
     agentArgs: effectiveAgentArgs,
-    agentEnv
+    agentEnv,
+    sessionOptions: resolveNativeChatSessionOptionDefaults(
+      store.settings?.nativeChatSessionOptions,
+      agent
+    )
   }
   const trimmedPrompt = prompt?.trim() ?? ''
   const hasPrompt = trimmedPrompt.length > 0
@@ -179,6 +175,9 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
         expectedProcess: draftLaunchPlan.expectedProcess,
         followupPrompt: null,
         launchConfig: draftLaunchPlan.launchConfig,
+        ...(draftLaunchPlan.sessionOptions
+          ? { sessionOptions: draftLaunchPlan.sessionOptions }
+          : {}),
         ...(draftLaunchPlan.startupCommandDelivery
           ? { startupCommandDelivery: draftLaunchPlan.startupCommandDelivery }
           : {}),
@@ -211,46 +210,31 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
     return null
   }
 
+  // Why: host-owned paired tabs must receive the same initial-view decision as
+  // local tabs; the remote host cannot infer this client's draft/default choice.
+  const viewModePromptDelivery =
+    hasPrompt && isFollowupPath && promptDelivery === 'auto-submit' ? 'draft' : promptDelivery
+  const initialViewModeProps = initialAgentTabViewModeProps(store.settings, {
+    agent,
+    promptDelivery: viewModePromptDelivery,
+    nativeChatTranscriptIsLocalReadable: isNativeChatTranscriptLocalReadable(
+      getConnectionIdFromState(store, worktreeId)
+    )
+  })
+
   const runtimeEnvironmentId = getRuntimeEnvironmentIdForWorktree(store, worktreeId)
   if (isWebRuntimeSessionActive(runtimeEnvironmentId) && pasteDraftAfterLaunch === null) {
-    // Why: paired web tabs are host-owned and return tabId: null on success.
-    // Local-only agent tabs cannot be closed because close routes through
-    // session.tabs.close on the host, so prune them before the host snapshot.
-    removeStaleLocalAgentTabsForWebHostLaunch(worktreeId)
-    void createWebRuntimeSessionTerminal({
+    launchAgentInWebHostTab({
+      agent,
       worktreeId,
       environmentId: runtimeEnvironmentId,
-      targetGroupId: groupId,
-      activate: true,
-      ...(hasPrompt
-        ? {
-            command: startupPlan.launchCommand,
-            ...(startupPlan.env ? { env: startupPlan.env } : {}),
-            launchConfig: startupPlan.launchConfig,
-            launchAgent: agent,
-            ...(startupPlan.startupCommandDelivery
-              ? { startupCommandDelivery: startupPlan.startupCommandDelivery }
-              : {})
-          }
-        : { agent })
-    }).then((created) => {
-      // Why: created means the host accepted the launch, not that a local tab
-      // exists; keep pruning stale local rows until the snapshot mirrors.
-      removeStaleLocalAgentTabsForWebHostLaunch(worktreeId)
-      if (!created) {
-        toast.error(
-          translate(
-            'auto.lib.launch.agent.in.new.tab.11cce5cc77',
-            'Could not launch {{value0}} in a new terminal.',
-            { value0: agent }
-          )
-        )
-        return
-      }
-      store.setActiveTabType('terminal')
-      if (hasPrompt) {
-        onPromptDelivered?.()
-      }
+      groupId,
+      hasPrompt,
+      startupPlan,
+      // Why: omission means terminal locally, but would let a paired host apply
+      // its own default; send the client's resolved terminal choice explicitly.
+      viewMode: initialViewModeProps.viewMode ?? 'terminal',
+      onPromptDelivered
     })
     return { tabId: null, startupPlan, pasteDraftAfterLaunch: false }
   }
@@ -264,16 +248,12 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
   // stays false), so gate the initial chat view like a `draft` launch —
   // otherwise a default `auto-submit` followup would open native chat with no
   // submitted turn to render.
-  const viewModePromptDelivery =
-    hasPrompt && isFollowupPath && promptDelivery === 'auto-submit' ? 'draft' : promptDelivery
   const tab = store.createTab(worktreeId, groupId, undefined, {
     launchAgent: agent,
     quickCommandLabel,
-    ...initialAgentTabViewModeProps(store.settings, {
-      agent,
-      promptDelivery: viewModePromptDelivery
-    })
+    ...initialViewModeProps
   })
+  seedNativeChatAppliedSessionOptions(tab.id, agent, startupPlan.sessionOptions)
   store.queueTabStartupCommand(tab.id, {
     command: startupPlan.launchCommand,
     ...(startupPlan.env ? { env: startupPlan.env } : {}),

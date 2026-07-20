@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url)
 const electronBuilderConfig = require('../electron-builder.config.cjs')
 const electronBuilderNativeRebuild = require('./electron-builder-native-rebuild.cjs')
 const {
+  PACKAGED_RUNTIME_PACKAGE_ROOTS,
   createPackagedRuntimeNodeModuleResources,
   findAsarEntry,
   prunePackagedNodePty,
@@ -19,6 +20,15 @@ const {
 } = require('../packaged-runtime-node-modules.cjs')
 
 describe('electron-builder config', () => {
+  it('packages Jaws under an identity isolated from Orca', () => {
+    expect(electronBuilderConfig).toMatchObject({
+      appId: 'com.seoyeonkim.jaws',
+      productName: 'Jaws',
+      publish: null
+    })
+    expect(electronBuilderConfig.win.executableName).toBe('Jaws')
+  })
+
   it('excludes repo-only source trees from app.asar', () => {
     expect(electronBuilderConfig.files).toEqual(
       expect.arrayContaining([
@@ -28,7 +38,10 @@ describe('electron-builder config', () => {
         '!mobile{,/**/*}',
         '!native{,/**/*}',
         '!skills{,/**/*}',
+        '!skill-guides{,/**/*}',
+        '!resources/skills/**',
         '!tests{,/**/*}',
+        '!pr-evidence{,/**/*}',
         '!Casks{,/**/*}',
         '!{AGENTS.md,CLAUDE.md,DEVELOPING.md,bundle-size-progress.md}',
         '!out/**/*.test.js'
@@ -37,6 +50,12 @@ describe('electron-builder config', () => {
   })
 
   it('keeps runtime resources available through extraResources', () => {
+    for (const platform of ['mac', 'linux', 'win']) {
+      expect(electronBuilderConfig[platform].extraResources).toContainEqual({
+        from: 'resources/skills',
+        to: 'skills'
+      })
+    }
     expect(electronBuilderConfig.mac.extraResources).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -58,6 +77,10 @@ describe('electron-builder config', () => {
         expect.objectContaining({
           from: 'native/computer-use-windows/runtime.ps1',
           to: 'computer-use-windows/runtime.ps1'
+        }),
+        expect.objectContaining({
+          from: 'native/windows-cli-launcher/.build/orca.exe',
+          to: 'bin/orca.exe'
         })
       ])
     )
@@ -98,17 +121,31 @@ describe('electron-builder config', () => {
   })
 
   it('matches the Linux desktop entry to Electron window class', () => {
-    expect(electronBuilderConfig.linux.desktop.entry.StartupWMClass).toBe('orca')
+    expect(electronBuilderConfig.linux.desktop.entry.StartupWMClass).toBe('jaws')
   })
 
-  it('uses AppImage and deb as local Linux targets without changing existing artifact names', () => {
+  it('uses Jaws artifact and package names on every platform', () => {
+    expect(electronBuilderConfig.nsis.artifactName).toBe('jaws-windows-setup.${ext}')
+    expect(electronBuilderConfig.dmg.artifactName).toBe('jaws-macos-${arch}.${ext}')
     expect(electronBuilderConfig.linux.target).toEqual(['AppImage', 'deb'])
-    expect(electronBuilderConfig.appImage.artifactName).toBe('orca-linux.${ext}')
-    expect(electronBuilderConfig.deb.artifactName).toBe('orca-ide_${version}_${arch}.${ext}')
-    expect(electronBuilderConfig.rpm).toMatchObject({
-      packageName: 'orca-ide',
-      artifactName: 'orca-ide-${version}.${arch}.${ext}'
+    expect(electronBuilderConfig.appImage.artifactName).toBe('jaws-linux.${ext}')
+    expect(electronBuilderConfig.deb).toMatchObject({
+      packageName: 'jaws',
+      artifactName: 'jaws_${version}_${arch}.${ext}'
     })
+    expect(electronBuilderConfig.rpm).toMatchObject({
+      packageName: 'jaws',
+      artifactName: 'jaws-${version}.${arch}.${ext}'
+    })
+  })
+
+  it('packages the Jaws Linux launcher', () => {
+    expect(electronBuilderConfig.linux).toMatchObject({ executableName: 'jaws' })
+    expect(electronBuilderConfig.linux.extraResources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: 'resources/linux/bin/jaws', to: 'bin/jaws' })
+      ])
+    )
   })
 
   it('uses a distinct AppImage name for Linux arm64 release uploads', () => {
@@ -118,7 +155,7 @@ describe('electron-builder config', () => {
       delete require.cache[configPath]
       process.env.ORCA_LINUX_ARM64_RELEASE = '1'
       expect(require('../electron-builder.config.cjs').appImage.artifactName).toBe(
-        'orca-linux-arm64.${ext}'
+        'jaws-linux-arm64.${ext}'
       )
     } finally {
       if (original === undefined) {
@@ -245,6 +282,13 @@ describe('electron-builder config', () => {
     ).toBe(true)
   })
 
+  it('does not package electron-updater when updates are disabled', () => {
+    expect(PACKAGED_RUNTIME_PACKAGE_ROOTS).not.toContain('electron-updater')
+    expect(createPackagedRuntimeNodeModuleResources().map((resource) => resource.to)).not.toContain(
+      join('node_modules', 'electron-updater')
+    )
+  })
+
   it('prunes non-target @parcel/watcher platform subpackages from packaged runtime resources', async () => {
     const resourcesDir = await mkdtemp(join(tmpdir(), 'orca-parcel-watcher-prune-'))
     try {
@@ -347,10 +391,10 @@ describe('electron-builder config', () => {
   it.skipIf(process.platform === 'win32')(
     'marks packaged Unix CLI launchers executable',
     async () => {
-      const root = await mkdtemp(join(tmpdir(), 'orca-electron-builder-config-'))
+      const root = await mkdtemp(join(tmpdir(), 'jaws-electron-builder-config-'))
       try {
         const resourcesDir = join(root, 'linux-unpacked', 'resources')
-        const launcherPath = join(resourcesDir, 'bin', 'orca-ide')
+        const launcherPath = join(resourcesDir, 'bin', 'jaws')
         await mkdir(join(resourcesDir, 'bin'), { recursive: true })
         await mkdir(join(resourcesDir, 'node_modules', 'zod', 'src'), { recursive: true })
         // Why: afterPack now fails hard when the unpacked daemon entry is

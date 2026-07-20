@@ -1,0 +1,7 @@
+{
+  "name": "Jaws",
+  "appId": "com.seoyeonkim.jaws",
+  "userDataDirectoryName": "jaws",
+  "devUserDataDirectoryName": "jaws-dev",
+  "updatesEnabled": false
+}

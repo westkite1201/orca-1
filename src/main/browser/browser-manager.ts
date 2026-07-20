@@ -5,10 +5,12 @@ in one file avoids scattering the browser security boundary across modules. */
 import { randomUUID } from 'node:crypto'
 
 import { shell, webContents } from 'electron'
+import { ORCA_BROWSER_BLANK_URL } from '../../shared/constants'
 import {
   normalizeBrowserNavigationUrl,
   normalizeExternalBrowserUrl,
-  redactKagiSessionToken
+  redactKagiSessionToken,
+  toSecureCertificateEndpoint
 } from '../../shared/browser-url'
 import type {
   BrowserDownloadFinishedEvent,
@@ -37,6 +39,12 @@ import {
   setupGuestShortcutForwarding
 } from './browser-guest-ui'
 import { ANTI_DETECTION_SCRIPT } from './anti-detection'
+import { openPopupWithOriginBar, type PopupChildWindowOptions } from './popup-origin-bar-window'
+import {
+  BROWSER_CLICKED_LINK_ROUTING_WORLD_ID,
+  buildBrowserClickedLinkRoutingScript,
+  buildBrowserIframeClickedLinkRoutingScript
+} from './browser-clicked-link-routing'
 import { cleanElectronUserAgent } from './browser-session-ua'
 import type { BrowserViewportOverride } from '../../shared/types'
 import {
@@ -45,8 +53,17 @@ import {
   buildBrowserAnnotationViewportBridgeScript
 } from '../../shared/browser-annotation-viewport-bridge'
 import type { KeybindingOverrides } from '../../shared/keybindings'
+import type { BrowserCertificateFailure, BrowserLoadError } from '../../shared/types'
+import {
+  BrowserCertificateTrustController,
+  type ManagedBrowserGuestContext
+} from './browser-certificate-trust-controller'
 
 const AUTOMATION_VISIBILITY_ACQUIRE_TIMEOUT_MS = 2_000
+
+function isChromiumInternalErrorUrl(url: string): boolean {
+  return url.startsWith('chrome-error://')
+}
 
 function resolveWithTimeout<T>(
   promise: Promise<T>,
@@ -140,6 +157,37 @@ export type BrowserGuestRegistration = {
 type PendingPermissionEvent = Omit<BrowserPermissionDeniedEvent, 'browserPageId'>
 type PendingPopupEvent = Omit<BrowserPopupEvent, 'browserPageId'>
 type BrowserDownloadDoneState = 'completed' | 'cancelled' | 'interrupted'
+type PopupOwnerContext = {
+  browserTabId: string
+  rootGuestWebContentsId: number
+}
+const SAFE_POPUP_WINDOW_OPTIONS = {
+  alwaysOnTop: false,
+  closable: true,
+  focusable: true,
+  frame: true,
+  fullscreen: false,
+  kiosk: false,
+  modal: false,
+  movable: true,
+  opacity: 1,
+  show: true,
+  simpleFullscreen: false,
+  skipTaskbar: false,
+  titleBarStyle: 'default',
+  transparent: false,
+  // Why: applied by Electron when it creates the popup's WebContents, before
+  // createWindow runs. Feature strings and opener inheritance must not be able
+  // to relax the child's process isolation.
+  webPreferences: {
+    allowRunningInsecureContent: false,
+    contextIsolation: true,
+    nodeIntegration: false,
+    nodeIntegrationInSubFrames: false,
+    sandbox: true,
+    webviewTag: false
+  }
+} satisfies Electron.BrowserWindowConstructorOptions
 
 type ActiveDownload = {
   downloadId: string
@@ -181,6 +229,7 @@ export class BrowserManager {
   // Why: reverse map enables O(1) guest→tab lookups instead of O(N) linear
   // scans on every mouse event, load failure, permission, and popup event.
   private readonly tabIdByWebContentsId = new Map<number, string>()
+  private readonly popupOwnerContextByGuestId = new Map<number, PopupOwnerContext>()
   // Why: guest registration is keyed by browser page id, but renderer
   // visibility/focus state is keyed by browser workspace id. Screenshot prep
   // has to bridge that mismatch to activate the right tab before capture.
@@ -199,21 +248,46 @@ export class BrowserManager {
   private readonly annotationViewportBridgeOpsByTabId = new Map<string, Promise<unknown>>()
   private readonly worktreeIdByTabId = new Map<string, string>()
   private readonly policyAttachedGuestIds = new Set<number>()
+  private readonly offscreenGuestIds = new Set<number>()
   private readonly policyCleanupByGuestId = new Map<number, () => void>()
+  private readonly clickedLinkFrameNameByGuestId = new Map<number, string>()
+  private readonly loadErrorsByGuestId = new Map<number, BrowserLoadError>()
+  // Why: did-start-navigation optimistically hides the overlay, but an aborted
+  // nav never commits — stash the cleared error so did-fail-load(-3) can restore
+  // it instead of stranding the user on a blank surface.
+  private readonly clearedLoadErrorsByGuestId = new Map<number, BrowserLoadError>()
+  private browserGuestStateChangedListener: ((worktreeId: string) => void) | null = null
+  private certificateTrustController: BrowserCertificateTrustController | null = null
   private shouldForwardDictationShortcut: (() => boolean) | null = null
   private readonly pendingLoadFailuresByGuestId = new Map<
     number,
     { code: number; description: string; validatedUrl: string }
   >()
-
-  setDictationShortcutForwardingPredicate(predicate: (() => boolean) | null): void {
-    this.shouldForwardDictationShortcut = predicate
-  }
   private readonly pendingPermissionEventsByGuestId = new Map<number, PendingPermissionEvent[]>()
   private readonly pendingPopupEventsByGuestId = new Map<number, PendingPopupEvent[]>()
   private readonly pendingDownloadIdsByGuestId = new Map<number, string[]>()
   private readonly downloadsById = new Map<string, ActiveDownload>()
   private readonly grabSessionController = new BrowserGrabSessionController()
+
+  setDictationShortcutForwardingPredicate(predicate: (() => boolean) | null): void {
+    this.shouldForwardDictationShortcut = predicate
+  }
+
+  setBrowserGuestStateChangedListener(listener: ((worktreeId: string) => void) | null): void {
+    this.browserGuestStateChangedListener = listener
+  }
+
+  setCertificateTrustController(controller: BrowserCertificateTrustController): void {
+    this.certificateTrustController = controller
+  }
+
+  installCertificateRequestGuard(session: Electron.Session): void {
+    this.certificateTrustController?.installSessionRequestGuard(session)
+  }
+
+  removeCertificateRequestGuard(session: Electron.Session): void {
+    this.certificateTrustController?.removeSessionRequestGuard(session)
+  }
 
   setSettingsResolver(
     resolver: () => {
@@ -293,7 +367,23 @@ export class BrowserManager {
   }
 
   private resolveBrowserTabIdForGuestWebContentsId(guestWebContentsId: number): string | null {
-    return this.tabIdByWebContentsId.get(guestWebContentsId) ?? null
+    return this.resolvePopupOwnerContext(guestWebContentsId)?.browserTabId ?? null
+  }
+
+  private resolvePopupOwnerContext(guestWebContentsId: number): PopupOwnerContext | null {
+    const browserTabId = this.tabIdByWebContentsId.get(guestWebContentsId)
+    if (browserTabId) {
+      return { browserTabId, rootGuestWebContentsId: guestWebContentsId }
+    }
+    const inherited = this.popupOwnerContextByGuestId.get(guestWebContentsId)
+    if (
+      inherited &&
+      this.webContentsIdByTabId.get(inherited.browserTabId) === inherited.rootGuestWebContentsId
+    ) {
+      return inherited
+    }
+    this.popupOwnerContextByGuestId.delete(guestWebContentsId)
+    return null
   }
 
   private resolveRendererForBrowserTab(browserTabId: string): Electron.WebContents | null {
@@ -558,11 +648,26 @@ export class BrowserManager {
     }
   }
 
-  attachGuestPolicies(guest: Electron.WebContents): void {
+  attachGuestPolicies(
+    guest: Electron.WebContents,
+    inheritedOwnerContext: PopupOwnerContext | null = null
+  ): void {
     if (this.policyAttachedGuestIds.has(guest.id)) {
       return
     }
     this.policyAttachedGuestIds.add(guest.id)
+    if (inheritedOwnerContext) {
+      this.popupOwnerContextByGuestId.set(guest.id, inheritedOwnerContext)
+    }
+    // Why: OAuth child windows must retain normal link/window relationships;
+    // only the primary embedded browser converts new-tab clicks to Orca tabs.
+    const clickedLinkFrameName = inheritedOwnerContext
+      ? null
+      : `__orca_clicked_link_foreground_${randomUUID()}`
+    if (clickedLinkFrameName) {
+      this.clickedLinkFrameNameByGuestId.set(guest.id, clickedLinkFrameName)
+    }
+    let clickedLinkRoutingActive = Boolean(clickedLinkFrameName)
 
     // Why: Cloudflare Turnstile and similar bot detectors probe browser APIs
     // (navigator.webdriver, plugins, window.chrome) that differ in Electron
@@ -575,22 +680,134 @@ export class BrowserManager {
     // Orca window is not the focused foreground app. With throttling enabled,
     // the compositor stops producing frames and capturePage() returns empty.
     guest.setBackgroundThrottling(false)
-    guest.setWindowOpenHandler(({ url }) => {
+    const installClickedLinkRouting = (): void => {
+      if (!clickedLinkRoutingActive || !clickedLinkFrameName || guest.isDestroyed()) {
+        return
+      }
+      // Why: an isolated-world click listener can label real anchor clicks
+      // without exposing the private frame name to untrusted page scripts.
+      void guest
+        .executeJavaScriptInIsolatedWorld(
+          BROWSER_CLICKED_LINK_ROUTING_WORLD_ID,
+          [
+            {
+              // Why: mobile emulation spoofs the guest UA as iOS, so modifier
+              // routing must use the actual desktop host platform from main.
+              code: buildBrowserClickedLinkRoutingScript(
+                clickedLinkFrameName,
+                process.platform === 'darwin'
+              )
+            }
+          ],
+          false
+        )
+        .catch(() => {})
+    }
+    if (clickedLinkFrameName) {
+      guest.on('dom-ready', installClickedLinkRouting)
+    }
+    const pendingIframeRoutingInstalls = new Map<Electron.WebFrameMain, () => void>()
+    const iframeFrameNameByFrame = new Map<Electron.WebFrameMain, string>()
+    const iframeFrameByFrameName = new Map<string, Electron.WebFrameMain>()
+    const clearIframeFrameName = (frame: Electron.WebFrameMain): void => {
+      const name = iframeFrameNameByFrame.get(frame)
+      if (!name) {
+        return
+      }
+      iframeFrameNameByFrame.delete(frame)
+      iframeFrameByFrameName.delete(name)
+    }
+    const installIframeClickedLinkRouting = (frame: Electron.WebFrameMain): void => {
+      clearIframeFrameName(frame)
+      if (!clickedLinkRoutingActive || frame.isDestroyed()) {
+        return
+      }
+      const name = `__orca_clicked_link_iframe_foreground_${randomUUID()}`
+      iframeFrameNameByFrame.set(frame, name)
+      iframeFrameByFrameName.set(name, frame)
+      // Why: child-frame tokens live in the page world, so they are consumed
+      // after one trusted click and replaced before another can be routed.
+      void frame
+        .executeJavaScript(
+          buildBrowserIframeClickedLinkRoutingScript(name, process.platform === 'darwin'),
+          false
+        )
+        .catch(() => {
+          if (iframeFrameNameByFrame.get(frame) === name) {
+            clearIframeFrameName(frame)
+          }
+        })
+    }
+    const handleFrameCreated = (
+      _event: Electron.Event,
+      { frame }: Electron.FrameCreatedDetails
+    ): void => {
+      if (!clickedLinkFrameName || !frame || frame.parent === null) {
+        return
+      }
+      for (const knownFrame of iframeFrameNameByFrame.keys()) {
+        if (knownFrame.isDestroyed()) {
+          clearIframeFrameName(knownFrame)
+        }
+      }
+      const installAfterDomReady = (): void => {
+        pendingIframeRoutingInstalls.delete(frame)
+        installIframeClickedLinkRouting(frame)
+      }
+      pendingIframeRoutingInstalls.set(frame, installAfterDomReady)
+      frame.once('dom-ready', installAfterDomReady)
+    }
+    if (clickedLinkFrameName) {
+      guest.on('frame-created', handleFrameCreated)
+    }
+    const handleDidCreateWindow = (window: Electron.BrowserWindow): void => {
+      // Why: popup descendants inherit the opener's owner context for routing,
+      // but must not replace its primary guest registration.
+      this.attachGuestPolicies(window.webContents, this.resolvePopupOwnerContext(guest.id))
+    }
+    guest.on('did-create-window', handleDidCreateWindow)
+    guest.setWindowOpenHandler(({ url, frameName }) => {
       const browserTabId = this.resolveBrowserTabIdForGuestWebContentsId(guest.id)
       const browserUrl = normalizeBrowserNavigationUrl(url)
       const externalUrl = normalizeExternalBrowserUrl(url)
+      const expectedClickedLinkFrameName = this.clickedLinkFrameNameByGuestId.get(guest.id)
+      const iframeFrame = frameName ? iframeFrameByFrameName.get(frameName) : undefined
+      let isClickedLink = Boolean(
+        expectedClickedLinkFrameName && frameName === expectedClickedLinkFrameName
+      )
+      if (!isClickedLink && iframeFrame) {
+        isClickedLink = true
+        clearIframeFrameName(iframeFrame)
+        queueMicrotask(() => installIframeClickedLinkRouting(iframeFrame))
+      }
 
-      // Why: popup-capable guests are required for OAuth and target=_blank
-      // flows, but Orca still does not host child windows itself. For normal
-      // web URLs, route the request into Orca's own browser-tab model first so
-      // the user stays in the IDE. Only fall back to the system browser when
-      // Orca cannot safely host the destination or when the guest is not yet
-      // associated with a trusted browser tab/renderer.
-      if (browserTabId && browserUrl && this.openLinkInOrcaTab(browserTabId, browserUrl)) {
-        this.forwardOrQueuePopupEvent(guest.id, {
-          origin: safeOrigin(browserUrl),
-          action: 'opened-in-orca'
-        })
+      if (isClickedLink) {
+        if (browserTabId && browserUrl && this.openLinkInOrcaTab(browserTabId, browserUrl)) {
+          this.forwardOrQueuePopupEvent(guest.id, {
+            origin: safeOrigin(browserUrl),
+            action: 'opened-in-orca'
+          })
+        }
+        // Why: a recognized user gesture must never fall through to a native
+        // popup merely because its renderer disappeared during the click.
+        return { action: 'deny' }
+      }
+
+      // Why: file URLs are valid for user-opened in-pane previews, but remote
+      // content must not create native child windows targeting local paths.
+      const canOpenAsChild = Boolean(externalUrl || browserUrl === ORCA_BROWSER_BLANK_URL)
+      if (browserTabId && canOpenAsChild) {
+        // Why: OAuth may request ordinary size/position features, but browser
+        // content must not create deceptive or inescapable native chrome.
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: SAFE_POPUP_WINDOW_OPTIONS,
+          // Why: a default child window has no address bar, so users cannot
+          // verify a popup's destination. Host it in an Orca window with an
+          // origin bar while keeping the shared session + window.opener.
+          createWindow: (options: PopupChildWindowOptions) =>
+            this.createPopupChildWindowWithOriginBar(guest, url, options)
+        }
       } else if (externalUrl) {
         // Why: a target=_blank click on a Kagi search result page produces a
         // popup URL that still contains the bearer token; redact before
@@ -644,18 +861,84 @@ export class BrowserManager {
       validatedURL: string,
       isMainFrame: boolean
     ): void => {
-      if (!isMainFrame || errorCode === -3) {
+      if (!isMainFrame) {
         return
       }
-      this.forwardOrQueueGuestLoadFailure(guest.id, {
+      const browserPageId = this.tabIdByWebContentsId.get(guest.id)
+      const certificateFailure = browserPageId
+        ? this.certificateTrustController?.getFailure(browserPageId)
+        : null
+      if (
+        certificateFailure &&
+        toSecureCertificateEndpoint(validatedURL || guest.getURL()) ===
+          toSecureCertificateEndpoint(certificateFailure.origin)
+      ) {
+        // Why: a request-guard cancellation is the transport for the existing
+        // certificate warning; do not replace it with ERR_ABORTED/blocked copy.
+        return
+      }
+      if (errorCode === -3) {
+        // Why: an aborted main-frame nav never committed, so restore the error
+        // did-start-navigation optimistically cleared — otherwise a retry that
+        // aborts leaves the failed page with no overlay.
+        const clearedError = this.clearedLoadErrorsByGuestId.get(guest.id)
+        if (clearedError !== undefined) {
+          this.clearedLoadErrorsByGuestId.delete(guest.id)
+          this.loadErrorsByGuestId.set(guest.id, clearedError)
+          this.forwardOrQueueGuestLoadFailure(guest.id, clearedError)
+          this.notifyBrowserGuestStateChanged(guest.id)
+        }
+        return
+      }
+      this.clearedLoadErrorsByGuestId.delete(guest.id)
+      const loadError = {
         code: errorCode,
         description: errorDescription || 'This site could not be reached.',
-        validatedUrl: validatedURL || guest.getURL() || 'about:blank'
-      })
+        validatedUrl: redactKagiSessionToken(validatedURL || guest.getURL() || 'about:blank')
+      }
+      this.loadErrorsByGuestId.set(guest.id, loadError)
+      this.forwardOrQueueGuestLoadFailure(guest.id, loadError)
+      this.notifyBrowserGuestStateChanged(guest.id)
+    }
+
+    const didStartNavigationHandler = (
+      _event: Electron.Event,
+      url: string,
+      _isInPlace: boolean,
+      isMainFrame: boolean
+    ): void => {
+      if (!isMainFrame || isChromiumInternalErrorUrl(url)) {
+        return
+      }
+      this.certificateTrustController?.onMainFrameNavigationStarted(guest.id)
+      // Why: a failure queued before renderer registration belongs only to the
+      // navigation that produced it. A replacement navigation must not replay
+      // that stale failure when its later dom-ready registers the guest.
+      this.pendingLoadFailuresByGuestId.delete(guest.id)
+      const activeError = this.loadErrorsByGuestId.get(guest.id)
+      if (activeError === undefined) {
+        // Why: no error to hide; drop any stale stash so a later abort cannot
+        // resurrect an error from a navigation that already succeeded.
+        this.clearedLoadErrorsByGuestId.delete(guest.id)
+        return
+      }
+      this.clearedLoadErrorsByGuestId.set(guest.id, activeError)
+      this.loadErrorsByGuestId.delete(guest.id)
+      this.notifyBrowserGuestStateChanged(guest.id)
+    }
+
+    const didNavigateHandler = (_event: Electron.Event, url: string): void => {
+      // Why: a committed navigation means the optimistic stash from
+      // did-start-navigation is obsolete — drop it so a later ERR_ABORTED
+      // cannot restore a failure over the already-committed page.
+      this.clearedLoadErrorsByGuestId.delete(guest.id)
+      this.certificateTrustController?.onMainFrameNavigationCommitted(guest.id, url)
     }
 
     guest.on('will-navigate', navigationGuard)
     guest.on('will-redirect', navigationGuard)
+    guest.on('did-start-navigation', didStartNavigationHandler)
+    guest.on('did-navigate', didNavigateHandler)
     guest.on('did-fail-load', didFailLoadHandler)
     const handleDestroyed = (): void => {
       // Why: guests can be destroyed before renderer registration. Without
@@ -671,15 +954,59 @@ export class BrowserManager {
       disposeAntiDetection()
       try {
         guest.off('destroyed', handleDestroyed)
+        guest.off('did-create-window', handleDidCreateWindow)
+        if (clickedLinkFrameName) {
+          clickedLinkRoutingActive = false
+          guest.off('dom-ready', installClickedLinkRouting)
+          guest.off('frame-created', handleFrameCreated)
+          for (const [frame, install] of pendingIframeRoutingInstalls) {
+            if (!frame.isDestroyed()) {
+              frame.off('dom-ready', install)
+            }
+          }
+          pendingIframeRoutingInstalls.clear()
+          iframeFrameNameByFrame.clear()
+          iframeFrameByFrameName.clear()
+        }
       } catch {
         // guest may already be destroyed
       }
       if (!guest.isDestroyed()) {
         guest.off('will-navigate', navigationGuard)
         guest.off('will-redirect', navigationGuard)
+        guest.off('did-start-navigation', didStartNavigationHandler)
+        guest.off('did-navigate', didNavigateHandler)
         guest.off('did-fail-load', didFailLoadHandler)
       }
     })
+  }
+
+  private createPopupChildWindowWithOriginBar(
+    openerGuest: Electron.WebContents,
+    targetUrl: string,
+    options: PopupChildWindowOptions
+  ): Electron.WebContents {
+    const popup = openPopupWithOriginBar(options, targetUrl)
+    // Why: Electron does not emit did-create-window for createWindow-created
+    // children, so the opener's policies and routing context attach here.
+    this.attachGuestPolicies(
+      popup.contentWebContents,
+      this.resolvePopupOwnerContext(openerGuest.id)
+    )
+    this.forwardOrQueuePopupEvent(openerGuest.id, {
+      origin: safeOrigin(targetUrl),
+      action: 'opened-in-orca'
+    })
+    // Why: parity with Electron's default child-window lifecycle — closing the
+    // owning browser tab must not leave orphaned session-bearing popups.
+    const closePopupWithOpener = (): void => popup.close()
+    openerGuest.once('destroyed', closePopupWithOpener)
+    popup.onClosed(() => {
+      if (!openerGuest.isDestroyed()) {
+        openerGuest.off('destroyed', closePopupWithOpener)
+      }
+    })
+    return popup.contentWebContents
   }
 
   private retireStaleGuestWebContents(previousWebContentsId: number): void {
@@ -687,18 +1014,34 @@ export class BrowserManager {
     // swaps renderer processes. Late events from the dead guest must stop
     // resolving to the live page, or stale download/popup/permission callbacks
     // can be delivered to the wrong session after the swap.
-    this.tabIdByWebContentsId.delete(previousWebContentsId)
     this.cleanupGuestPolicyAttachment(previousWebContentsId)
+    this.tabIdByWebContentsId.delete(previousWebContentsId)
   }
 
   private cleanupGuestPolicyAttachment(guestWebContentsId: number): void {
+    const isPrimaryGuest = this.tabIdByWebContentsId.has(guestWebContentsId)
+    this.certificateTrustController?.onGuestRetired(guestWebContentsId)
     const policyCleanup = this.policyCleanupByGuestId.get(guestWebContentsId)
     if (policyCleanup) {
       policyCleanup()
       this.policyCleanupByGuestId.delete(guestWebContentsId)
     }
     this.policyAttachedGuestIds.delete(guestWebContentsId)
+    this.clickedLinkFrameNameByGuestId.delete(guestWebContentsId)
+    this.offscreenGuestIds.delete(guestWebContentsId)
+    this.popupOwnerContextByGuestId.delete(guestWebContentsId)
+    // Why: a popup must stop inheriting authorization as soon as its primary
+    // owner is retired, even if Chromium has not destroyed the child yet.
+    if (isPrimaryGuest) {
+      for (const [popupGuestId, owner] of this.popupOwnerContextByGuestId) {
+        if (owner.rootGuestWebContentsId === guestWebContentsId) {
+          this.popupOwnerContextByGuestId.delete(popupGuestId)
+        }
+      }
+    }
     this.pendingLoadFailuresByGuestId.delete(guestWebContentsId)
+    this.loadErrorsByGuestId.delete(guestWebContentsId)
+    this.clearedLoadErrorsByGuestId.delete(guestWebContentsId)
     this.pendingPermissionEventsByGuestId.delete(guestWebContentsId)
     this.pendingPopupEventsByGuestId.delete(guestWebContentsId)
     this.cancelPendingDownloadsForGuest(guestWebContentsId)
@@ -712,10 +1055,10 @@ export class BrowserManager {
     sessionProfileId,
     webContentsId,
     rendererWebContentsId
-  }: BrowserGuestRegistration): void {
+  }: BrowserGuestRegistration): boolean {
     const browserTabId = browserPageId ?? legacyBrowserTabId
     if (!browserTabId) {
-      return
+      return false
     }
     // Why: re-registering the same browser tab can happen when Chromium swaps
     // or recreates the underlying guest surface. Any active grab is bound to
@@ -731,7 +1074,7 @@ export class BrowserManager {
 
     const guest = webContents.fromId(webContentsId)
     if (!guest || guest.isDestroyed()) {
-      return
+      return false
     }
 
     // Why: the renderer sends webContentsId, which we must not blindly trust.
@@ -739,21 +1082,20 @@ export class BrowserManager {
     // causing us to overwrite its setWindowOpenHandler or attach unintended
     // context menus. Only accept genuine webview guest surfaces.
     if (guest.getType() !== 'webview') {
-      return
+      return false
     }
     if (!this.policyAttachedGuestIds.has(webContentsId)) {
       // Why: renderer registration is only the second half of the guest setup.
       // Main must only trust guests that already passed attach-time policy
       // installation; otherwise a trusted renderer could point us at some other
       // arbitrary webview and bypass the intended host-window attach boundary.
-      return
+      return false
     }
 
     const previousWebContentsId = this.webContentsIdByTabId.get(browserTabId)
     if (previousWebContentsId !== undefined && previousWebContentsId !== webContentsId) {
       this.retireStaleGuestWebContents(previousWebContentsId)
     }
-
     this.webContentsIdByTabId.set(browserTabId, webContentsId)
     this.tabIdByWebContentsId.set(webContentsId, browserTabId)
     if (workspaceId) {
@@ -764,6 +1106,7 @@ export class BrowserManager {
     if (worktreeId) {
       this.worktreeIdByTabId.set(browserTabId, worktreeId)
     }
+    this.certificateTrustController?.onGuestRegistered(webContentsId, browserTabId)
 
     this.setupContextMenu(browserTabId, guest)
     this.setupGrabShortcut(browserTabId, guest)
@@ -773,6 +1116,7 @@ export class BrowserManager {
     this.flushPendingPermissionEvents(browserTabId, webContentsId)
     this.flushPendingPopupEvents(browserTabId, webContentsId)
     this.flushPendingDownloadRequests(browserTabId, webContentsId)
+    return true
   }
 
   unregisterGuest(browserTabId: string): void {
@@ -851,6 +1195,10 @@ export class BrowserManager {
     if (!guest || guest.isDestroyed()) {
       return
     }
+    // Why: offscreen pages have no renderer webview listeners, so main owns
+    // their load-failure lifecycle for remote browser chrome.
+    this.offscreenGuestIds.add(webContentsId)
+    this.attachGuestPolicies(guest)
     const previousWebContentsId = this.webContentsIdByTabId.get(browserPageId)
     if (previousWebContentsId !== undefined && previousWebContentsId !== webContentsId) {
       this.retireStaleGuestWebContents(previousWebContentsId)
@@ -861,6 +1209,7 @@ export class BrowserManager {
     if (worktreeId) {
       this.worktreeIdByTabId.set(browserPageId, worktreeId)
     }
+    this.certificateTrustController?.onGuestRegistered(webContentsId, browserPageId)
   }
 
   unregisterAll(): void {
@@ -874,6 +1223,7 @@ export class BrowserManager {
       this.unregisterGuest(browserTabId)
     }
     this.policyAttachedGuestIds.clear()
+    this.offscreenGuestIds.clear()
     // Why: unregisterGuest only cleans up guests that were registered (have an
     // entry in webContentsIdByTabId). Guests that went through
     // attachGuestPolicies but were never registered still have cleanup closures
@@ -882,10 +1232,14 @@ export class BrowserManager {
       cleanup()
     }
     this.policyCleanupByGuestId.clear()
+    this.clickedLinkFrameNameByGuestId.clear()
     this.tabIdByWebContentsId.clear()
+    this.popupOwnerContextByGuestId.clear()
     this.worktreeIdByTabId.clear()
     this.sessionProfileIdByPageId.clear()
     this.pendingLoadFailuresByGuestId.clear()
+    this.loadErrorsByGuestId.clear()
+    this.clearedLoadErrorsByGuestId.clear()
     this.pendingPermissionEventsByGuestId.clear()
     this.pendingPopupEventsByGuestId.clear()
     this.pendingDownloadIdsByGuestId.clear()
@@ -907,6 +1261,86 @@ export class BrowserManager {
 
   getSessionProfileIdForTab(browserTabId: string): string | null {
     return this.sessionProfileIdByPageId.get(browserTabId) ?? null
+  }
+
+  getBrowserPageLoadError(browserPageId: string): BrowserLoadError | null {
+    const webContentsId = this.webContentsIdByTabId.get(browserPageId)
+    return webContentsId === undefined
+      ? null
+      : (this.loadErrorsByGuestId.get(webContentsId) ?? null)
+  }
+
+  getBrowserPageCertificateFailure(browserPageId: string): BrowserCertificateFailure | null {
+    return this.certificateTrustController?.getFailure(browserPageId) ?? null
+  }
+
+  getManagedBrowserGuestContext(webContentsId: number): ManagedBrowserGuestContext | null {
+    if (this.popupOwnerContextByGuestId.has(webContentsId)) {
+      return null
+    }
+    const browserPageId = this.tabIdByWebContentsId.get(webContentsId) ?? null
+    const offscreen = this.offscreenGuestIds.has(webContentsId)
+    if (!offscreen && !this.policyAttachedGuestIds.has(webContentsId)) {
+      return null
+    }
+    if (!offscreen) {
+      const guest = webContents.fromId(webContentsId)
+      if (!guest || guest.isDestroyed() || guest.getType() !== 'webview') {
+        return null
+      }
+    }
+    return {
+      browserPageId,
+      worktreeId: browserPageId ? (this.worktreeIdByTabId.get(browserPageId) ?? null) : null,
+      sessionProfileId: browserPageId
+        ? (this.sessionProfileIdByPageId.get(browserPageId) ?? null)
+        : null,
+      owner: offscreen ? 'offscreen' : 'desktop-webview'
+    }
+  }
+
+  notifyCertificateFailureChanged(
+    webContentsId: number,
+    failure: BrowserCertificateFailure | null,
+    navigationUrl?: string
+  ): void {
+    if (failure && navigationUrl) {
+      const loadError = {
+        code: failure.errorCode ?? -1,
+        description: failure.error,
+        validatedUrl: redactKagiSessionToken(navigationUrl)
+      }
+      this.loadErrorsByGuestId.set(webContentsId, loadError)
+      this.forwardOrQueueGuestLoadFailure(webContentsId, loadError)
+    }
+    const browserPageId = this.tabIdByWebContentsId.get(webContentsId)
+    if (!browserPageId) {
+      return
+    }
+    if (this.offscreenGuestIds.has(webContentsId)) {
+      this.notifyBrowserGuestStateChanged(webContentsId)
+      return
+    }
+    const renderer = this.resolveRendererForBrowserTab(browserPageId)
+    renderer?.send('browser:certificate-failure-changed', { browserPageId, failure })
+  }
+
+  private notifyBrowserGuestStateChanged(webContentsId: number): void {
+    if (!this.offscreenGuestIds.has(webContentsId)) {
+      return
+    }
+    const browserPageId = this.tabIdByWebContentsId.get(webContentsId)
+    const worktreeId = browserPageId ? this.worktreeIdByTabId.get(browserPageId) : null
+    if (worktreeId) {
+      // Why: this runs inside an Electron guest event dispatch; the listener
+      // synchronously reconciles mobile-session tabs, and an escaping throw would
+      // become a fatal uncaught exception (no catch-all main-process guard).
+      try {
+        this.browserGuestStateChangedListener?.(worktreeId)
+      } catch (error) {
+        console.error('[browser-manager] browserGuestStateChanged listener failed', error)
+      }
+    }
   }
 
   notifyPermissionDenied(args: {
@@ -1780,13 +2214,11 @@ export class BrowserManager {
       return false
     }
     const normalizedUrl = normalizeBrowserNavigationUrl(rawUrl)
-    if (!normalizedUrl || normalizedUrl === 'about:blank') {
+    if (!normalizedUrl || normalizedUrl === ORCA_BROWSER_BLANK_URL) {
       return false
     }
-    // Why: the guest context menu knows which browser tab the click came from,
-    // but only the renderer owns the worktree/tab model. Forward the validated
-    // URL back to that renderer so it can open a sibling Orca browser tab in
-    // the same worktree without letting the guest process mutate app state.
+    // Why: only the renderer owns Orca's worktree/tab model. Main forwards a
+    // validated URL instead of letting arbitrary guest content mutate it.
     renderer.send('browser:open-link-in-orca-tab', {
       browserPageId: browserTabId,
       url: normalizedUrl
@@ -1796,3 +2228,13 @@ export class BrowserManager {
 }
 
 export const browserManager = new BrowserManager()
+export const browserCertificateTrustController = new BrowserCertificateTrustController({
+  resolveManagedGuestContext: (webContentsId) =>
+    browserManager.getManagedBrowserGuestContext(webContentsId),
+  resolveWebContentsIdForPage: (browserPageId) =>
+    browserManager.getGuestWebContentsId(browserPageId),
+  resolveWebContents: (webContentsId) => webContents.fromId(webContentsId) ?? null,
+  onFailureChanged: (webContentsId, failure, navigationUrl) =>
+    browserManager.notifyCertificateFailureChanged(webContentsId, failure, navigationUrl)
+})
+browserManager.setCertificateTrustController(browserCertificateTrustController)

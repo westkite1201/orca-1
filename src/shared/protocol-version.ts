@@ -27,10 +27,31 @@ export const WORKSPACE_RUN_CONTEXT_RUNTIME_CAPABILITY = 'workspace-run-context.v
 export const REMOTE_RUNTIME_SHARED_CONTROL_CAPABILITY = 'remote-runtime.shared-control.v1' as const
 export const FOLDER_WORKSPACE_PATH_STATUS_RUNTIME_CAPABILITY =
   'folder-workspace.path-status.v1' as const
+export const LINEAR_ISSUE_ATTRIBUTE_FILTER_RUNTIME_CAPABILITY =
+  'linear.issue-attribute-filter.v1' as const
+export const HARNESS_RUNTIME_CAPABILITY = 'harness.v1' as const
+// Why: v2 guarantees task execution metadata and dispatch isolation; older
+// hosts would strip those optional RPC fields and silently weaken the contract.
+export const HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY = 'harness.orchestrator.v2' as const
+// Why: signals the host exposes the Agent Session History scanner over RPC
+// (aiVault.listSessions). Registered unconditionally for every build, so it is a
+// STATIC capability advertised by getStatus() automatically — NOT a runtime
+// conditional like browser.headless.v1.
+export const AI_VAULT_RUNTIME_CAPABILITY = 'aiVault.v1' as const
 // Why: signals a host owns browser pages with no renderer (headless serve via the
 // offscreen backend). Advertised only when that backend is actually available, so
 // clients never fall back to a local desktop browser tab for a remote-owned page.
 export const BROWSER_HEADLESS_RUNTIME_CAPABILITY = 'browser.headless.v1' as const
+export const BROWSER_CERTIFICATE_TRUST_RUNTIME_CAPABILITY = 'browser.certificate-trust.v1' as const
+// Why: hosts without this strip terminal.send's inputKind (zod object drops
+// unknown keys), so a mobile xterm query reply would land as ordinary
+// floor-taking input. Mobile must not forward replies unless advertised.
+export const TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY =
+  'terminal.query-reply-input.v1' as const
+// Why: older hosts strip worktree.create's clientMutationId, so mobile must only
+// replay ambiguous cutovers when the host advertises idempotent create support.
+export const WORKTREE_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY =
+  'worktree.create-idempotency.v1' as const
 
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
@@ -44,7 +65,15 @@ export const RUNTIME_CAPABILITIES = [
   PROJECT_HOST_SETUP_RUNTIME_CAPABILITY,
   TASK_SOURCE_CONTEXT_RUNTIME_CAPABILITY,
   WORKSPACE_RUN_CONTEXT_RUNTIME_CAPABILITY,
-  FOLDER_WORKSPACE_PATH_STATUS_RUNTIME_CAPABILITY
+  FOLDER_WORKSPACE_PATH_STATUS_RUNTIME_CAPABILITY,
+  LINEAR_ISSUE_ATTRIBUTE_FILTER_RUNTIME_CAPABILITY,
+  HARNESS_RUNTIME_CAPABILITY,
+  // Keep v1 advertised so older clients can still start their supported flow.
+  'harness.orchestrator.v1',
+  HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY,
+  AI_VAULT_RUNTIME_CAPABILITY,
+  TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY,
+  WORKTREE_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

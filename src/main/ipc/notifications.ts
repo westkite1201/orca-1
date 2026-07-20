@@ -28,13 +28,14 @@ import { readNotificationAuthorizationStatus } from './notification-authorizatio
 import { parsePaneKey } from '../../shared/stable-pane-id'
 import { setTrayAttention } from '../tray/system-tray'
 import { isMainWindowVisible } from '../window/main-window-visibility'
+import productProfile from '../../shared/product-profile.json'
 
 const NOTIFICATION_COOLDOWN_MS = 5000
 const MAX_RECENT_NOTIFICATION_KEYS = 50
 const NOTIFICATION_DISPLAY_CONFIRMATION_TIMEOUT_MS = 2500
 const NOTIFICATION_RELEASE_FALLBACK_MS = 5 * 60 * 1000
 const MAX_NOTIFICATION_SOUND_BYTES = 10 * 1024 * 1024
-const MACOS_PACKAGED_BUNDLE_ID = 'com.stablyai.orca'
+const MACOS_PACKAGED_BUNDLE_ID = productProfile.appId
 const MACOS_NOTIFICATION_SETTINGS_URL =
   'x-apple.systempreferences:com.apple.Notifications-Settings.extension'
 const NOTIFICATION_SOUND_MIME_BY_EXTENSION: ReadonlyMap<string, string> = new Map([
@@ -312,8 +313,24 @@ function pruneRecentNotifications(recentNotifications: Map<string, number>, now:
   }
 }
 
+function reserveNotificationCooldown(
+  recentNotifications: Map<string, number>,
+  dedupeKey: string,
+  now: number
+): boolean {
+  const lastSentAt = recentNotifications.get(dedupeKey) ?? 0
+  if (now - lastSentAt < NOTIFICATION_COOLDOWN_MS) {
+    return false
+  }
+  recentNotifications.delete(dedupeKey)
+  recentNotifications.set(dedupeKey, now)
+  pruneRecentNotifications(recentNotifications, now)
+  return true
+}
+
 export function registerNotificationHandlers(store: Store, runtime?: OrcaRuntimeService): void {
-  const recentNotifications = new Map<string, number>()
+  const recentDesktopNotifications = new Map<string, number>()
+  const recentMobileNotifications = new Map<string, number>()
   // Why: handler registration marks a fresh session — permission evidence
   // from a previous registration must not leak into the new one.
   lastObservedDeliveryOutcome = null
@@ -420,8 +437,8 @@ export function registerNotificationHandlers(store: Store, runtime?: OrcaRuntime
       // hold back the dot. It rides the notification dispatch, so it follows the
       // renderer's per-source decision to notify: bells always reach here, while
       // an agent completion is suppressed upstream when its notification is
-      // disabled. Tray exists only on Windows, so setTrayAttention no-ops
-      // elsewhere.
+      // disabled. The status item exists on Windows and macOS, so
+      // setTrayAttention lights its attention dot there and no-ops on Linux.
       if (args.source === 'agent-task-complete' || args.source === 'terminal-bell') {
         const activeWindow = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed()) ?? null
         if (!isMainWindowVisible(activeWindow)) {
@@ -441,6 +458,24 @@ export function registerNotificationHandlers(store: Store, runtime?: OrcaRuntime
         return { delivered: false, reason: 'source-disabled' }
       }
 
+      const notificationOptions = buildNotificationOptions(args)
+
+      // Why: desktop focus only means this computer has the worktree visible;
+      // the paired phone may be locked or elsewhere and still needs the alert.
+      if (runtime && args.source !== 'test') {
+        const dedupeKey = args.worktreeId ?? args.worktreeLabel ?? 'global'
+        if (reserveNotificationCooldown(recentMobileNotifications, dedupeKey, Date.now())) {
+          runtime.dispatchMobileNotification({
+            type: 'notification',
+            source: args.source,
+            title: notificationOptions.title,
+            body: notificationOptions.body,
+            worktreeId: args.worktreeId,
+            ...(args.notificationId ? { notificationId: args.notificationId } : {})
+          })
+        }
+      }
+
       const browserWindow =
         BrowserWindow.getAllWindows().find((window) => !window.isDestroyed()) ?? null
       if (
@@ -458,33 +493,9 @@ export function registerNotificationHandlers(store: Store, runtime?: OrcaRuntime
         // Dedupe by worktree, not by source — an agent finishing and a terminal bell
         // often fire within the same data chunk so only the first one should surface.
         const dedupeKey = args.worktreeId ?? args.worktreeLabel ?? 'global'
-        const now = Date.now()
-        const lastSentAt = recentNotifications.get(dedupeKey) ?? 0
-        if (now - lastSentAt < NOTIFICATION_COOLDOWN_MS) {
+        if (!reserveNotificationCooldown(recentDesktopNotifications, dedupeKey, Date.now())) {
           return { delivered: false, reason: 'cooldown' }
         }
-        recentNotifications.delete(dedupeKey)
-        recentNotifications.set(dedupeKey, now)
-
-        // Why: a storm across many worktrees should not make every
-        // notification dispatch scan an ever-growing cooldown table.
-        pruneRecentNotifications(recentNotifications, now)
-      }
-
-      const notificationOptions = buildNotificationOptions(args)
-
-      // Why: paired mobile clients should follow the same user-facing
-      // notification gates as desktop delivery, while still working on hosts
-      // where Electron native notifications are unavailable.
-      if (runtime && args.source !== 'test') {
-        runtime.dispatchMobileNotification({
-          type: 'notification',
-          source: args.source,
-          title: notificationOptions.title,
-          body: notificationOptions.body,
-          worktreeId: args.worktreeId,
-          ...(args.notificationId ? { notificationId: args.notificationId } : {})
-        })
       }
 
       if (!Notification.isSupported()) {

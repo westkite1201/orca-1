@@ -1,3 +1,5 @@
+import productProfile from '../../../../shared/product-profile.json'
+
 export type RepoKind = 'git' | 'folder'
 
 export type GitAvailability = 'checking' | 'available' | 'unavailable' | 'unknown'
@@ -35,7 +37,10 @@ export function getDefaultCreateProjectParent(homeDir: string): string {
   if (!trimmedHomeDir) {
     return ''
   }
-  return joinCreateProjectPath(joinCreateProjectPath(trimmedHomeDir, 'orca'), 'projects')
+  return joinCreateProjectPath(
+    joinCreateProjectPath(trimmedHomeDir, productProfile.userDataDirectoryName),
+    'projects'
+  )
 }
 
 export function getCreateProjectDefaultParentAutoFill({
@@ -84,7 +89,7 @@ export function formatCreateProjectParentSummary({
     return runtimeEnvironmentId || isRemoteHost ? missingServerLocationLabel : missingLocationLabel
   }
   if (defaultParent && trimmedParent === defaultParent && !runtimeEnvironmentId && !isRemoteHost) {
-    return '~/orca/projects'
+    return `~/${productProfile.userDataDirectoryName}/projects`
   }
   return trimmedParent
 }

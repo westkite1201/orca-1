@@ -12,6 +12,7 @@ import {
 import { dirname, join, win32 as winPath } from 'node:path'
 import { app } from 'electron'
 import { parseDaemonPidFile, startTimeMatches } from './daemon-health'
+import productProfile from '../../shared/product-profile.json'
 
 /**
  * Relocates the terminal daemon's process image out of the app install
@@ -52,7 +53,7 @@ const MARKER_NAME = '.materialized.json'
 // name is shared verbatim with the NSIS uninstall cleanup
 // (config/nsis/daemon-host-uninstall.nsh), which removes
 // %LOCALAPPDATA%\<LOCAL_HOST_ROOT_NAME>\daemon-host — keep the two in sync.
-const LOCAL_HOST_ROOT_NAME = 'Orca'
+const LOCAL_HOST_ROOT_NAME = productProfile.name
 
 // The relocated host exe is a copy of Orca.exe renamed to a distinct image
 // name. The NSIS updater's name-based kill (`taskkill /IM Orca.exe`) matches by

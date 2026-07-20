@@ -11,6 +11,7 @@ import type {
   DetectedPort,
   EnrichedDetectedPort,
   SavedPortForward,
+  SshRepoReadoption,
   SshTarget,
   SshConnectionStatus,
   SshConnectionState
@@ -134,6 +135,12 @@ export async function removeRegisteredSshTarget(targetId: string): Promise<void>
 // scattered Maps/Sets that previously tracked this state independently.
 const activeSessions = new Map<string, SshRelaySession>()
 
+export function isRegisteredSshRuntimeReady(targetId: string): boolean {
+  // Why: the raw SSH socket reports connected before the relay has rebuilt
+  // the Git, filesystem, and PTY providers required by runtime work.
+  return activeSessions.get(targetId)?.getState() === 'ready'
+}
+
 export function getActiveSshAiVaultHostInfo(targetId: string): SshRelayAiVaultHostInfo | null {
   if (isRuntimeOwnedSshTargetId(targetId)) {
     return null
@@ -243,6 +250,7 @@ function broadcastSshState(
   // has no surface for them. Broadcasting their state would make the renderer fire
   // a listTargets() lookup per event (incl. each relay-lost reconnect) for nothing.
   if (isRuntimeOwnedSshTargetId(targetId)) {
+    currentRuntime?.invalidateSshWorktreeScanCache?.(targetId)
     return
   }
   const enrichedState = withSshRemotePlatform(targetId, state)
@@ -744,15 +752,17 @@ export function registerSshHandlers(
   // Why: SSH target add/import can re-adopt workspaces orphaned on a removed
   // target id (see ssh-target-readoption). When that re-points repos, the
   // renderer must refresh its repo list to surface the reattached workspaces.
-  function notifyReposChangedIfReadopted(): void {
-    if (!sshStore || sshStore.lastReadoptedRepoCount <= 0) {
-      return
+  function takeRepoReadoptions(): SshRepoReadoption[] {
+    if (!sshStore || sshStore.lastRepoReadoptions.length === 0) {
+      return []
     }
-    sshStore.lastReadoptedRepoCount = 0
+    const repoReadoptions = sshStore.lastRepoReadoptions
+    sshStore.lastRepoReadoptions = []
     const win = getCurrentMainWindow()
     if (win && !win.isDestroyed()) {
       win.webContents.send('repos:changed')
     }
+    return repoReadoptions
   }
 
   ipcMain.handle('ssh:listTargets', () => {
@@ -768,8 +778,8 @@ export function registerSshHandlers(
     // Why: re-adding a removed host can re-adopt orphaned workspaces (re-point
     // repos/worktrees off the dead id). Refresh the renderer's repo list so the
     // reattached workspaces move from grey ghosts back onto the live host.
-    notifyReposChangedIfReadopted()
-    return target
+    const repoReadoptions = takeRepoReadoptions()
+    return { target, repoReadoptions }
   })
 
   ipcMain.handle(
@@ -784,9 +794,9 @@ export function registerSshHandlers(
   })
 
   ipcMain.handle('ssh:importConfig', (_event, args?: { reAdopt?: boolean }) => {
-    const result = sshStore!.importFromSshConfig(args)
-    notifyReposChangedIfReadopted()
-    return result
+    const targets = sshStore!.importFromSshConfig(args)
+    const repoReadoptions = takeRepoReadoptions()
+    return { targets, repoReadoptions }
   })
 
   // ── Connection lifecycle ───────────────────────────────────────────
@@ -916,19 +926,13 @@ export function registerSshHandlers(
       // state is stuck there. Send `connected` directly to the renderer
       // instead of going through callbacks.onStateChange, which would
       // trigger the reconnection logic.
-      const win = getCurrentMainWindow()
-      if (win && !win.isDestroyed()) {
-        clearRelayStateOverride(targetId)
-        win.webContents.send('ssh:state-changed', {
-          targetId,
-          state: withSshRemotePlatform(targetId, {
-            targetId,
-            status: 'connected',
-            error: null,
-            reconnectAttempt: 0
-          })
-        })
-      }
+      clearRelayStateOverride(targetId)
+      broadcastSshState(getCurrentMainWindow, targetId, {
+        targetId,
+        status: 'connected',
+        error: null,
+        reconnectAttempt: 0
+      })
     } catch (err) {
       // Relay deployment failed — disconnect SSH
       activeSessions.delete(targetId)

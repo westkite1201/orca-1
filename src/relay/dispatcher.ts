@@ -189,6 +189,21 @@ export class RelayDispatcher {
     }
   }
 
+  notifyClient(clientId: number, method: string, params?: Record<string, unknown>): void {
+    if (this.disposed) {
+      return
+    }
+    const client = this.clients.get(clientId)
+    if (!client || client.closed) {
+      return
+    }
+    this.sendFrame(client, {
+      jsonrpc: '2.0',
+      method,
+      ...(params !== undefined ? { params } : {})
+    })
+  }
+
   /**
    * Bulk-lane notification. Sends are serialized per client and the returned
    * promise resolves only after the sink accepted the frame without reporting
@@ -536,11 +551,21 @@ export class RelayDispatcher {
     } catch (err) {
       client.closed = true
       client.generation++
+      this.requestAborts.abortClient(client.id)
       this.flushDrainWaiters(client)
+      // Why: a write throw means this frame (possibly pty.data or pty.exit) was
+      // lost with no resend — the framing carries seq/ack but no retransmit
+      // buffer. Detach so the owning Orca's reconnect + PTY-reattach path runs
+      // promptly (regenerating dropped pty.data from the replay buffer and pane
+      // death via reattach-not-found), instead of silently dropping frames until
+      // the ~20s keepalive timeout notices. The primary client stays in the map
+      // (its object is reused across setWrite reconnects) but detach listeners
+      // must still fire, exactly as invalidateClient() does for stdin/stdout
+      // death — this makes the socket-write-throw path consistent with those.
       if (client !== this.primaryClient) {
         this.clients.delete(client.id)
-        this.notifyClientDetached(client.id)
       }
+      this.notifyClientDetached(client.id)
       process.stderr.write(
         `[relay] Client write failed: ${err instanceof Error ? err.message : String(err)}\n`
       )

@@ -3,6 +3,7 @@ import type { OrchestrationDb } from './db'
 import type { MessageRow, TaskRow, CoordinatorStatus } from './types'
 import { buildDispatchPreamble } from './preamble'
 import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
+import { findHarnessTaskRoot } from './harness-task-scope'
 
 export type CoordinatorRuntime = {
   sendTerminalAgentPrompt(handle: string, prompt: string): Promise<unknown>
@@ -29,6 +30,12 @@ export type CoordinatorRuntime = {
     behind: number
     recentSubjects: string[]
   } | null>
+  // Why: optional so lightweight runtime fakes keep compiling; when present,
+  // dispatch records the remint-stable pane identity of the assignee.
+  getTerminalPaneKey?(handle: string): string | null
+  // Why: Windows can host native and WSL workers concurrently, so the
+  // worker pane—not the coordinator process—selects the packaged CLI name.
+  getTerminalOrchestrationCliCommand?(handle: string): 'orca' | 'orca-ide'
 }
 
 // Why (§3.1): single threshold, no warn/refuse split. Coordinator picked 20
@@ -64,6 +71,7 @@ export function parseAllowStaleBaseFromSpec(spec: string): {
 export type CoordinatorOptions = {
   spec: string
   coordinatorHandle: string
+  coordinatorPaneKey?: string
   pollIntervalMs?: number
   maxConcurrent?: number
   worktree?: string
@@ -93,9 +101,10 @@ export class Coordinator {
   private runtime: CoordinatorRuntime
   private state: CoordinatorState
   private stopped = false
-  private opts: Required<Omit<CoordinatorOptions, 'onLog' | 'worktree'>> & {
+  private opts: Required<Omit<CoordinatorOptions, 'onLog' | 'worktree' | 'coordinatorPaneKey'>> & {
     onLog: (msg: string) => void
     worktree?: string
+    coordinatorPaneKey?: string
   }
 
   constructor(db: OrchestrationDb, runtime: CoordinatorRuntime, options: CoordinatorOptions) {
@@ -104,6 +113,7 @@ export class Coordinator {
     this.opts = {
       spec: options.spec,
       coordinatorHandle: options.coordinatorHandle,
+      coordinatorPaneKey: options.coordinatorPaneKey,
       pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_MS,
       maxConcurrent: options.maxConcurrent ?? MAX_CONCURRENT_DEFAULT,
       worktree: options.worktree,
@@ -169,7 +179,7 @@ export class Coordinator {
 
       // Why: if stopped early, treat it as failed since tasks are incomplete.
       // Also failed if any task explicitly failed.
-      const tasks = this.db.listTasks()
+      const tasks = this.db.listTasks().filter((task) => this.isTaskInScope(task))
       const allDone = tasks.every((t) => t.status === 'completed' || t.status === 'failed')
       const failedTasks = [
         ...new Set([
@@ -199,6 +209,17 @@ export class Coordinator {
     this.stopped = true
   }
 
+  private isTaskInScope(task: TaskRow): boolean {
+    try {
+      // Why: the server Coordinator mutates task state directly; Harness trees
+      // are supervised by the live agent and its stop-proof completion barrier.
+      return findHarnessTaskRoot(this.db, task) === null
+    } catch {
+      // Invalid ancestry is not safe for an unrelated coordinator to adopt.
+      return false
+    }
+  }
+
   // Why: the coordinator decomposes the top-level spec into a task DAG.
   // For now, tasks must be pre-created before calling run(). The spec is
   // stored for context but decomposition is the caller's responsibility —
@@ -206,7 +227,7 @@ export class Coordinator {
   // itself is an LLM agent.
   private async decompose(): Promise<void> {
     this.state.phase = 'decomposing'
-    const existing = this.db.listTasks()
+    const existing = this.db.listTasks().filter((task) => this.isTaskInScope(task))
     if (existing.length === 0) {
       throw new Error(
         'No tasks found. Create tasks with orchestration.taskCreate before running the coordinator.'
@@ -234,6 +255,10 @@ export class Coordinator {
     const thresholdIso = new Date(Date.now() - HUNG_THRESHOLD_MS).toISOString()
     const stale = this.db.getStaleDispatches(thresholdIso)
     for (const ctx of stale) {
+      const task = this.db.getTask(ctx.task_id)
+      if (task && !this.isTaskInScope(task)) {
+        continue
+      }
       const minutes = Math.round(HUNG_THRESHOLD_MS / 60000)
       this.opts.onLog(
         `Warning: worker ${ctx.assignee_handle ?? '<unknown>'} on task ${ctx.task_id} has not sent a heartbeat in ~${minutes} min (dispatch ${ctx.id})`
@@ -275,18 +300,28 @@ export class Coordinator {
   }
 
   private handleLifecycleMessage(msg: MessageRow): void {
+    if (msg.payload) {
+      try {
+        const taskId = (JSON.parse(msg.payload) as { taskId?: unknown }).taskId
+        const task = typeof taskId === 'string' ? this.db.getTask(taskId) : undefined
+        if (task && !this.isTaskInScope(task)) {
+          return
+        }
+      } catch {
+        // Lifecycle reconciliation owns invalid-payload logging.
+      }
+    }
     const result = reconcileLifecycleMessage(this.db, msg, this.opts.onLog)
     if (result.action === 'completed') {
       if (!this.state.completedTasks.includes(result.taskId)) {
         this.state.completedTasks.push(result.taskId)
       }
+    } else if (result.action === 'failed' && !this.state.failedTasks.includes(result.taskId)) {
+      this.state.failedTasks.push(result.taskId)
     }
   }
 
   private handleEscalation(msg: MessageRow): void {
-    this.opts.onLog(`Escalation from ${msg.from_handle}: ${msg.subject}`)
-    this.state.escalations.push(msg)
-
     let taskId: string | undefined
     if (msg.payload) {
       try {
@@ -297,11 +332,17 @@ export class Coordinator {
       }
     }
 
+    const task = taskId ? this.db.getTask(taskId) : undefined
+    if (task && !this.isTaskInScope(task)) {
+      return
+    }
+
+    this.opts.onLog(`Escalation from ${msg.from_handle}: ${msg.subject}`)
+    this.state.escalations.push(msg)
     if (!taskId) {
       return
     }
 
-    const task = this.db.getTask(taskId)
     if (!task || task.status === 'completed' || task.status === 'failed') {
       return
     }
@@ -325,8 +366,6 @@ export class Coordinator {
   }
 
   private handleDecisionGateMessage(msg: MessageRow): void {
-    this.opts.onLog(`Decision gate from ${msg.from_handle}: ${msg.subject}`)
-
     let payload: { taskId?: string; question?: string; options?: string[] } = {}
     if (msg.payload) {
       try {
@@ -341,6 +380,12 @@ export class Coordinator {
       return
     }
 
+    const task = this.db.getTask(payload.taskId)
+    if (!task || !this.isTaskInScope(task)) {
+      return
+    }
+
+    this.opts.onLog(`Decision gate from ${msg.from_handle}: ${msg.subject}`)
     this.db.createGate({
       taskId: payload.taskId,
       question: payload.question,
@@ -364,7 +409,7 @@ export class Coordinator {
     const pendingGates = this.db.listGates({ status: 'pending' })
     for (const gate of pendingGates) {
       const task = this.db.getTask(gate.task_id)
-      if (task && task.status !== 'blocked') {
+      if (task && this.isTaskInScope(task) && task.status !== 'blocked') {
         // Why: gate exists but task isn't blocked — inconsistent state.
         // Re-block the task to maintain the invariant.
         this.db.updateTaskStatus(gate.task_id, 'blocked')
@@ -374,12 +419,13 @@ export class Coordinator {
 
   private async dispatchReadyTasks(): Promise<void> {
     this.state.phase = 'dispatching'
-    const readyTasks = this.db.listTasks({ ready: true })
+    const readyTasks = this.db.listTasks({ ready: true }).filter((task) => this.isTaskInScope(task))
     if (readyTasks.length === 0) {
       return
     }
 
-    // Why: count currently dispatched tasks to enforce concurrency limit.
+    // Why: terminal capacity is global even though task ownership is scoped;
+    // Harness workers consume the same finite pool and must prevent overbooking.
     const dispatched = this.db.listTasks({ status: 'dispatched' })
     let slotsAvailable = this.opts.maxConcurrent - dispatched.length
     if (slotsAvailable <= 0) {
@@ -461,7 +507,11 @@ export class Coordinator {
       }
     }
 
-    const dispatch = this.db.createDispatchContext(task.id, targetHandle)
+    const dispatch = this.db.createDispatchContext(
+      task.id,
+      targetHandle,
+      this.runtime.getTerminalPaneKey?.(targetHandle) ?? undefined
+    )
 
     // Why: agents dispatched by the coordinator must use orca-dev in dev mode
     // so they talk to the dev runtime's socket, not production (Section 6.4).
@@ -477,7 +527,11 @@ export class Coordinator {
       // part of its instructions).
       taskSpec: strippedSpec,
       coordinatorHandle: this.opts.coordinatorHandle,
+      workerHandle: targetHandle,
       devMode: process.env.ORCA_USER_DATA_PATH?.includes('orca-dev'),
+      ...(this.runtime.getTerminalOrchestrationCliCommand
+        ? { cliCommand: this.runtime.getTerminalOrchestrationCliCommand(targetHandle) }
+        : {}),
       // Why (§3.2): drift section fires only when behind > 0. The preamble
       // builder gates on this itself; passing the object unconditionally lets
       // the coordinator stay dumb about the display rule.
@@ -544,7 +598,7 @@ export class Coordinator {
   }
 
   private checkConvergence(): boolean {
-    const tasks = this.db.listTasks()
+    const tasks = this.db.listTasks().filter((task) => this.isTaskInScope(task))
     if (tasks.length === 0) {
       return true
     }
