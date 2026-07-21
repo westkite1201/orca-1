@@ -73,12 +73,17 @@ vi.mock('@/hooks/useVirtualizedScrollAnchor', () => ({
   useVirtualizedScrollAnchor: vi.fn()
 }))
 
-vi.mock('./project-header-drag', () => ({
-  useRepoHeaderDrag: () => ({
-    state: { draggingRepoId: null, dropIndicatorY: null },
-    onHandlePointerDown: vi.fn()
-  })
-}))
+// Why: reuse the real idle state so the mock keeps every RepoDragState field the
+// renderer reads (preview offsets, collapse key) in sync with the contract.
+vi.mock('./project-header-drag', async () => {
+  const { INITIAL_REPO_DRAG_STATE } = await import('./project-header-drag-contract')
+  return {
+    useRepoHeaderDrag: () => ({
+      state: INITIAL_REPO_DRAG_STATE,
+      onHandlePointerDown: vi.fn()
+    })
+  }
+})
 
 vi.mock('./WorktreeCard', () => ({
   default: ({

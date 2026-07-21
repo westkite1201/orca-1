@@ -49,12 +49,15 @@ export function createProjectHeaderDragSession(args: {
   return {
     repoId: args.repoId,
     bucketKey,
+    // Set by the drag hook once the session is armed; it owns the collapse key.
+    draggedGroupKey: '',
     sidebarRepoHeaderIds,
     pointerId: args.event.pointerId,
     headerRects: measureProjectHeaderDragRects(container, bucketKey),
     handleEl,
     startX: args.event.clientX,
     startY: args.event.clientY,
+    startScrollTop: container.scrollTop,
     latestPointerY: args.event.clientY,
     promoted: false
   }
