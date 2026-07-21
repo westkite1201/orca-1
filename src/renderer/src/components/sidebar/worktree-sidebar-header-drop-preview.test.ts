@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { buildSidebarHeaderPreviewOffsets } from './worktree-sidebar-header-drop-preview'
+import {
+  buildSidebarHeaderPreviewOffsets,
+  computeWorktreeSidebarHeaderDropPreview,
+  type WorktreeSidebarHeaderDragRect
+} from './worktree-sidebar-header-drop-preview'
 
 const IDS = ['a', 'b', 'c', 'd']
 const H = 28
@@ -43,5 +47,52 @@ describe('buildSidebarHeaderPreviewOffsets', () => {
 
   it('never includes the dragged header itself', () => {
     expect(offsets('a', 3)).not.toHaveProperty('a')
+  })
+})
+
+// pickNearestHeaderBoundarySlot (the interior-gap fallback for #6609) is exercised
+// through computeWorktreeSidebarHeaderDropPreview here, asserting dropIndicatorY
+// directly. With only two headers afterPrev.dropIndex and beforeNext.dropIndex are
+// always equal by construction, so a project-header-drop.test.ts-style assertion on
+// dropIndex/previewOffsetsByRepoId alone cannot tell the two boundary choices apart;
+// dropIndicatorY is the only observable that discriminates them.
+describe('computeWorktreeSidebarHeaderDropPreview — interior-gap boundary snap', () => {
+  const INDICATOR_GAP = 4
+  const prevSectionBottom = 200
+  const nextHeaderTop = 240
+  const prevBoundaryY = prevSectionBottom + INDICATOR_GAP // 204
+  const nextBoundaryY = nextHeaderTop - INDICATOR_GAP // 236
+  const midpointY = (prevBoundaryY + nextBoundaryY) / 2 // 220
+
+  type Rect = WorktreeSidebarHeaderDragRect & { id: string }
+  const rects: Rect[] = [
+    { id: 'a', headerIndex: 0, top: 100, bottom: 128, sectionBottom: prevSectionBottom },
+    { id: 'b', headerIndex: 1, top: nextHeaderTop, bottom: 268 }
+  ]
+
+  const previewAt = (pointerY: number) =>
+    computeWorktreeSidebarHeaderDropPreview({
+      pointerY,
+      containerTop: 0,
+      scrollTop: 0,
+      rects,
+      headerCount: 2,
+      getId: (rect) => rect.id
+    })
+
+  it('snaps to the previous header boundary when the pointer sits nearer it', () => {
+    // 205 sits in the gap between 'a' and 'b', closer to 204 than to 236.
+    expect(previewAt(prevBoundaryY + 1)).toEqual({ dropIndex: 1, dropIndicatorY: prevBoundaryY })
+  })
+
+  it('snaps to the next header boundary when the pointer sits nearer it', () => {
+    // 235 sits in the gap between 'a' and 'b', closer to 236 than to 204.
+    expect(previewAt(nextBoundaryY - 1)).toEqual({ dropIndex: 1, dropIndicatorY: nextBoundaryY })
+  })
+
+  it('breaks an exact midpoint tie toward the next header boundary', () => {
+    // worktree-sidebar-header-drop-preview.ts:138 documents ties resolving to
+    // the next header's boundary.
+    expect(previewAt(midpointY)).toEqual({ dropIndex: 1, dropIndicatorY: nextBoundaryY })
   })
 })
