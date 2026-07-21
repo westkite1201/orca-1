@@ -5,6 +5,7 @@ import type {
   HarnessRun,
   HarnessRunCreateInput
 } from '../../shared/harness-types'
+import { terminalizeHarnessCandidates } from '../../shared/harness-candidate-notice'
 import type { Repo } from '../../shared/types'
 import type { HarnessStore } from './service'
 
@@ -76,6 +77,11 @@ export function createHarnessRunMemoryStore(repo: Repo): {
       if (!run) {
         throw new Error('missing run')
       }
+      // Why: the real store rejects candidate writes on a fatal run; matching
+      // that here keeps recovery tests honest about what production allows.
+      if (run.fatalError !== null) {
+        throw new Error('Harness run has already failed.')
+      }
       const current = run.candidates.find((candidate) => candidate.agent === agent)
       if (!current) {
         throw new Error('missing candidate')
@@ -99,11 +105,13 @@ export function createHarnessRunMemoryStore(repo: Repo): {
       if (!run) {
         throw new Error('missing run')
       }
+      const now = Date.now()
       const failed = {
         ...run,
+        candidates: terminalizeHarnessCandidates(run.candidates, error, now),
         fatalError: error,
-        updatedAt: Date.now(),
-        completedAt: Date.now()
+        updatedAt: now,
+        completedAt: now
       }
       runs.set(runId, failed)
       return failed

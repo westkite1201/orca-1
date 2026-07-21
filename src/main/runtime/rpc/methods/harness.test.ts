@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  HARNESS_CANCEL_RUNTIME_CAPABILITY,
   HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY,
   HARNESS_RUNTIME_CAPABILITY,
   RUNTIME_CAPABILITIES
@@ -20,7 +21,8 @@ describe('harness RPC methods', () => {
       start: vi.fn().mockResolvedValue(run),
       list: vi.fn().mockReturnValue([run]),
       show: vi.fn().mockReturnValue(run),
-      resume: vi.fn().mockReturnValue(run)
+      resume: vi.fn().mockReturnValue(run),
+      cancel: vi.fn().mockReturnValue(run)
     }
     const runtime = {
       getRuntimeId: () => 'test-runtime',
@@ -40,6 +42,7 @@ describe('harness RPC methods', () => {
     const list = await dispatcher.dispatch(request('harness.list', { repo: 'repo-selector' }))
     const show = await dispatcher.dispatch(request('harness.show', { run: 'run-1' }))
     const resume = await dispatcher.dispatch(request('harness.resume', { run: 'run-1' }))
+    const cancel = await dispatcher.dispatch(request('harness.cancel', { run: 'run-1' }))
 
     expect(service.start).toHaveBeenCalledWith({
       worktree: 'id:worktree-1',
@@ -51,7 +54,8 @@ describe('harness RPC methods', () => {
     expect(service.list).toHaveBeenCalledWith('repo-1')
     expect(service.show).toHaveBeenCalledWith('run-1')
     expect(service.resume).toHaveBeenCalledWith('run-1')
-    for (const response of [start, list, show, resume]) {
+    expect(service.cancel).toHaveBeenCalledWith('run-1')
+    for (const response of [start, list, show, resume, cancel]) {
       expect(response).toMatchObject({ ok: true })
     }
   })
@@ -82,5 +86,22 @@ describe('harness RPC methods', () => {
     expect(HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY).toBe('harness.orchestrator.v2')
     expect(RUNTIME_CAPABILITIES).toContain('harness.orchestrator.v1')
     expect(RUNTIME_CAPABILITIES).toContain(HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY)
+    // Why: clients hide Cancel run rather than call a method older hosts reject.
+    expect(HARNESS_CANCEL_RUNTIME_CAPABILITY).toBe('harness.cancel.v1')
+    expect(RUNTIME_CAPABILITIES).toContain(HARNESS_CANCEL_RUNTIME_CAPABILITY)
+  })
+
+  it('rejects a blank run id before cancelling', async () => {
+    const cancel = vi.fn()
+    const runtime = {
+      getRuntimeId: () => 'test-runtime',
+      getHarnessService: () => ({ cancel })
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: HARNESS_METHODS })
+
+    const response = await dispatcher.dispatch(request('harness.cancel', { run: '   ' }))
+
+    expect(response).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(cancel).not.toHaveBeenCalled()
   })
 })

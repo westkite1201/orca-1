@@ -46,5 +46,12 @@ export const HARNESS_METHODS: RpcMethod[] = [
     handler: async (params, { runtime }) => ({
       run: await runtime.getHarnessService().resume(params.run)
     })
+  }),
+  defineMethod({
+    name: 'harness.cancel',
+    params: HarnessRun,
+    handler: async (params, { runtime }) => ({
+      run: await runtime.getHarnessService().cancel(params.run)
+    })
   })
 ]

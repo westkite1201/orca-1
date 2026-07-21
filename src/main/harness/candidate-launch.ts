@@ -15,6 +15,7 @@ import {
   recoverHarnessCandidate
 } from './candidate-recovery'
 import { finalizeLegacyHarnessDispatchFailure } from './candidate-dispatch-failure'
+import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from '../../shared/harness-candidate-notice'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 
 type CandidateStore = Pick<Store, 'updateHarnessCandidate'>
@@ -27,8 +28,6 @@ type DispatchShowResult = {
 type TerminalResolvePaneResult = { terminal: RuntimeTerminalResolvePane }
 
 const AGENT_READY_TIMEOUT_MS = 120_000
-export const HARNESS_DISPATCH_CONFIRMATION_PENDING =
-  'Dispatch recovered after restart; waiting for worker confirmation.'
 export const HARNESS_DISPATCH_CONFIRMATION_TIMEOUT_MS = 10 * 60_000
 
 function errorMessage(error: unknown): string {

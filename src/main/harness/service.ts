@@ -1,11 +1,19 @@
 import type { Store } from '../persistence'
-import type { HarnessRun, HarnessStartInput } from '../../shared/harness-types'
+import {
+  deriveHarnessRunStatus,
+  isTerminalHarnessCandidateStatus,
+  type HarnessRun,
+  type HarnessStartInput
+} from '../../shared/harness-types'
+import {
+  HARNESS_DISPATCH_CONFIRMATION_PENDING,
+  HARNESS_RUN_CANCELLED
+} from '../../shared/harness-candidate-notice'
 import type { GitStatusResult } from '../../shared/git-status-types'
 import type { RuntimeWorktreeRecord } from '../../shared/runtime-types'
 import { isGitRepoKind } from '../../shared/repo-kind'
 import { assertNoActiveHarnessRun } from './active-run-guard'
 import { executeHarnessCandidates } from './candidate-execution'
-import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from './candidate-launch'
 import { harnessRecoveryStartedAt } from './candidate-recovery'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 import { advanceHarnessCompletion, type HarnessVerificationRunner } from './verification'
@@ -74,21 +82,33 @@ export class HarnessService {
     }
     this.monitoringActive = true
     for (const persistedRun of this.store.listHarnessRuns()) {
-      let run = persistedRun
-      for (const candidate of run.candidates) {
-        if (candidate.status === 'running') {
-          run = this.store.updateHarnessCandidate(run.id, candidate.agent, {
-            recoveryStartedAt: harnessRecoveryStartedAt(),
-            error: HARNESS_DISPATCH_CONFIRMATION_PENDING
-          })
-        }
+      try {
+        this.resumeRunMonitoring(persistedRun)
+      } catch (error) {
+        // Why: activation runs inside PTY wiring, so a throw here would strand
+        // every IPC handler registered after it. Skip the run, keep the rest.
+        console.error('[harness] Could not resume monitoring for run', persistedRun.id, error)
       }
-      if (
-        !run.fatalError &&
-        run.candidates.some((candidate) => !['verified', 'failed'].includes(candidate.status))
-      ) {
-        this.schedule(run.id)
+    }
+  }
+
+  private resumeRunMonitoring(persistedRun: HarnessRun): void {
+    // Why: a fatal run rejects every candidate write, so it must be skipped
+    // before the recovery pass touches one.
+    if (persistedRun.fatalError) {
+      return
+    }
+    let run = persistedRun
+    for (const candidate of run.candidates) {
+      if (candidate.status === 'running') {
+        run = this.store.updateHarnessCandidate(run.id, candidate.agent, {
+          recoveryStartedAt: harnessRecoveryStartedAt(),
+          error: HARNESS_DISPATCH_CONFIRMATION_PENDING
+        })
       }
+    }
+    if (run.candidates.some((candidate) => !isTerminalHarnessCandidateStatus(candidate.status))) {
+      this.schedule(run.id)
     }
   }
 
@@ -174,11 +194,28 @@ export class HarnessService {
     }
     if (
       !run.fatalError &&
-      run.candidates.some((candidate) => !['verified', 'failed'].includes(candidate.status))
+      run.candidates.some((candidate) => !isTerminalHarnessCandidateStatus(candidate.status))
     ) {
       this.schedule(run.id)
     }
     return run
+  }
+
+  /**
+   * Releases a run that can no longer make progress. Harness stops managing it
+   * and frees the source worktree; agent terminals and worktrees are left for
+   * the user to inspect and close normally.
+   */
+  cancel(runId: string): HarnessRun {
+    const run = this.show(runId)
+    // Why: cancelling is a UI action that may arrive twice, and a run that
+    // already finished must keep its recorded outcome.
+    if (run.fatalError || deriveHarnessRunStatus(run) === 'completed') {
+      return run
+    }
+    this.clearPoll(runId)
+    this.queuedRuns.delete(runId)
+    return this.store.failHarnessRun(runId, HARNESS_RUN_CANCELLED)
   }
 
   async advance(runId: string): Promise<HarnessRun> {
@@ -206,6 +243,11 @@ export class HarnessService {
     this.clearPoll(runId)
     const execution = (mode === 'full' ? this.execute(runId) : this.advanceCompletion(runId))
       .catch((error) => {
+        // Why: a cancelled or already-failed run keeps its original reason; the
+        // follow-on write it rejects must not overwrite that with its own error.
+        if (this.store.getHarnessRun(runId)?.fatalError) {
+          return
+        }
         this.store.failHarnessRun(runId, errorMessage(error))
       })
       .finally(() => {
@@ -236,7 +278,7 @@ export class HarnessService {
     if (
       !this.monitoringActive ||
       run.fatalError ||
-      !run.candidates.some((entry) => !['verified', 'failed'].includes(entry.status))
+      !run.candidates.some((entry) => !isTerminalHarnessCandidateStatus(entry.status))
     ) {
       return
     }

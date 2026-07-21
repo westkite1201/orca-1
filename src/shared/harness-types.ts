@@ -159,7 +159,7 @@ export function canTransitionHarnessCandidateStatus(
   return to === 'failed' || NEXT_HARNESS_CANDIDATE_STATUS[from] === to
 }
 
-function isTerminalHarnessCandidateStatus(status: HarnessCandidateStatus): boolean {
+export function isTerminalHarnessCandidateStatus(status: HarnessCandidateStatus): boolean {
   return status === 'verified' || status === 'failed'
 }
 

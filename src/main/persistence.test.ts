@@ -29,6 +29,7 @@ import type {
   WorkspaceSessionState
 } from '../shared/types'
 import { isTerminalLeafId, makePaneKey } from '../shared/stable-pane-id'
+import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from '../shared/harness-candidate-notice'
 import { TERMINAL_SCROLLBACK_REPLAY_BYTE_LIMIT } from '../shared/terminal-scrollback-limits'
 import { MAX_BROWSER_HISTORY_ENTRIES } from '../shared/workspace-session-browser-history'
 import {
@@ -1711,6 +1712,41 @@ describe('Store', () => {
     })
 
     expect(failed.completedAt).not.toBeNull()
+  })
+
+  it('terminalizes live candidates when a run fails fatally', async () => {
+    const store = await createStore()
+    const run = store.createHarnessRun({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Compare two agents',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40)
+    })
+    store.updateHarnessCandidate(run.id, 'codex', { status: 'creating' })
+    store.updateHarnessCandidate(run.id, 'codex', { status: 'ready' })
+    store.updateHarnessCandidate(run.id, 'codex', { status: 'running' })
+    store.updateHarnessCandidate(run.id, 'codex', {
+      error: HARNESS_DISPATCH_CONFIRMATION_PENDING
+    })
+    store.updateHarnessCandidate(run.id, 'claude', {
+      status: 'failed',
+      error: 'Claude lane died.'
+    })
+
+    const failed = store.failHarnessRun(run.id, 'Runtime transport died.')
+
+    // Why: a fatal run rejects every later candidate write, so a lane left
+    // non-terminal could never be updated or monitored again.
+    const codex = failed.candidates.find((candidate) => candidate.agent === 'codex')
+    expect(codex?.status).toBe('failed')
+    expect(codex?.error).toBe('Runtime transport died.')
+    const claude = failed.candidates.find((candidate) => candidate.agent === 'claude')
+    expect(claude?.error).toBe('Claude lane died.')
+
+    const reloaded = (await createStore()).getHarnessRun(run.id)
+    expect(reloaded?.candidates.map((candidate) => candidate.status)).toEqual(['failed', 'failed'])
   })
 
   it('normalizes newly required Harness candidate fields without replacing valid data', async () => {

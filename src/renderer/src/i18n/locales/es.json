@@ -11,6 +11,9 @@
     "activeRunConflict": "Ya hay una ejecución activa del orquestador. Vacía este formulario para abrirla.",
     "branchPending": "Rama pendiente",
     "cancel": "Cancelar",
+    "cancelRun": "Cancelar ejecución",
+    "cancelUpgradeRequired": "Actualiza el entorno propietario del worktree para cancelar una ejecución.",
+    "cancelling": "Cancelando…",
     "checkingExisting": "Buscando una ejecución existente…",
     "close": "Cerrar",
     "comparisonResultTitle": "Resultado de la comparación",
@@ -18,7 +21,6 @@
     "comparisonRunTitle": "Ejecución comparativa",
     "coordinator": "Coordinador Codex",
     "description": "Dale a Jaws una incidencia o un objetivo. Planificará líneas de trabajo, aislará los cambios, integrará el resultado y lo verificará.",
-    "discoveryRetrying": "Volviendo a conectar para buscar una ejecución existente…",
     "diff": {
       "added": "{{count}} añadidos",
       "copied": "{{count}} copiados",
@@ -29,6 +31,7 @@
       "renamed": "{{count}} renombrados",
       "untracked": "{{count}} sin seguimiento"
     },
+    "discoveryRetrying": "Volviendo a conectar para buscar una ejecución existente…",
     "gitWorktree": "Worktree de Git",
     "goal": "Incidencia u objetivo",
     "goalPlaceholder": "Pega una incidencia o describe el resultado",

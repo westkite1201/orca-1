@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { HarnessCandidate } from '../../../../shared/harness-types'
+import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from '../../../../shared/harness-candidate-notice'
 import { HarnessCandidateCard } from './HarnessCandidateCard'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -97,6 +98,32 @@ describe('HarnessCandidateCard', () => {
     )
 
     expect(container.textContent).toContain('Codex coordinator')
+  })
+
+  it('shows restart recovery progress without alerting the user to a failure', () => {
+    const recovering = candidate('running')
+    recovering.error = HARNESS_DISPATCH_CONFIRMATION_PENDING
+
+    act(() => root.render(<HarnessCandidateCard candidate={recovering} />))
+
+    expect(container.textContent).toContain('waiting for worker confirmation')
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    const notice = [...container.querySelectorAll('p')].find((element) =>
+      element.textContent?.includes('waiting for worker confirmation')
+    )
+    expect(notice?.className).toContain('text-muted-foreground')
+    expect(notice?.className).not.toContain('text-destructive')
+  })
+
+  it('still alerts on a real failure recorded while the candidate is running', () => {
+    const stuck = candidate('running')
+    stuck.error = 'Dispatch check failed: host unreachable'
+
+    act(() => root.render(<HarnessCandidateCard candidate={stuck} />))
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Dispatch check failed'
+    )
   })
 
   it('shows the durable worker result and bounds long errors', () => {

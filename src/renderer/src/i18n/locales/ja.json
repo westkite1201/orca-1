@@ -11,6 +11,9 @@
     "activeRunConflict": "実行中のオーケストレーターがあります。このフォームを空にすると開けます。",
     "branchPending": "ブランチ作成待ち",
     "cancel": "キャンセル",
+    "cancelRun": "実行を中止",
+    "cancelUpgradeRequired": "実行を中止するには、ワークツリー所有ランタイムを更新してください。",
+    "cancelling": "中止中…",
     "checkingExisting": "既存の実行を確認しています…",
     "close": "閉じる",
     "comparisonResultTitle": "比較結果",
@@ -18,7 +21,6 @@
     "comparisonRunTitle": "比較実行",
     "coordinator": "Codex コーディネーター",
     "description": "Jaws に issue または目標を与えると、作業レーンを計画し、変更作業を分離して実行した後、結果を統合して検証します。",
-    "discoveryRetrying": "既存の実行を確認するため再接続しています…",
     "diff": {
       "added": "追加 {{count}} 件",
       "copied": "コピー {{count}} 件",
@@ -29,6 +31,7 @@
       "renamed": "名前変更 {{count}} 件",
       "untracked": "未追跡 {{count}} 件"
     },
+    "discoveryRetrying": "既存の実行を確認するため再接続しています…",
     "gitWorktree": "Git ワークツリー",
     "goal": "Issue または目標",
     "goalPlaceholder": "Issue を貼り付けるか、達成したい結果を説明してください",

@@ -11,6 +11,9 @@
     "activeRunConflict": "An active orchestrator run already exists. Clear this form to open it.",
     "branchPending": "Branch pending",
     "cancel": "Cancel",
+    "cancelRun": "Cancel run",
+    "cancelUpgradeRequired": "Update the worktree owner runtime to cancel a run.",
+    "cancelling": "Cancelling…",
     "checkingExisting": "Checking for an existing run…",
     "close": "Close",
     "comparisonResultTitle": "Comparison result",
@@ -18,7 +21,6 @@
     "comparisonRunTitle": "Comparison run",
     "coordinator": "Codex coordinator",
     "description": "Give Jaws an issue or goal. It will plan lanes, isolate mutating work, integrate the result, and verify it.",
-    "discoveryRetrying": "Reconnecting to check for an existing run…",
     "diff": {
       "added": "{{count}} added",
       "copied": "{{count}} copied",
@@ -29,6 +31,7 @@
       "renamed": "{{count}} renamed",
       "untracked": "{{count}} untracked"
     },
+    "discoveryRetrying": "Reconnecting to check for an existing run…",
     "gitWorktree": "Git worktree",
     "goal": "Issue or goal",
     "goalPlaceholder": "Paste an issue or describe the outcome",

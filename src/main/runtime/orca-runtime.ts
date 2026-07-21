@@ -3335,7 +3335,13 @@ export class OrcaRuntimeService {
     this.ptyController = controller
     if (controller && (this.resumeHarnessWhenPtyReady || this._harnessService)) {
       this.resumeHarnessWhenPtyReady = false
-      this.getHarnessService().activateMonitoring()
+      try {
+        this.getHarnessService().activateMonitoring()
+      } catch (error) {
+        // Why: most PTY IPC handlers register after this call, so losing Harness
+        // monitoring must never take the terminal surface down with it.
+        console.error('[harness] Could not activate monitoring on PTY readiness', error)
+      }
     }
   }
 

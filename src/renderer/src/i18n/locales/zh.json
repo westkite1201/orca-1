@@ -11,6 +11,9 @@
     "activeRunConflict": "已有正在运行的编排任务。清空此表单即可打开它。",
     "branchPending": "分支待创建",
     "cancel": "取消",
+    "cancelRun": "中止运行",
+    "cancelUpgradeRequired": "请更新工作树所属的运行时以中止运行。",
+    "cancelling": "正在中止…",
     "checkingExisting": "正在检查现有运行…",
     "close": "关闭",
     "comparisonResultTitle": "比较结果",
@@ -18,7 +21,6 @@
     "comparisonRunTitle": "比较运行",
     "coordinator": "Codex 协调器",
     "description": "向 Jaws 提交议题或目标。它会规划工作通道、隔离变更工作、集成结果并进行验证。",
-    "discoveryRetrying": "正在重新连接以检查现有运行…",
     "diff": {
       "added": "新增 {{count}} 个",
       "copied": "复制 {{count}} 个",
@@ -29,6 +31,7 @@
       "renamed": "重命名 {{count}} 个",
       "untracked": "未跟踪 {{count}} 个"
     },
+    "discoveryRetrying": "正在重新连接以检查现有运行…",
     "gitWorktree": "Git 工作树",
     "goal": "议题或目标",
     "goalPlaceholder": "粘贴议题或描述期望结果",

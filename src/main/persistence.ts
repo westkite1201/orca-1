@@ -149,6 +149,7 @@ import {
   type HarnessRun,
   type HarnessRunCreateInput
 } from '../shared/harness-types'
+import { terminalizeHarnessCandidates } from '../shared/harness-candidate-notice'
 import { pruneWorkspaceSessionBrowserHistory } from '../shared/workspace-session-browser-history'
 import {
   FOLDER_WORKSPACE_INSTANCE_SEPARATOR,
@@ -4960,8 +4961,10 @@ export class Store {
       throw new Error('Harness run failures require an error message.')
     }
     const now = Date.now()
+    const current = this.state.harnessRuns[runIndex]
     const failed: HarnessRun = {
-      ...this.state.harnessRuns[runIndex],
+      ...current,
+      candidates: terminalizeHarnessCandidates(current.candidates, fatalError, now),
       fatalError,
       updatedAt: now,
       completedAt: now

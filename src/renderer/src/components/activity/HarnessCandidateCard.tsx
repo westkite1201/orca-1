@@ -1,4 +1,8 @@
 import type { HarnessCandidate } from '../../../../shared/harness-types'
+import {
+  harnessCandidateFailure,
+  harnessCandidatePendingNotice
+} from '../../../../shared/harness-candidate-notice'
 import { translate } from '@/i18n/i18n'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
@@ -12,6 +16,8 @@ export function HarnessCandidateCard({
   label?: string
 }): React.JSX.Element {
   const resultBody = candidate.workerResult?.body.trim()
+  const pendingNotice = harnessCandidatePendingNotice(candidate)
+  const failure = harnessCandidateFailure(candidate)
   const verificationCommandPassed =
     candidate.verification?.exitCode === 0 &&
     !candidate.verification.timedOut &&
@@ -69,12 +75,19 @@ export function HarnessCandidateCard({
                 })}
         </p>
       ) : null}
-      {candidate.error ? (
+      {pendingNotice ? (
+        // Why: recovery progress rides the same field as failures; announcing it
+        // as an alert told users a healthy restart had broken.
+        <p className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-xs text-muted-foreground scrollbar-sleek">
+          {pendingNotice}
+        </p>
+      ) : null}
+      {failure ? (
         <p
           className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-xs text-destructive scrollbar-sleek"
           role="alert"
         >
-          {candidate.error}
+          {failure}
         </p>
       ) : null}
     </Card>

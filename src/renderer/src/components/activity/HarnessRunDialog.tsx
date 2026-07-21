@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 
 import type { HarnessRun } from '../../../../shared/harness-types'
-import { HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY } from '../../../../shared/protocol-version'
+import {
+  HARNESS_CANCEL_RUNTIME_CAPABILITY,
+  HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY
+} from '../../../../shared/protocol-version'
 import { translate } from '@/i18n/i18n'
 import type { RuntimeClientTarget } from '@/runtime/runtime-rpc-client'
 import { assertRuntimeEnvironmentCapability, callRuntimeRpc } from '@/runtime/runtime-rpc-client'
@@ -19,6 +22,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { HarnessDiscoveryNotice } from './HarnessDiscoveryNotice'
+import { HarnessRunActions } from './HarnessRunActions'
 import { HarnessRunSummary } from './HarnessRunSummary'
 import { getHarnessDialogCopy } from './harness-status-label'
 import {
@@ -77,6 +81,7 @@ export function HarnessRunDialog({ open, onOpenChange }: HarnessRunDialogProps):
   const [verificationCommand, setVerificationCommand] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [resuming, setResuming] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
   const [run, setRun] = useState<HarnessRun | null>(null)
@@ -221,6 +226,41 @@ export function HarnessRunDialog({ open, onOpenChange }: HarnessRunDialogProps):
     }
   }
 
+  async function cancelRun(): Promise<void> {
+    if (!run || !runTarget || cancelling) {
+      return
+    }
+
+    setCancelling(true)
+    setPollError(null)
+    try {
+      if (runTarget.kind === 'environment') {
+        await assertRuntimeEnvironmentCapability(
+          runTarget.environmentId,
+          HARNESS_CANCEL_RUNTIME_CAPABILITY,
+          translate(
+            'harness.cancelUpgradeRequired',
+            'Update the worktree owner runtime to cancel a run.'
+          )
+        )
+      }
+      const response = await callRuntimeRpc<{ run: HarnessRun }>(runTarget, 'harness.cancel', {
+        run: run.id
+      })
+      if (mountedRef.current) {
+        setRun(response.run)
+      }
+    } catch (cancelError) {
+      if (mountedRef.current) {
+        setPollError(errorMessage(cancelError, 'Could not cancel this run.'))
+      }
+    } finally {
+      if (mountedRef.current) {
+        setCancelling(false)
+      }
+    }
+  }
+
   function reset(): void {
     setIncludeTerminalRuns(false)
     setRun(null)
@@ -347,38 +387,16 @@ export function HarnessRunDialog({ open, onOpenChange }: HarnessRunDialogProps):
         )}
 
         {run ? (
-          <DialogFooter>
-            {runActive &&
-            run.candidates.some(
-              (candidate) =>
-                candidate.error && ['creating', 'ready', 'verifying'].includes(candidate.status)
-            ) ? (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => void resumeRun()}
-                disabled={resuming}
-                className="w-28"
-              >
-                {resuming ? (
-                  <>
-                    <Loader2 className="animate-spin" />
-                    {translate('harness.resuming', 'Resuming…')}
-                  </>
-                ) : (
-                  translate('harness.resume', 'Resume')
-                )}
-              </Button>
-            ) : null}
-            {runActive ? null : (
-              <Button type="button" variant="outline" onClick={reset}>
-                {translate('harness.newComparison', 'New run')}
-              </Button>
-            )}
-            <Button type="button" variant="ghost" onClick={() => handleOpenChange(false)}>
-              {translate('harness.close', 'Close')}
-            </Button>
-          </DialogFooter>
+          <HarnessRunActions
+            run={run}
+            runActive={runActive}
+            resuming={resuming}
+            cancelling={cancelling}
+            onResume={() => void resumeRun()}
+            onCancel={() => void cancelRun()}
+            onReset={reset}
+            onClose={() => handleOpenChange(false)}
+          />
         ) : null}
       </DialogContent>
     </Dialog>

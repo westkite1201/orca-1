@@ -5,6 +5,11 @@ import type {
   RuntimeWorktreeRecord
 } from '../../shared/runtime-types'
 import { makePaneKey } from '../../shared/stable-pane-id'
+import {
+  HARNESS_AGENT_TERMINAL_PENDING,
+  HARNESS_WORKTREE_CREATION_PENDING,
+  HARNESS_WORKTREE_LISTING_PENDING
+} from '../../shared/harness-candidate-notice'
 import type { Store } from '../persistence'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 
@@ -139,9 +144,7 @@ export async function recoverHarnessCandidate(args: {
   }
   if (listed.truncated) {
     store.updateHarnessCandidate(run.id, candidate.agent, {
-      error:
-        pendingCreateError ??
-        'Candidate worktree recovery is waiting for a complete worktree listing.'
+      error: pendingCreateError ?? HARNESS_WORKTREE_LISTING_PENDING
     })
     return null
   }
@@ -164,7 +167,7 @@ export async function recoverHarnessCandidate(args: {
       return failCandidate(store, run, candidate, createRejectionError)
     }
     store.updateHarnessCandidate(run.id, candidate.agent, {
-      error: 'Candidate worktree recovery is waiting for creation to finish.'
+      error: HARNESS_WORKTREE_CREATION_PENDING
     })
     return null
   }
@@ -184,7 +187,7 @@ export async function recoverHarnessCandidate(args: {
     }
     if (!terminal) {
       store.updateHarnessCandidate(run.id, candidate.agent, {
-        error: pendingCreateError ?? 'Candidate recovery is waiting for its agent terminal.'
+        error: pendingCreateError ?? HARNESS_AGENT_TERMINAL_PENDING
       })
       return null
     }

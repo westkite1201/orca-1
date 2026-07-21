@@ -33,6 +33,9 @@ export const HARNESS_RUNTIME_CAPABILITY = 'harness.v1' as const
 // Why: v2 guarantees task execution metadata and dispatch isolation; older
 // hosts would strip those optional RPC fields and silently weaken the contract.
 export const HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY = 'harness.orchestrator.v2' as const
+// Why: without harness.cancel a stuck run holds its source worktree forever, so
+// clients must hide the action rather than call a method older hosts reject.
+export const HARNESS_CANCEL_RUNTIME_CAPABILITY = 'harness.cancel.v1' as const
 // Why: signals the host exposes the Agent Session History scanner over RPC
 // (aiVault.listSessions). Registered unconditionally for every build, so it is a
 // STATIC capability advertised by getStatus() automatically — NOT a runtime
@@ -71,6 +74,7 @@ export const RUNTIME_CAPABILITIES = [
   // Keep v1 advertised so older clients can still start their supported flow.
   'harness.orchestrator.v1',
   HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY,
+  HARNESS_CANCEL_RUNTIME_CAPABILITY,
   AI_VAULT_RUNTIME_CAPABILITY,
   TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY,
   WORKTREE_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY

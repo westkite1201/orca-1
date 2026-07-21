@@ -148,7 +148,7 @@
     {
       "name": "orchestration",
       "sourcePath": "skills/orchestration",
-      "releaseRevision": 24,
+      "releaseRevision": 26,
       "packageDigest": "9fbfa2ae3f3f99441563a4b8b1c6302107944480db8718ddb326a862a51f7ab9",
       "gitTreeSha": "086c41e0b353b4908d2963694b4a7c791d4b3982",
       "files": [

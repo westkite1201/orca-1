@@ -6,10 +6,8 @@ import type { MessageRow } from '../runtime/orchestration/types'
 import { HarnessService, type HarnessStore } from './service'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 import type { HarnessVerificationRunner } from './verification'
-import {
-  HARNESS_DISPATCH_CONFIRMATION_PENDING,
-  HARNESS_DISPATCH_CONFIRMATION_TIMEOUT_MS
-} from './candidate-launch'
+import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from '../../shared/harness-candidate-notice'
+import { HARNESS_DISPATCH_CONFIRMATION_TIMEOUT_MS } from './candidate-launch'
 import {
   createHarnessBranchCompareFixture,
   createHarnessPrecheckResult,
