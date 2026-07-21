@@ -127,10 +127,15 @@ describe('computeProjectHeaderDropPreview', () => {
         { repoId: 'b', bucketKey: 'ungrouped', headerIndex: 1, top: 100, bottom: 128 },
         { repoId: 'c', bucketKey: 'ungrouped', headerIndex: 2, top: 200, bottom: 228 },
         { repoId: 'd', bucketKey: 'ungrouped', headerIndex: 3, top: 300, bottom: 328 }
-      ]
+      ],
+      draggedRepoId: 'd',
+      collapsedHeaderHeight: 28
     })
 
-    expect(preview).toEqual({ dropIndex: 1, dropIndicatorY: 96 })
+    // 'd' (index 3) moves back to index 1; the headers it jumps over, 'b' and
+    // 'c', each shift down by one collapsed row while it is above them.
+    expect(preview?.dropIndex).toBe(1)
+    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: 28, c: 28 })
   })
 
   it('supports boundary drops at the end of the full sidebar list', () => {
@@ -148,14 +153,18 @@ describe('computeProjectHeaderDropPreview', () => {
           bottom: 328,
           sectionBottom: 380
         }
-      ]
+      ],
+      draggedRepoId: 'a',
+      collapsedHeaderHeight: 28
     })
 
-    expect(preview).toEqual({ dropIndex: 3, dropIndicatorY: 383 })
+    // 'a' (index 0) moves to the end; 'b' and 'c' each shift up by one
+    // collapsed row to close the gap it leaves behind.
+    expect(preview?.dropIndex).toBe(3)
+    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: -28, c: -28 })
   })
 
   it('snaps a drop inside the last expanded project section to its bottom boundary', () => {
-    const INDICATOR_GAP = 4
     const sectionBottom = 380
     const preview = computeProjectHeaderDropPreview({
       pointerY: 350,
@@ -171,15 +180,18 @@ describe('computeProjectHeaderDropPreview', () => {
           bottom: 328,
           sectionBottom
         }
-      ]
+      ],
+      draggedRepoId: 'b',
+      collapsedHeaderHeight: 28
     })
 
     // Only boundary available is 'c's section bottom → drop after 'c' (slot 3).
-    expect(preview).toEqual({ dropIndex: 3, dropIndicatorY: sectionBottom + INDICATOR_GAP })
+    // 'b' (index 1) moves past 'c', which shifts up by one collapsed row.
+    expect(preview?.dropIndex).toBe(3)
+    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ c: -28 })
   })
 
   it('snaps a drop between sibling project headers to the nearer boundary', () => {
-    const INDICATOR_GAP = 4
     const nextHeaderTop = 220
     const preview = computeProjectHeaderDropPreview({
       pointerY: 150,
@@ -196,11 +208,15 @@ describe('computeProjectHeaderDropPreview', () => {
           sectionBottom: nextHeaderTop
         },
         { repoId: 'b', bucketKey: 'ungrouped', headerIndex: 1, top: nextHeaderTop, bottom: 248 }
-      ]
+      ],
+      draggedRepoId: 'a',
+      collapsedHeaderHeight: 28
     })
 
     // pointerY 150 sits in 'a's body; nearer boundary is 'b's top (216 vs 224).
-    expect(preview).toEqual({ dropIndex: 1, dropIndicatorY: nextHeaderTop - INDICATOR_GAP })
+    // With only two headers, dropIndex 1 is 'a's own post-removal slot: no-op.
+    expect(preview?.dropIndex).toBe(1)
+    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({})
   })
 
   describe('nearest-boundary choice across an interior gap', () => {
@@ -240,10 +256,14 @@ describe('computeProjectHeaderDropPreview', () => {
         containerTop: 0,
         scrollTop: 0,
         sidebarRepoHeaderIds: ['a', 'b'],
-        rects: gapRects.map((rect) => ({ ...rect }))
+        rects: gapRects.map((rect) => ({ ...rect })),
+        draggedRepoId: 'a',
+        collapsedHeaderHeight: 28
       })
 
-      expect(preview).toEqual({ dropIndex: 1, dropIndicatorY: sectionBottomSlotY })
+      // With only two headers, dropIndex 1 is 'a's own post-removal slot: no-op.
+      expect(preview?.dropIndex).toBe(1)
+      expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({})
     })
 
     it('snaps to the next header top when the pointer is nearer to it', () => {
@@ -252,10 +272,13 @@ describe('computeProjectHeaderDropPreview', () => {
         containerTop: 0,
         scrollTop: 0,
         sidebarRepoHeaderIds: ['a', 'b'],
-        rects: gapRects.map((rect) => ({ ...rect }))
+        rects: gapRects.map((rect) => ({ ...rect })),
+        draggedRepoId: 'a',
+        collapsedHeaderHeight: 28
       })
 
-      expect(preview).toEqual({ dropIndex: 1, dropIndicatorY: nextHeaderSlotY })
+      expect(preview?.dropIndex).toBe(1)
+      expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({})
     })
 
     it('breaks the midpoint tie toward the next header boundary', () => {
@@ -264,15 +287,17 @@ describe('computeProjectHeaderDropPreview', () => {
         containerTop: 0,
         scrollTop: 0,
         sidebarRepoHeaderIds: ['a', 'b'],
-        rects: gapRects.map((rect) => ({ ...rect }))
+        rects: gapRects.map((rect) => ({ ...rect })),
+        draggedRepoId: 'a',
+        collapsedHeaderHeight: 28
       })
 
-      expect(preview).toEqual({ dropIndex: 1, dropIndicatorY: nextHeaderSlotY })
+      expect(preview?.dropIndex).toBe(1)
+      expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({})
     })
   })
 
   describe('content bound for the last section', () => {
-    const INDICATOR_GAP = 4
     const estimatedSectionBottom = 380
     const lastRects = [
       {
@@ -291,7 +316,9 @@ describe('computeProjectHeaderDropPreview', () => {
         scrollTop: 0,
         sidebarRepoHeaderIds: ['a', 'b', 'c'],
         rects: lastRects.map((rect) => ({ ...rect })),
-        contentBottom
+        contentBottom,
+        draggedRepoId: 'a',
+        collapsedHeaderHeight: 28
       })
 
     it('rejects a drop below the measured content when the estimate overshoots', () => {
@@ -308,19 +335,20 @@ describe('computeProjectHeaderDropPreview', () => {
 
     it('still snaps within the measured content when the estimate overshoots', () => {
       // 335 is inside the real last section (ends at 340) → drop after 'c'.
-      expect(lastPreview(335, 340)).toEqual({
-        dropIndex: 3,
-        dropIndicatorY: estimatedSectionBottom + INDICATOR_GAP
-      })
+      // 'a' (index 0) moves to the end; 'b' and 'c' each shift up one row.
+      const preview = lastPreview(335, 340)
+
+      expect(preview?.dropIndex).toBe(3)
+      expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: -28, c: -28 })
     })
 
     it('snaps within the measured content when actual content undershoots the estimate', () => {
       // Real content taller than the estimate (420 > 380): a 360 drop is well
       // inside the section → still snaps to the final slot.
-      expect(lastPreview(360, 420)).toEqual({
-        dropIndex: 3,
-        dropIndicatorY: estimatedSectionBottom + INDICATOR_GAP
-      })
+      const preview = lastPreview(360, 420)
+
+      expect(preview?.dropIndex).toBe(3)
+      expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: -28, c: -28 })
     })
   })
 })
