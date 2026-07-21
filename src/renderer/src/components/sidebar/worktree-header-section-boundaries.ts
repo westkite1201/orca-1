@@ -62,6 +62,32 @@ function findProjectGroupSectionEndIndex(
   return rows.length
 }
 
+/** Maps every render row to the repo header whose section it renders under, so
+ *  a whole project section can move as one block during a header drag. Headers
+ *  delimit sections in the flat row model: a repo header opens one, any other
+ *  header (project group, pinned/status, host) closes it. */
+export function getRepoSectionRepoIdByRowIndex(rows: readonly RenderRow[]): (string | undefined)[] {
+  const repoIdByRowIndex: (string | undefined)[] = []
+  let sectionRepoId: string | undefined
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]
+    if (row?.type === 'header' || row?.type === 'host-header') {
+      sectionRepoId = row.type === 'header' ? row.repo?.id : undefined
+    }
+    repoIdByRowIndex[index] = sectionRepoId
+  }
+  return repoIdByRowIndex
+}
+
+export function getRepoSectionPreviewOffsetY(args: {
+  repoSectionRepoIdByRowIndex: readonly (string | undefined)[]
+  rowIndex: number
+  previewOffsetsByRepoId: ReadonlyMap<string, number>
+}): number {
+  const repoId = args.repoSectionRepoIdByRowIndex[args.rowIndex]
+  return repoId === undefined ? 0 : (args.previewOffsetsByRepoId.get(repoId) ?? 0)
+}
+
 export function getRepoHeaderSectionEndByRepoId(args: {
   rows: readonly RenderRow[]
   firstHeaderIndex: number

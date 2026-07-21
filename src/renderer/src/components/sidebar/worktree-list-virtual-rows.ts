@@ -5,7 +5,12 @@ import { PINNED_GROUP_KEY } from './worktree-list-groups'
 
 export const GROUP_HEADER_ROW_HEIGHT = 28
 export const HOST_HEADER_ROW_HEIGHT = 32
-const SECONDARY_GROUP_HEADER_TOP_MARGIN = 4
+export const SECONDARY_GROUP_HEADER_TOP_MARGIN = 4
+// Why: a project collapses to exactly its header row while being dragged, so the
+// gap every displaced neighbour opens is that row's own height. Headers keep the
+// inter-section top margin unless they are the first row of the list.
+export const DEFAULT_PROJECT_HEADER_COLLAPSED_HEIGHT_PX =
+  GROUP_HEADER_ROW_HEIGHT + SECONDARY_GROUP_HEADER_TOP_MARGIN
 const IMPORTED_WORKTREES_LINE_ROW_HEIGHT = 36
 const PENDING_CREATION_ROW_HEIGHT = 56
 const FOLDER_WORKSPACE_ROW_HEIGHT = 64
@@ -72,6 +77,22 @@ export function estimateRenderRowSize(
   return 116
 }
 
+/** Height the dragged project's section shrinks to, which is exactly its own
+ *  header row — so it is measured with the same estimator the virtualizer uses
+ *  rather than a restated literal. */
+export function getProjectHeaderCollapsedHeight(args: {
+  rows: readonly RenderRow[]
+  repoId: string
+  firstHeaderIndex: number
+}): number {
+  const headerIndex = args.rows.findIndex(
+    (row) => row.type === 'header' && row.repo?.id === args.repoId
+  )
+  return headerIndex < 0
+    ? DEFAULT_PROJECT_HEADER_COLLAPSED_HEIGHT_PX
+    : estimateRenderRowSize(args.rows, headerIndex, args.firstHeaderIndex, null)
+}
+
 export function getVirtualRowTransform(start: number): string {
   return `translateY(${start}px)`
 }
@@ -114,6 +135,35 @@ export function getStickyHeaderIndexes(rows: readonly RenderRow[]): number[] {
     }
   })
   return indexes
+}
+
+export function findStickyHeaderIndexForRepo(args: {
+  rows: readonly RenderRow[]
+  stickyHeaderIndexes: readonly number[]
+  repoId: string | null
+}): number | null {
+  if (args.repoId === null) {
+    return null
+  }
+  return (
+    args.stickyHeaderIndexes.find((index) => {
+      const row = args.rows[index]
+      return row?.type === 'header' && row.repo?.id === args.repoId
+    }) ?? null
+  )
+}
+
+/** Why: a dragged header follows the pointer, so it must not also hold the
+ *  pinned slot — it would leave that slot rendering nothing for the whole drag
+ *  while the header itself is somewhere under the cursor. */
+export function excludeStickyHeaderIndex(
+  stickyHeaderIndexes: readonly number[],
+  excludedIndex: number | null
+): readonly number[] {
+  if (excludedIndex === null) {
+    return stickyHeaderIndexes
+  }
+  return stickyHeaderIndexes.filter((index) => index !== excludedIndex)
 }
 
 // Why: the pinned host card is h-8 (32px) inside a pt-1 (4px) wrapper; the
@@ -236,6 +286,7 @@ export function extractWorktreeVirtualRowIndexes(args: {
   range: Range
   stickyHeaderIndexes: readonly number[]
   rows?: readonly RenderRow[]
+  draggedStickyHeaderIndex?: number | null
 }): number[] {
   const activeStickyHeaderIndex = getActiveStickyHeaderIndex(
     args.stickyHeaderIndexes,
@@ -253,11 +304,19 @@ export function extractWorktreeVirtualRowIndexes(args: {
   // while group headers hand off beneath it — keep it mounted regardless.
   const hostIndexes = args.rows ? getHostStickyIndexes(args.rows, args.stickyHeaderIndexes) : []
   const activeHostIndex = getActiveStickyHeaderIndex(hostIndexes, args.range.startIndex)
+  // Why: the dragged header vacates the pinned slot, so the header that takes it
+  // over has to stay mounted even when it sits far above the visible range.
+  const draggedIndex = args.draggedStickyHeaderIndex ?? null
+  const stickyHandoffIndex =
+    draggedIndex === null
+      ? null
+      : getPreviousStickyHeaderIndex(args.stickyHeaderIndexes, draggedIndex)
   return Array.from(
     new Set([
       activeStickyHeaderIndex,
       ...(previousStickyHeaderIndex === null ? [] : [previousStickyHeaderIndex]),
       ...(activeHostIndex === null ? [] : [activeHostIndex]),
+      ...(stickyHandoffIndex === null ? [] : [stickyHandoffIndex]),
       ...defaultRangeExtractor(args.range)
     ])
   ).sort((a, b) => a - b)

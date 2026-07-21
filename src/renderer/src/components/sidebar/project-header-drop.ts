@@ -1,5 +1,6 @@
 import { getEffectiveProjectGroupManualRank } from '../../../../shared/project-groups'
 import {
+  buildSidebarHeaderPreviewOffsets,
   computeWorktreeSidebarHeaderDropPreview,
   type WorktreeSidebarHeaderDropPreview
 } from './worktree-sidebar-header-drop-preview'
@@ -20,7 +21,9 @@ export type ProjectHeaderDragRect = {
   sectionBottom?: number
 }
 
-export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview
+export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview & {
+  previewOffsetsByRepoId: ReadonlyMap<string, number>
+}
 
 export function getProjectHeaderDragBucketKey(
   repo: Pick<Repo, 'projectGroupId'>
@@ -198,10 +201,14 @@ export function computeProjectHeaderDropPreview(args: {
   scrollTop: number
   rects: readonly ProjectHeaderDragRect[]
   sidebarRepoHeaderIds: readonly string[]
+  draggedRepoId: string
+  collapsedHeaderHeight: number
   contentBottom?: number
 }): ProjectHeaderDropPreview | null {
   const { rects, sidebarRepoHeaderIds } = args
-  return computeWorktreeSidebarHeaderDropPreview({
+  // Why: the shared helper is also used by project group headers, which keep
+  // the insertion line. Offsets are layered on here instead of inside it.
+  const preview = computeWorktreeSidebarHeaderDropPreview({
     pointerY: args.pointerY,
     containerTop: args.containerTop,
     scrollTop: args.scrollTop,
@@ -210,6 +217,18 @@ export function computeProjectHeaderDropPreview(args: {
     getId: (rect) => rect.repoId,
     contentBottom: args.contentBottom
   })
+  if (!preview) {
+    return null
+  }
+  return {
+    ...preview,
+    previewOffsetsByRepoId: buildSidebarHeaderPreviewOffsets({
+      orderedIds: sidebarRepoHeaderIds,
+      draggedId: args.draggedRepoId,
+      dropIndex: preview.dropIndex,
+      collapsedHeaderHeight: args.collapsedHeaderHeight
+    })
+  }
 }
 
 export function applyAllRepoInsertAt(

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type { VirtualItem } from '@tanstack/react-virtual'
 import {
   HOST_STICKY_PINNED_HEIGHT,
+  excludeStickyHeaderIndex,
   extractWorktreeVirtualRowIndexes,
+  findStickyHeaderIndexForRepo,
   getActiveStickyIndexesForScroll,
   getStickyHeaderIndexes,
   pruneStaleVirtualRowElementCache,
@@ -182,6 +184,71 @@ describe('extractWorktreeVirtualRowIndexes', () => {
       rows
     })
     expect(indexes).toContain(0)
+  })
+})
+
+describe('sticky slot while a project header is dragged', () => {
+  // rows: [repo-1 header, item, repo-2 header, item]
+  const repoRows: RenderRow[] = [
+    { ...groupRow('repo:repo-1'), repo: { id: 'repo-1' } } as RenderRow,
+    itemStub('wt-1'),
+    { ...groupRow('repo:repo-2'), repo: { id: 'repo-2' } } as RenderRow,
+    itemStub('wt-2')
+  ]
+  const repoSticky = getStickyHeaderIndexes(repoRows)
+  const repoItems = repoRows.map((_, index) => virtualItem(index, index * 100))
+  const draggedIndex = findStickyHeaderIndexForRepo({
+    rows: repoRows,
+    stickyHeaderIndexes: repoSticky,
+    repoId: 'repo-2'
+  })
+
+  it('hands the slot to the header above instead of leaving it empty', () => {
+    expect(draggedIndex).toBe(2)
+    const pinnedBeforeDrag = getActiveStickyIndexesForScroll({
+      rows: repoRows,
+      rangeStartIndex: 3,
+      scrollOffset: 250,
+      stickyHeaderIndexes: repoSticky,
+      virtualItems: repoItems
+    })
+    expect(pinnedBeforeDrag.groupIndex).toBe(2)
+
+    const pinnedDuringDrag = getActiveStickyIndexesForScroll({
+      rows: repoRows,
+      rangeStartIndex: 3,
+      scrollOffset: 250,
+      stickyHeaderIndexes: excludeStickyHeaderIndex(repoSticky, draggedIndex),
+      virtualItems: repoItems
+    })
+    expect(pinnedDuringDrag.groupIndex).toBe(0)
+  })
+
+  it('keeps that header mounted while it is far above the visible range', () => {
+    const indexes = extractWorktreeVirtualRowIndexes({
+      range: {
+        startIndex: 3,
+        endIndex: 3,
+        overscan: 0,
+        count: repoRows.length,
+        getItemIndex: (i: number) => i
+      } as never,
+      stickyHeaderIndexes: repoSticky,
+      rows: repoRows,
+      draggedStickyHeaderIndex: draggedIndex
+    })
+    expect(indexes).toContain(0)
+  })
+
+  it('returns the sticky indexes untouched when nothing is dragged', () => {
+    expect(excludeStickyHeaderIndex(repoSticky, null)).toBe(repoSticky)
+    expect(
+      findStickyHeaderIndexForRepo({
+        rows: repoRows,
+        stickyHeaderIndexes: repoSticky,
+        repoId: null
+      })
+    ).toBeNull()
   })
 })
 
