@@ -140,3 +140,35 @@ function pickNearestHeaderBoundarySlot(
     ? beforeNext
     : afterPrev
 }
+
+/**
+ * Per-header pixel offsets that open a gap at `dropIndex`. The dragged project
+ * is collapsed to a single header row for the duration of the drag, so every
+ * displaced unit is exactly one header tall.
+ */
+export function buildSidebarHeaderPreviewOffsets(args: {
+  orderedIds: readonly string[]
+  draggedId: string
+  dropIndex: number
+  collapsedHeaderHeight: number
+}): ReadonlyMap<string, number> {
+  const offsets = new Map<string, number>()
+  const fromIndex = args.orderedIds.indexOf(args.draggedId)
+  if (fromIndex === -1) {
+    return offsets
+  }
+  // Dropping onto its own slot, or the boundary just after it, changes nothing.
+  if (args.dropIndex === fromIndex || args.dropIndex === fromIndex + 1) {
+    return offsets
+  }
+  if (args.dropIndex > fromIndex) {
+    for (let index = fromIndex + 1; index < args.dropIndex; index += 1) {
+      offsets.set(args.orderedIds[index]!, -args.collapsedHeaderHeight)
+    }
+    return offsets
+  }
+  for (let index = args.dropIndex; index < fromIndex; index += 1) {
+    offsets.set(args.orderedIds[index]!, args.collapsedHeaderHeight)
+  }
+  return offsets
+}
