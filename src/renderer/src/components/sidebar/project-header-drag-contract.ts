@@ -10,8 +10,6 @@ export type RepoDragState = {
   dropIndex: number | null
   dropIndicatorY: number | null
   previewOffsetsByRepoId: ReadonlyMap<string, number>
-  // Collapse key of the project being dragged, so the row builder can fold it.
-  draggedGroupKey: string | null
   // Pointer Y travel since the drag started, so the dragged header can follow
   // the cursor instead of only lifting in place. Null until the drag promotes.
   pointerOffsetY: number | null
@@ -22,7 +20,6 @@ export const INITIAL_REPO_DRAG_STATE: RepoDragState = {
   dropIndex: null,
   dropIndicatorY: null,
   previewOffsetsByRepoId: EMPTY_HEADER_PREVIEW_OFFSETS,
-  draggedGroupKey: null,
   pointerOffsetY: null
 }
 
@@ -34,10 +31,6 @@ export type UseRepoHeaderDragArgs = {
   onCommitRepoOrder: (orderedIds: string[]) => void
   onCommitProjectGroupOrder: (repoId: string, projectGroupId: string | null, order: number) => void
   getScrollContainer: () => HTMLElement | null
-  getCollapseGroupKey: (repoId: string) => string
-  // Resolved per project: a header row's height depends on whether it carries
-  // the inter-section top margin.
-  getCollapsedHeaderHeight: (repoId: string) => number
 }
 
 export type RepoHeaderDragController = {
@@ -48,7 +41,9 @@ export type RepoHeaderDragController = {
 export type ProjectHeaderDragSession = {
   repoId: string
   bucketKey: ProjectHeaderDragBucketKey
-  draggedGroupKey: string | null
+  // Captured before the header lifts, so each displaced project makes room for
+  // the whole expanded section rather than only its header.
+  draggedSectionHeight: number
   sidebarRepoHeaderIds: readonly string[]
   pointerId: number
   headerRects: ProjectHeaderDragRect[]

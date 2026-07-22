@@ -83,8 +83,15 @@ export function getRepoSectionPreviewOffsetY(args: {
   repoSectionRepoIdByRowIndex: readonly (string | undefined)[]
   rowIndex: number
   previewOffsetsByRepoId: ReadonlyMap<string, number>
+  draggingRepoId?: string | null
+  draggedSectionOffsetY?: number | null
 }): number {
   const repoId = args.repoSectionRepoIdByRowIndex[args.rowIndex]
+  // Why: the pointer moves the source section; preview offsets only park the
+  // neighbouring sections around its destination gap.
+  if (repoId !== undefined && repoId === args.draggingRepoId) {
+    return args.draggedSectionOffsetY ?? 0
+  }
   return repoId === undefined ? 0 : (args.previewOffsetsByRepoId.get(repoId) ?? 0)
 }
 

@@ -1,6 +1,7 @@
 import type { PointerEvent } from 'react'
 
 import {
+  getProjectHeaderDragSectionHeight,
   getProjectHeaderDragBucketKey,
   measureProjectHeaderDragRects,
   type ProjectHeaderDragBucketKey
@@ -44,16 +45,16 @@ export function createProjectHeaderDragSession(args: {
     return null
   }
   const handleEl = args.event.currentTarget
+  const headerRects = measureProjectHeaderDragRects(container, bucketKey)
   // Why: defer setPointerCapture until the drag threshold is crossed so a
   // header click still reaches the inner collapse handler on pointerup.
   return {
     repoId: args.repoId,
     bucketKey,
-    // Set by the drag hook once the session is armed; it owns the collapse key.
-    draggedGroupKey: '',
+    draggedSectionHeight: getProjectHeaderDragSectionHeight(headerRects, args.repoId),
     sidebarRepoHeaderIds,
     pointerId: args.event.pointerId,
-    headerRects: measureProjectHeaderDragRects(container, bucketKey),
+    headerRects,
     handleEl,
     startX: args.event.clientX,
     startY: args.event.clientY,

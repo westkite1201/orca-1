@@ -23,7 +23,7 @@ function makeSession(
   return {
     repoId,
     bucketKey: 'ungrouped',
-    draggedGroupKey: `repo:${repoId}`,
+    draggedSectionHeight: 0,
     sidebarRepoHeaderIds,
     pointerId: 1,
     headerRects: [],

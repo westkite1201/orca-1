@@ -71,4 +71,19 @@ describe('repo section membership', () => {
     // Repo b's header and both of its rows shift together; nothing else moves.
     expect(offsets).toEqual([0, 0, 0, 0, 0, 32, 32, 32, 0, 0, 0, 0])
   })
+
+  it('moves every row in the dragged expanded section with the pointer', () => {
+    const sectionRepoIds = getRepoSectionRepoIdByRowIndex(ROWS)
+    const offsets = ROWS.map((_row, rowIndex) =>
+      getRepoSectionPreviewOffsetY({
+        repoSectionRepoIdByRowIndex: sectionRepoIds,
+        rowIndex,
+        previewOffsetsByRepoId: new Map([['b', -132]]),
+        draggingRepoId: 'a',
+        draggedSectionOffsetY: 48
+      })
+    )
+
+    expect(offsets).toEqual([48, 48, 48, 48, 48, -132, -132, -132, 0, 0, 0, 0])
+  })
 })

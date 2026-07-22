@@ -25,6 +25,19 @@ export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview & {
   previewOffsetsByRepoId: ReadonlyMap<string, number>
 }
 
+export function getProjectHeaderDragSectionHeight(
+  rects: readonly ProjectHeaderDragRect[],
+  repoId: string
+): number {
+  const rect = rects.find((candidate) => candidate.repoId === repoId)
+  if (!rect) {
+    return 0
+  }
+  // Why: the row-model boundary stays available even when a long project's
+  // next header is virtualized out of the DOM during the drag.
+  return Math.max(rect.bottom - rect.top, (rect.sectionBottom ?? rect.bottom) - rect.top)
+}
+
 export function getProjectHeaderDragBucketKey(
   repo: Pick<Repo, 'projectGroupId'>
 ): ProjectHeaderDragBucketKey {
@@ -174,6 +187,14 @@ export function measureProjectHeaderDragRects(
     })
   })
   rects.sort((left, right) => left.top - right.top)
+  for (const rect of rects) {
+    const nextSibling = rects.find((candidate) => candidate.headerIndex === rect.headerIndex + 1)
+    if (nextSibling) {
+      // Why: card heights are measured at runtime, so the next mounted sibling
+      // gives a truer section boundary than the virtualizer's fallback estimate.
+      rect.sectionBottom = nextSibling.top
+    }
+  }
   return rects
 }
 
@@ -202,7 +223,7 @@ export function computeProjectHeaderDropPreview(args: {
   rects: readonly ProjectHeaderDragRect[]
   sidebarRepoHeaderIds: readonly string[]
   draggedRepoId: string
-  collapsedHeaderHeight: number
+  draggedSectionHeight: number
   contentBottom?: number
 }): ProjectHeaderDropPreview | null {
   const { rects, sidebarRepoHeaderIds } = args
@@ -226,7 +247,7 @@ export function computeProjectHeaderDropPreview(args: {
       orderedIds: sidebarRepoHeaderIds,
       draggedId: args.draggedRepoId,
       dropIndex: preview.dropIndex,
-      collapsedHeaderHeight: args.collapsedHeaderHeight
+      sectionHeight: args.draggedSectionHeight
     })
   }
 }

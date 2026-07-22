@@ -6,11 +6,6 @@ import { PINNED_GROUP_KEY } from './worktree-list-groups'
 export const GROUP_HEADER_ROW_HEIGHT = 28
 export const HOST_HEADER_ROW_HEIGHT = 32
 export const SECONDARY_GROUP_HEADER_TOP_MARGIN = 4
-// Why: a project collapses to exactly its header row while being dragged, so the
-// gap every displaced neighbour opens is that row's own height. Headers keep the
-// inter-section top margin unless they are the first row of the list.
-export const DEFAULT_PROJECT_HEADER_COLLAPSED_HEIGHT_PX =
-  GROUP_HEADER_ROW_HEIGHT + SECONDARY_GROUP_HEADER_TOP_MARGIN
 const IMPORTED_WORKTREES_LINE_ROW_HEIGHT = 36
 const PENDING_CREATION_ROW_HEIGHT = 56
 const FOLDER_WORKSPACE_ROW_HEIGHT = 64
@@ -75,22 +70,6 @@ export function estimateRenderRowSize(
     return FOLDER_WORKSPACE_ROW_HEIGHT
   }
   return 116
-}
-
-/** Height the dragged project's section shrinks to, which is exactly its own
- *  header row — so it is measured with the same estimator the virtualizer uses
- *  rather than a restated literal. */
-export function getProjectHeaderCollapsedHeight(args: {
-  rows: readonly RenderRow[]
-  repoId: string
-  firstHeaderIndex: number
-}): number {
-  const headerIndex = args.rows.findIndex(
-    (row) => row.type === 'header' && row.repo?.id === args.repoId
-  )
-  return headerIndex < 0
-    ? DEFAULT_PROJECT_HEADER_COLLAPSED_HEIGHT_PX
-    : estimateRenderRowSize(args.rows, headerIndex, args.firstHeaderIndex, null)
 }
 
 export function getVirtualRowTransform(start: number): string {

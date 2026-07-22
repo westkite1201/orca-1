@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   computeProjectHeaderDropPreview,
+  getProjectHeaderDragSectionHeight,
   measureProjectHeaderDragRects,
   type ProjectHeaderDropPreview
 } from './project-header-drop'
@@ -34,9 +35,7 @@ export function useRepoHeaderDrag({
   usesProjectGroupOrdering,
   onCommitRepoOrder,
   onCommitProjectGroupOrder,
-  getScrollContainer,
-  getCollapseGroupKey,
-  getCollapsedHeaderHeight
+  getScrollContainer
 }: UseRepoHeaderDragArgs): RepoHeaderDragController {
   const [state, setState] = useState<RepoDragState>(INITIAL_REPO_DRAG_STATE)
   const [sessionArmed, setSessionArmed] = useState(false)
@@ -56,10 +55,6 @@ export function useRepoHeaderDrag({
   onCommitProjectGroupOrderRef.current = onCommitProjectGroupOrder
   const getContainerRef = useRef(getScrollContainer)
   getContainerRef.current = getScrollContainer
-  const getCollapsedHeaderHeightRef = useRef(getCollapsedHeaderHeight)
-  getCollapsedHeaderHeightRef.current = getCollapsedHeaderHeight
-  const getCollapseGroupKeyRef = useRef(getCollapseGroupKey)
-  getCollapseGroupKeyRef.current = getCollapseGroupKey
   const dragSessionRef = useRef<ProjectHeaderDragSession | null>(null)
   const clickSwallowTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -71,6 +66,10 @@ export function useRepoHeaderDrag({
     }
     const rects = measureProjectHeaderDragRects(container, session.bucketKey)
     session.headerRects = rects
+    const sectionHeight = getProjectHeaderDragSectionHeight(rects, session.repoId)
+    if (sectionHeight > 0) {
+      session.draggedSectionHeight = sectionHeight
+    }
     return rects
   }, [])
 
@@ -87,7 +86,7 @@ export function useRepoHeaderDrag({
       rects: session.headerRects,
       sidebarRepoHeaderIds: session.sidebarRepoHeaderIds,
       draggedRepoId: session.repoId,
-      collapsedHeaderHeight: getCollapsedHeaderHeightRef.current(session.repoId),
+      draggedSectionHeight: session.draggedSectionHeight,
       contentBottom: container.scrollHeight
     })
   }, [])
@@ -99,12 +98,10 @@ export function useRepoHeaderDrag({
   const applyDrop = useCallback(
     (repoId: string, drop: ProjectHeaderDropPreview | null, pointerOffsetY: number | null) => {
       latestDropIndexRef.current = drop?.dropIndex ?? null
-      const groupKey = getCollapseGroupKeyRef.current(repoId)
       const nextState: RepoDragState = drop
-        ? { draggingRepoId: repoId, draggedGroupKey: groupKey, pointerOffsetY, ...drop }
+        ? { draggingRepoId: repoId, pointerOffsetY, ...drop }
         : {
             draggingRepoId: repoId,
-            draggedGroupKey: groupKey,
             pointerOffsetY,
             dropIndex: null,
             dropIndicatorY: null,
@@ -139,9 +136,8 @@ export function useRepoHeaderDrag({
       // Why: latestDropIndexRef mirrors rendered state, so read it before the
       // reset rather than relying on React to batch the re-render.
       const latestDropIndex = latestDropIndexRef.current
-      // Why: a stranded derived collapse looks to the user like the project
-      // collapsed itself, with no way to undo something they never did. Clear
-      // it before any early return.
+      // Why: reset before an early return so a cancelled drag never leaves a
+      // lifted project section or preview gap behind.
       setState(INITIAL_REPO_DRAG_STATE)
       setSessionArmed(false)
       const session = dragSessionRef.current
@@ -214,7 +210,6 @@ export function useRepoHeaderDrag({
         refreshHeaderRects()
         setState({
           draggingRepoId: session.repoId,
-          draggedGroupKey: session.draggedGroupKey,
           pointerOffsetY: pointerOffsetY(session),
           dropIndex: null,
           dropIndicatorY: null,
@@ -288,7 +283,6 @@ export function useRepoHeaderDrag({
       if (!session) {
         return
       }
-      session.draggedGroupKey = getCollapseGroupKeyRef.current(repoId)
       dragSessionRef.current = session
       setSessionArmed(true)
     },

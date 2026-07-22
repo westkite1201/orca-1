@@ -94,7 +94,6 @@ import {
   getGroupKeysForWorktree,
   getLineageGroupKey,
   getPinnedWorktreeDisplayPolicy,
-  getProjectHeaderRevealTarget,
   type PinnedWorktreeDisplayPolicy
 } from './worktree-list-groups'
 import {
@@ -103,7 +102,6 @@ import {
   extractWorktreeVirtualRowIndexes,
   findStickyHeaderIndexForRepo,
   getActiveStickyIndexesForScroll,
-  getProjectHeaderCollapsedHeight,
   getStickyHeaderIndexes,
   getVirtualRowTransform,
   pruneStaleVirtualRowElementCache,
@@ -162,7 +160,6 @@ import {
   type ScrollToCurrentWorkspaceRevealRequestDetail
 } from '@/lib/scroll-to-current-workspace-status'
 import { isRepoHeaderActionTarget, useRepoHeaderDrag } from './project-header-drag'
-import { withDraggedProjectCollapsed } from './project-header-drag-collapse'
 import {
   getLogicalRepoOrderRankById,
   getSidebarOrderedRepoHeaderIdsByBucket
@@ -698,9 +695,6 @@ type VirtualizedWorktreeViewportProps = {
   allRepoIds: string[]
   onReorderHostSections: (orderedHostIds: ExecutionHostId[]) => void
   onHostDragActiveChange: (active: boolean) => void
-  // Why: rows are built by the parent, so the dragged project's collapse key has
-  // to travel up before the row model can fold it for the duration of the drag.
-  onDraggedProjectGroupKeyChange: (groupKey: string | null) => void
   prCache: AppState['prCache'] | null
   hostedReviewCache: AppState['hostedReviewCache'] | null
   workspaceStatuses: readonly WorkspaceStatusDefinition[]
@@ -1386,7 +1380,6 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
   allRepoIds,
   onReorderHostSections,
   onHostDragActiveChange,
-  onDraggedProjectGroupKeyChange,
   prCache,
   hostedReviewCache,
   workspaceStatuses,
@@ -1814,26 +1807,17 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
     usesProjectGroupOrdering: hasProjectGroups,
     onCommitRepoOrder: commitRepoReorder,
     onCommitProjectGroupOrder: commitProjectGroupOrder,
-    getScrollContainer: () => scrollRef.current,
-    getCollapsedHeaderHeight: (repoId: string) =>
-      getProjectHeaderCollapsedHeight({ rows: renderRows, repoId, firstHeaderIndex }),
-    getCollapseGroupKey: (repoId: string) =>
-      getProjectHeaderRevealTarget(repoId, repoMap, projectGrouping).key
+    getScrollContainer: () => scrollRef.current
   })
-  const draggedProjectGroupKey = canReorderRepoHeaders ? repoDrag.state.draggedGroupKey : null
   const isProjectHeaderDragActive = repoDrag.state.draggingRepoId !== null
   const getRepoSectionDragOffsetY = (rowIndex: number): number =>
     getRepoSectionPreviewOffsetY({
       repoSectionRepoIdByRowIndex,
       rowIndex,
-      previewOffsetsByRepoId: repoDrag.state.previewOffsetsByRepoId
+      previewOffsetsByRepoId: repoDrag.state.previewOffsetsByRepoId,
+      draggingRepoId: repoDrag.state.draggingRepoId,
+      draggedSectionOffsetY: repoDrag.state.pointerOffsetY
     })
-  useEffect(() => {
-    onDraggedProjectGroupKeyChange(draggedProjectGroupKey)
-  }, [draggedProjectGroupKey, onDraggedProjectGroupKeyChange])
-  // Why: a stranded derived collapse reads as the project collapsing itself, so
-  // release it if this viewport unmounts mid-drag.
-  useEffect(() => () => onDraggedProjectGroupKeyChange(null), [onDraggedProjectGroupKeyChange])
   const projectGroupDrag = useProjectGroupHeaderDrag({
     sidebarProjectGroupHeaderIdsByBucket,
     projectGroupById: projectGroupByIdForHeaderDrag,
@@ -4337,12 +4321,6 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   projectGroupPathStatus.reason === 'ambiguous-connection')
               const projectGroupDepth = row.projectGroupDepth ?? 0
               const isHeaderCollapsed = collapsedGroups.has(row.key)
-              // Why: the drag folds the section without touching the user's own
-              // collapse state — the chevron deliberately holds still, but the
-              // announced state must match the section that is actually rendered.
-              const isHeaderSectionFolded =
-                isHeaderCollapsed ||
-                (draggedProjectGroupKey !== null && draggedProjectGroupKey === row.key)
               // Why: repo/project and status headers use the same compact
               // section chrome; flat "All" stays a simple label.
               const showHeaderCollapseAffordance =
@@ -4392,9 +4370,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                     id={getWorktreeOptionId(row.key)}
                     role="button"
                     tabIndex={0}
-                    aria-expanded={
-                      showHeaderCollapseAffordance ? !isHeaderSectionFolded : undefined
-                    }
+                    aria-expanded={showHeaderCollapseAffordance ? !isHeaderCollapsed : undefined}
                     data-repo-header-id={projectIdForHeader}
                     data-repo-header-index={repoHeaderIndex}
                     data-repo-header-bucket={repoHeaderBucketKey}
@@ -5806,14 +5782,6 @@ const WorktreeList = React.memo(function WorktreeList({
     worktreeLineageById,
     worktreeMap
   ])
-  const [draggedProjectGroupKey, setDraggedProjectGroupKey] = useState<string | null>(null)
-  // Why: the dragged project folds to its header row for the duration of the
-  // drag, so the gap that opens is exactly what will move. Derived only — the
-  // stored collapse state is untouched.
-  const collapsedGroupsForRows = useMemo(
-    () => withDraggedProjectCollapsed(effectiveCollapsedGroups, draggedProjectGroupKey),
-    [effectiveCollapsedGroups, draggedProjectGroupKey]
-  )
   const defaultHostId = getSettingsFocusedExecutionHostId(settings)
   const visibleHostIdSet = useMemo(
     () => getVisibleSidebarHostIdSet(visibleWorkspaceHostIds, workspaceHostScope),
@@ -5939,7 +5907,7 @@ const WorktreeList = React.memo(function WorktreeList({
         worktrees,
         repoMap,
         prCache,
-        collapsedGroupsForRows,
+        effectiveCollapsedGroups,
         repoOrder,
         workspaceStatuses,
         projectOrderBy,
@@ -5963,7 +5931,7 @@ const WorktreeList = React.memo(function WorktreeList({
       worktrees,
       repoMap,
       prCache,
-      collapsedGroupsForRows,
+      effectiveCollapsedGroups,
       defaultHostId,
       repoOrder,
       workspaceStatuses,
@@ -7008,7 +6976,6 @@ const WorktreeList = React.memo(function WorktreeList({
         allRepoIds={allRepoIds}
         onReorderHostSections={handleReorderHostSections}
         onHostDragActiveChange={setHostDragActive}
-        onDraggedProjectGroupKeyChange={setDraggedProjectGroupKey}
         prCache={prCache}
         hostedReviewCache={hostedReviewCache}
         workspaceStatuses={workspaceStatuses}
