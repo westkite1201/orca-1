@@ -140,3 +140,34 @@ function pickNearestHeaderBoundarySlot(
     ? beforeNext
     : afterPrev
 }
+
+/**
+ * Per-project pixel offsets that open a gap at `dropIndex`. A dragged project
+ * stays expanded, so every displaced section moves by its full rendered height.
+ */
+export function buildSidebarHeaderPreviewOffsets(args: {
+  orderedIds: readonly string[]
+  draggedId: string
+  dropIndex: number
+  sectionHeight: number
+}): ReadonlyMap<string, number> {
+  const offsets = new Map<string, number>()
+  const fromIndex = args.orderedIds.indexOf(args.draggedId)
+  if (fromIndex === -1) {
+    return offsets
+  }
+  // Dropping onto its own slot, or the boundary just after it, changes nothing.
+  if (args.dropIndex === fromIndex || args.dropIndex === fromIndex + 1) {
+    return offsets
+  }
+  if (args.dropIndex > fromIndex) {
+    for (let index = fromIndex + 1; index < args.dropIndex; index += 1) {
+      offsets.set(args.orderedIds[index]!, -args.sectionHeight)
+    }
+    return offsets
+  }
+  for (let index = args.dropIndex; index < fromIndex; index += 1) {
+    offsets.set(args.orderedIds[index]!, args.sectionHeight)
+  }
+  return offsets
+}

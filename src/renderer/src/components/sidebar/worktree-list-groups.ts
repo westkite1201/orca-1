@@ -462,7 +462,7 @@ function emitPinnedGroup(
   worktrees: Worktree[],
   repoMap: Map<string, Repo>,
   defaultHostId: ExecutionHostId,
-  collapsedGroups: Set<string>,
+  collapsedGroups: ReadonlySet<string>,
   renderedNaturalAnchorRepoIds: ReadonlySet<string>,
   importedWorktreesByRepo: ReadonlyMap<string, ImportedWorktreesCardCandidate>,
   allowImportedFallback: boolean,
@@ -599,7 +599,7 @@ function appendWorktreeRows(
   worktreeMap: Map<string, Worktree>,
   options: {
     nestLineage: boolean
-    collapsedGroups: Set<string>
+    collapsedGroups: ReadonlySet<string>
     groupDepth: number
     sectionKey: string
     hostContextLabelByRepoId?: ReadonlyMap<string, string>
@@ -973,7 +973,7 @@ export function buildRows(
   worktrees: Worktree[],
   repoMap: Map<string, Repo>,
   prCache: Record<string, unknown> | null,
-  collapsedGroups: Set<string>,
+  collapsedGroups: ReadonlySet<string>,
   repoOrder?: Map<string, number>,
   workspaceStatuses: readonly WorkspaceStatusDefinition[] = cloneDefaultWorkspaceStatuses(),
   projectOrderBy: ProjectOrderBy = 'manual',

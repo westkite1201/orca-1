@@ -1,5 +1,6 @@
 import { getEffectiveProjectGroupManualRank } from '../../../../shared/project-groups'
 import {
+  buildSidebarHeaderPreviewOffsets,
   computeWorktreeSidebarHeaderDropPreview,
   type WorktreeSidebarHeaderDropPreview
 } from './worktree-sidebar-header-drop-preview'
@@ -20,7 +21,22 @@ export type ProjectHeaderDragRect = {
   sectionBottom?: number
 }
 
-export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview
+export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview & {
+  previewOffsetsByRepoId: ReadonlyMap<string, number>
+}
+
+export function getProjectHeaderDragSectionHeight(
+  rects: readonly ProjectHeaderDragRect[],
+  repoId: string
+): number {
+  const rect = rects.find((candidate) => candidate.repoId === repoId)
+  if (!rect) {
+    return 0
+  }
+  // Why: the row-model boundary stays available even when a long project's
+  // next header is virtualized out of the DOM during the drag.
+  return Math.max(rect.bottom - rect.top, (rect.sectionBottom ?? rect.bottom) - rect.top)
+}
 
 export function getProjectHeaderDragBucketKey(
   repo: Pick<Repo, 'projectGroupId'>
@@ -171,6 +187,14 @@ export function measureProjectHeaderDragRects(
     })
   })
   rects.sort((left, right) => left.top - right.top)
+  for (const rect of rects) {
+    const nextSibling = rects.find((candidate) => candidate.headerIndex === rect.headerIndex + 1)
+    if (nextSibling) {
+      // Why: card heights are measured at runtime, so the next mounted sibling
+      // gives a truer section boundary than the virtualizer's fallback estimate.
+      rect.sectionBottom = nextSibling.top
+    }
+  }
   return rects
 }
 
@@ -198,10 +222,14 @@ export function computeProjectHeaderDropPreview(args: {
   scrollTop: number
   rects: readonly ProjectHeaderDragRect[]
   sidebarRepoHeaderIds: readonly string[]
+  draggedRepoId: string
+  draggedSectionHeight: number
   contentBottom?: number
 }): ProjectHeaderDropPreview | null {
   const { rects, sidebarRepoHeaderIds } = args
-  return computeWorktreeSidebarHeaderDropPreview({
+  // Why: the shared helper is also used by project group headers, which keep
+  // the insertion line. Offsets are layered on here instead of inside it.
+  const preview = computeWorktreeSidebarHeaderDropPreview({
     pointerY: args.pointerY,
     containerTop: args.containerTop,
     scrollTop: args.scrollTop,
@@ -210,6 +238,18 @@ export function computeProjectHeaderDropPreview(args: {
     getId: (rect) => rect.repoId,
     contentBottom: args.contentBottom
   })
+  if (!preview) {
+    return null
+  }
+  return {
+    ...preview,
+    previewOffsetsByRepoId: buildSidebarHeaderPreviewOffsets({
+      orderedIds: sidebarRepoHeaderIds,
+      draggedId: args.draggedRepoId,
+      dropIndex: preview.dropIndex,
+      sectionHeight: args.draggedSectionHeight
+    })
+  }
 }
 
 export function applyAllRepoInsertAt(
