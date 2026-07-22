@@ -4,12 +4,14 @@ import { describe, expect, it } from 'vitest'
 import {
   applyAllRepoInsertAt,
   computeProjectHeaderDropPreview,
+  getProjectHeaderDragSectionHeight,
   getLogicalRepoOrderRankById,
   getProjectGroupOrderForSidebarDrop,
   getProjectHeaderDragBucketKey,
   getSidebarOrderedRepoHeaderIdsByBucket,
   mapSidebarProjectHeaderDropIndexToSiblingInsertIndex,
-  mapSidebarRepoDropIndexToAllRepoInsertAt
+  mapSidebarRepoDropIndexToAllRepoInsertAt,
+  measureProjectHeaderDragRects
 } from './project-header-drop'
 import type { Row } from './worktree-list-groups'
 import type { Repo } from '../../../../shared/types'
@@ -117,6 +119,42 @@ describe('mapSidebarProjectHeaderDropIndexToSiblingInsertIndex', () => {
 })
 
 describe('computeProjectHeaderDropPreview', () => {
+  it('uses the next mounted sibling as the project section boundary', () => {
+    const container = document.createElement('div')
+    container.getBoundingClientRect = () => new DOMRect(0, 0, 100, 500)
+    const appendHeader = (repoId: string, index: number, top: number, sectionBottom: number) => {
+      const header = document.createElement('div')
+      header.setAttribute('data-repo-header-id', repoId)
+      header.setAttribute('data-repo-header-bucket', 'ungrouped')
+      header.setAttribute('data-repo-header-index', String(index))
+      header.setAttribute('data-repo-header-section-end', String(sectionBottom))
+      header.getBoundingClientRect = () => new DOMRect(0, top, 100, 28)
+      container.append(header)
+    }
+    appendHeader('a', 0, 100, 600)
+    appendHeader('b', 1, 244, 700)
+
+    expect(measureProjectHeaderDragRects(container, 'ungrouped')[0]?.sectionBottom).toBe(244)
+  })
+
+  it('uses the measured expanded project section height', () => {
+    expect(
+      getProjectHeaderDragSectionHeight(
+        [
+          {
+            repoId: 'a',
+            bucketKey: 'ungrouped',
+            headerIndex: 0,
+            top: 100,
+            bottom: 128,
+            sectionBottom: 276
+          }
+        ],
+        'a'
+      )
+    ).toBe(176)
+  })
+
   it('uses row-model header indices instead of mounted subset order', () => {
     const preview = computeProjectHeaderDropPreview({
       pointerY: 105,
@@ -129,13 +167,13 @@ describe('computeProjectHeaderDropPreview', () => {
         { repoId: 'd', bucketKey: 'ungrouped', headerIndex: 3, top: 300, bottom: 328 }
       ],
       draggedRepoId: 'd',
-      collapsedHeaderHeight: 28
+      draggedSectionHeight: 96
     })
 
-    // 'd' (index 3) moves back to index 1; the headers it jumps over, 'b' and
-    // 'c', each shift down by one collapsed row while it is above them.
+    // 'd' (index 3) moves back to index 1; the sections it jumps over, 'b' and
+    // 'c', each shift down by its full height while it is above them.
     expect(preview?.dropIndex).toBe(1)
-    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: 28, c: 28 })
+    expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: 96, c: 96 })
   })
 
   it('supports boundary drops at the end of the full sidebar list', () => {
@@ -155,11 +193,11 @@ describe('computeProjectHeaderDropPreview', () => {
         }
       ],
       draggedRepoId: 'a',
-      collapsedHeaderHeight: 28
+      draggedSectionHeight: 28
     })
 
-    // 'a' (index 0) moves to the end; 'b' and 'c' each shift up by one
-    // collapsed row to close the gap it leaves behind.
+    // 'a' (index 0) moves to the end; 'b' and 'c' each shift up by its section
+    // height to close the gap it leaves behind.
     expect(preview?.dropIndex).toBe(3)
     expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: -28, c: -28 })
   })
@@ -182,11 +220,11 @@ describe('computeProjectHeaderDropPreview', () => {
         }
       ],
       draggedRepoId: 'b',
-      collapsedHeaderHeight: 28
+      draggedSectionHeight: 28
     })
 
     // Only boundary available is 'c's section bottom → drop after 'c' (slot 3).
-    // 'b' (index 1) moves past 'c', which shifts up by one collapsed row.
+    // 'b' (index 1) moves past 'c', which shifts up by its section height.
     expect(preview?.dropIndex).toBe(3)
     expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ c: -28 })
   })
@@ -210,7 +248,7 @@ describe('computeProjectHeaderDropPreview', () => {
         { repoId: 'b', bucketKey: 'ungrouped', headerIndex: 1, top: nextHeaderTop, bottom: 248 }
       ],
       draggedRepoId: 'a',
-      collapsedHeaderHeight: 28
+      draggedSectionHeight: 28
     })
 
     // pointerY 150 sits in 'a's body; nearer boundary is 'b's top (216 vs 224).
@@ -258,7 +296,7 @@ describe('computeProjectHeaderDropPreview', () => {
         sidebarRepoHeaderIds: ['a', 'b'],
         rects: gapRects.map((rect) => ({ ...rect })),
         draggedRepoId: 'a',
-        collapsedHeaderHeight: 28
+        draggedSectionHeight: 28
       })
 
       // With only two headers, dropIndex 1 is 'a's own post-removal slot: no-op.
@@ -274,7 +312,7 @@ describe('computeProjectHeaderDropPreview', () => {
         sidebarRepoHeaderIds: ['a', 'b'],
         rects: gapRects.map((rect) => ({ ...rect })),
         draggedRepoId: 'a',
-        collapsedHeaderHeight: 28
+        draggedSectionHeight: 28
       })
 
       expect(preview?.dropIndex).toBe(1)
@@ -289,7 +327,7 @@ describe('computeProjectHeaderDropPreview', () => {
         sidebarRepoHeaderIds: ['a', 'b'],
         rects: gapRects.map((rect) => ({ ...rect })),
         draggedRepoId: 'a',
-        collapsedHeaderHeight: 28
+        draggedSectionHeight: 28
       })
 
       expect(preview?.dropIndex).toBe(1)
@@ -318,7 +356,7 @@ describe('computeProjectHeaderDropPreview', () => {
         rects: lastRects.map((rect) => ({ ...rect })),
         contentBottom,
         draggedRepoId: 'a',
-        collapsedHeaderHeight: 28
+        draggedSectionHeight: 28
       })
 
     it('rejects a drop below the measured content when the estimate overshoots', () => {
@@ -335,7 +373,7 @@ describe('computeProjectHeaderDropPreview', () => {
 
     it('still snaps within the measured content when the estimate overshoots', () => {
       // 335 is inside the real last section (ends at 340) → drop after 'c'.
-      // 'a' (index 0) moves to the end; 'b' and 'c' each shift up one row.
+      // 'a' (index 0) moves to the end; 'b' and 'c' each shift up one section.
       const preview = lastPreview(335, 340)
 
       expect(preview?.dropIndex).toBe(3)

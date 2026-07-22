@@ -55,7 +55,7 @@ const reactActGlobal = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 reactActGlobal.IS_REACT_ACT_ENVIRONMENT = true
 
 const POINTER_ID = 7
-const COLLAPSED_HEADER_HEIGHT = 28
+const HEADER_HEIGHT = 28
 const SCROLL_CONTENT_HEIGHT = 200
 const HEADER_IDS = ['repo-1', 'repo-2']
 // Lands in the lower half of repo-2's band, so the drop index moves repo-1 last.
@@ -79,9 +79,7 @@ function Harness({ onCommitRepoOrder }: { onCommitRepoOrder: (ids: string[]) => 
     usesProjectGroupOrdering: false,
     onCommitRepoOrder,
     onCommitProjectGroupOrder: () => {},
-    getScrollContainer: () => scrollRef.current,
-    getCollapsedHeaderHeight: () => COLLAPSED_HEADER_HEIGHT,
-    getCollapseGroupKey: (repoId: string) => `repo:${repoId}`
+    getScrollContainer: () => scrollRef.current
   })
   latestState = controller.state
   return (
@@ -129,8 +127,7 @@ function stubHeaderLayout(container: HTMLElement): void {
   // scroll needs a plain writable stand-in to be observable at all.
   Object.defineProperty(scrollEl, 'scrollTop', { value: 0, writable: true, configurable: true })
   scrollEl.querySelectorAll<HTMLElement>('[data-repo-header-id]').forEach((element, index) => {
-    element.getBoundingClientRect = () =>
-      makeRect(index * COLLAPSED_HEADER_HEIGHT, COLLAPSED_HEADER_HEIGHT)
+    element.getBoundingClientRect = () => makeRect(index * HEADER_HEIGHT, HEADER_HEIGHT)
   })
 }
 
@@ -162,8 +159,9 @@ function startPromotedDrag(container: HTMLElement): void {
 }
 
 describe('project header drag cancellation', () => {
-  // Why: separate cases rather than one shared assertion — a stranded collapse
-  // is the worst user-visible failure here, so each exit path gets its own gate.
+  // Why: separate cases rather than one shared assertion — a header stranded in
+  // its lifted state is the worst user-visible failure, so each exit path gets
+  // its own gate.
   const CANCELS: [string, () => void][] = [
     ['Escape', () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))],
     [
@@ -173,16 +171,16 @@ describe('project header drag cancellation', () => {
     ['window blur', () => window.dispatchEvent(new Event('blur'))]
   ]
 
-  it.each(CANCELS)('clears the derived collapse when the drag ends via %s', (_label, cancel) => {
+  it.each(CANCELS)('clears the drag state when the drag ends via %s', (_label, cancel) => {
     const { root, container } = mountHarness()
     startPromotedDrag(container)
-    expect(latestState.draggedGroupKey).toBe('repo:repo-1')
-    expect(latestState.previewOffsetsByRepoId.get('repo-2')).toBe(-COLLAPSED_HEADER_HEIGHT)
+    expect(latestState.draggingRepoId).toBe('repo-1')
+    expect(latestState.previewOffsetsByRepoId.get('repo-2')).toBe(-HEADER_HEIGHT)
 
     act(() => cancel())
 
-    expect(latestState.draggedGroupKey).toBeNull()
     expect(latestState.draggingRepoId).toBeNull()
+    expect(latestState.pointerOffsetY).toBeNull()
     expect(latestState.previewOffsetsByRepoId.size).toBe(0)
     act(() => root.unmount())
   })
@@ -289,10 +287,10 @@ describe('project header drag commit', () => {
     // DRAG_POINTER_Y lands in the lower half of repo-2's band (see constant
     // comment above), so repo-1 moves to the end of the two-header fixture.
     expect(onCommitRepoOrder).toHaveBeenCalledExactlyOnceWith(['repo-2', 'repo-1'])
-    // Why: pointerup is the most common exit path — the derived collapse must
-    // release here exactly as it does on the cancellation paths above.
-    expect(latestState.draggedGroupKey).toBeNull()
+    // Why: pointerup is the most common exit path — the drag state must release
+    // here exactly as it does on the cancellation paths above.
     expect(latestState.draggingRepoId).toBeNull()
+    expect(latestState.pointerOffsetY).toBeNull()
     expect(latestState.previewOffsetsByRepoId.size).toBe(0)
     act(() => root.unmount())
   })

@@ -89,7 +89,7 @@ vi.mock('@/hooks/useVirtualizedScrollAnchor', () => ({
 }))
 
 // Why: reuse the real idle state so the mock keeps every RepoDragState field the
-// renderer reads (preview offsets, collapse key) in sync with the contract.
+// renderer reads (preview offsets, pointer state) in sync with the contract.
 vi.mock('./project-header-drag', async () => {
   const { INITIAL_REPO_DRAG_STATE } = await import('./project-header-drag-contract')
   return {

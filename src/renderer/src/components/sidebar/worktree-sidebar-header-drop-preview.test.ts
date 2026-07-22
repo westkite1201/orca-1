@@ -6,7 +6,7 @@ import {
 } from './worktree-sidebar-header-drop-preview'
 
 const IDS = ['a', 'b', 'c', 'd']
-const H = 28
+const SECTION_HEIGHT = 116
 
 function offsets(draggedId: string, dropIndex: number): Record<string, number> {
   return Object.fromEntries(
@@ -14,20 +14,20 @@ function offsets(draggedId: string, dropIndex: number): Record<string, number> {
       orderedIds: IDS,
       draggedId,
       dropIndex,
-      collapsedHeaderHeight: H
+      sectionHeight: SECTION_HEIGHT
     })
   )
 }
 
 describe('buildSidebarHeaderPreviewOffsets', () => {
-  it('shifts passed headers up when dragging down', () => {
+  it('shifts passed sections up when dragging down', () => {
     // 'a' (index 0) dropped at slot 3 passes 'b' and 'c'.
-    expect(offsets('a', 3)).toEqual({ b: -H, c: -H })
+    expect(offsets('a', 3)).toEqual({ b: -SECTION_HEIGHT, c: -SECTION_HEIGHT })
   })
 
-  it('shifts passed headers down when dragging up', () => {
+  it('shifts passed sections down when dragging up', () => {
     // 'd' (index 3) dropped at slot 1 passes 'b' and 'c'.
-    expect(offsets('d', 1)).toEqual({ b: H, c: H })
+    expect(offsets('d', 1)).toEqual({ b: SECTION_HEIGHT, c: SECTION_HEIGHT })
   })
 
   it('returns an empty map for a no-op drop', () => {
@@ -37,15 +37,19 @@ describe('buildSidebarHeaderPreviewOffsets', () => {
   })
 
   it('handles drops clamped at both ends', () => {
-    expect(offsets('d', 0)).toEqual({ a: H, b: H, c: H })
-    expect(offsets('a', IDS.length)).toEqual({ b: -H, c: -H, d: -H })
+    expect(offsets('d', 0)).toEqual({ a: SECTION_HEIGHT, b: SECTION_HEIGHT, c: SECTION_HEIGHT })
+    expect(offsets('a', IDS.length)).toEqual({
+      b: -SECTION_HEIGHT,
+      c: -SECTION_HEIGHT,
+      d: -SECTION_HEIGHT
+    })
   })
 
   it('returns an empty map when the dragged id is not in the list', () => {
     expect(offsets('missing', 2)).toEqual({})
   })
 
-  it('never includes the dragged header itself', () => {
+  it('never includes the dragged project itself', () => {
     expect(offsets('a', 3)).not.toHaveProperty('a')
   })
 })
