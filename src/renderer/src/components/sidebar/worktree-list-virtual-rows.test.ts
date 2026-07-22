@@ -201,6 +201,48 @@ describe('sticky slot while a project header is dragged', () => {
     expect(indexes).toContain(0)
   })
 
+  it('keeps the dragged header itself mounted when autoscroll carries the range past it', () => {
+    // rows: [repo-1 header, item, repo-2 header, item, repo-3 header, item x5]
+    // Dragging repo-1 (index 0) toward the bottom edge: the visible range sits
+    // near the end, well past repo-3's active/previous sticky pair (4/2), so
+    // neither the active-sticky, previous-sticky, nor handoff path (which
+    // resolves to null — index 0 has no previous sticky header) would mount
+    // it. Only force-mounting draggedIndex itself keeps it alive.
+    const farRows: RenderRow[] = [
+      { ...groupRow('repo:repo-1'), repo: { id: 'repo-1' } } as RenderRow,
+      itemStub('wt-1'),
+      { ...groupRow('repo:repo-2'), repo: { id: 'repo-2' } } as RenderRow,
+      itemStub('wt-2'),
+      { ...groupRow('repo:repo-3'), repo: { id: 'repo-3' } } as RenderRow,
+      itemStub('wt-3'),
+      itemStub('wt-4'),
+      itemStub('wt-5'),
+      itemStub('wt-6'),
+      itemStub('wt-7')
+    ]
+    const farSticky = getStickyHeaderIndexes(farRows)
+    const farDraggedIndex = findStickyHeaderIndexForRepo({
+      rows: farRows,
+      stickyHeaderIndexes: farSticky,
+      repoId: 'repo-1'
+    })
+    expect(farDraggedIndex).toBe(0)
+
+    const indexes = extractWorktreeVirtualRowIndexes({
+      range: {
+        startIndex: 8,
+        endIndex: 9,
+        overscan: 0,
+        count: farRows.length,
+        getItemIndex: (i: number) => i
+      } as never,
+      stickyHeaderIndexes: farSticky,
+      rows: farRows,
+      draggedStickyHeaderIndex: farDraggedIndex
+    })
+    expect(indexes).toContain(0)
+  })
+
   it('returns the sticky indexes untouched when nothing is dragged', () => {
     expect(excludeStickyHeaderIndex(repoSticky, null)).toBe(repoSticky)
     expect(
