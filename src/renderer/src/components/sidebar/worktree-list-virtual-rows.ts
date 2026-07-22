@@ -311,12 +311,16 @@ export function extractWorktreeVirtualRowIndexes(args: {
     draggedIndex === null
       ? null
       : getPreviousStickyHeaderIndex(args.stickyHeaderIndexes, draggedIndex)
+  // Why: the dragged header itself follows the pointer via a transform, so it
+  // must stay mounted even when autoscroll carries the default range past its
+  // home slot — otherwise it unmounts mid-drag and vanishes under the cursor.
   return Array.from(
     new Set([
       activeStickyHeaderIndex,
       ...(previousStickyHeaderIndex === null ? [] : [previousStickyHeaderIndex]),
       ...(activeHostIndex === null ? [] : [activeHostIndex]),
       ...(stickyHandoffIndex === null ? [] : [stickyHandoffIndex]),
+      ...(draggedIndex === null ? [] : [draggedIndex]),
       ...defaultRangeExtractor(args.range)
     ])
   ).sort((a, b) => a - b)
