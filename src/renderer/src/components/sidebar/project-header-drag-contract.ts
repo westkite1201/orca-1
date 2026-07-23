@@ -9,18 +9,24 @@ export type RepoDragState = {
   draggingRepoId: string | null
   dropIndex: number | null
   dropIndicatorY: number | null
+  dropPlaceholderY: number | null
+  dropPlaceholderHeight: number
   previewOffsetsByRepoId: ReadonlyMap<string, number>
   // Pointer Y travel since the drag started, so the dragged header can follow
   // the cursor instead of only lifting in place. Null until the drag promotes.
   pointerOffsetY: number | null
+  settling: boolean
 }
 
 export const INITIAL_REPO_DRAG_STATE: RepoDragState = {
   draggingRepoId: null,
   dropIndex: null,
   dropIndicatorY: null,
+  dropPlaceholderY: null,
+  dropPlaceholderHeight: 0,
   previewOffsetsByRepoId: EMPTY_HEADER_PREVIEW_OFFSETS,
-  pointerOffsetY: null
+  pointerOffsetY: null,
+  settling: false
 }
 
 export type UseRepoHeaderDragArgs = {
@@ -28,8 +34,12 @@ export type UseRepoHeaderDragArgs = {
   sidebarRepoHeaderIdsByBucket: ReadonlyMap<ProjectHeaderDragBucketKey, readonly string[]>
   repoById: ReadonlyMap<string, Repo>
   usesProjectGroupOrdering: boolean
-  onCommitRepoOrder: (orderedIds: string[]) => void
-  onCommitProjectGroupOrder: (repoId: string, projectGroupId: string | null, order: number) => void
+  onCommitRepoOrder: (orderedIds: string[]) => void | Promise<void>
+  onCommitProjectGroupOrder: (
+    repoId: string,
+    projectGroupId: string | null,
+    order: number
+  ) => void | Promise<void>
   getScrollContainer: () => HTMLElement | null
 }
 
@@ -88,6 +98,7 @@ export function haveSameHeaderPreviewOffsets(
 }
 
 export const PROJECT_HEADER_DRAG_THRESHOLD_PX = 4
+export const PROJECT_HEADER_DROP_SETTLE_MS = 150
 
 const REPO_HEADER_DRAG_HANDLE_SELECTOR = '[data-repo-header-drag-handle]'
 

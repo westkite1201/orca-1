@@ -210,6 +210,7 @@ describe('project header drag preview offsets', () => {
 
 describe('project header drag pointer offset', () => {
   it('is null before promotion, tracks the pointer, and clears when the drag ends', () => {
+    vi.useFakeTimers()
     const { root, container } = mountHarness()
     const handle = container.querySelector('[data-repo-header-drag-handle]')!
     act(() => {
@@ -244,8 +245,11 @@ describe('project header drag pointer offset', () => {
         new PointerEvent('pointerup', { pointerId: POINTER_ID, clientY: DRAG_POINTER_Y + 6 })
       )
     })
+    expect(latestState.settling).toBe(true)
+    act(() => vi.advanceTimersByTime(150))
     expect(latestState.pointerOffsetY).toBeNull()
     act(() => root.unmount())
+    vi.useRealTimers()
   })
 })
 
@@ -274,6 +278,7 @@ describe('project header drag pointer offset across a scroll', () => {
 
 describe('project header drag commit', () => {
   it('still commits a reorder on pointerup', () => {
+    vi.useFakeTimers()
     const onCommitRepoOrder = vi.fn()
     const { root, container } = mountHarness(onCommitRepoOrder)
     startPromotedDrag(container)
@@ -284,14 +289,17 @@ describe('project header drag commit', () => {
       )
     })
 
-    // DRAG_POINTER_Y lands in the lower half of repo-2's band (see constant
-    // comment above), so repo-1 moves to the end of the two-header fixture.
+    expect(latestState.settling).toBe(true)
+    expect(onCommitRepoOrder).not.toHaveBeenCalled()
+
+    act(() => vi.advanceTimersByTime(150))
+
+    // The visual settles into the placeholder before the persisted reorder.
     expect(onCommitRepoOrder).toHaveBeenCalledExactlyOnceWith(['repo-2', 'repo-1'])
-    // Why: pointerup is the most common exit path — the drag state must release
-    // here exactly as it does on the cancellation paths above.
     expect(latestState.draggingRepoId).toBeNull()
     expect(latestState.pointerOffsetY).toBeNull()
     expect(latestState.previewOffsetsByRepoId.size).toBe(0)
     act(() => root.unmount())
+    vi.useRealTimers()
   })
 })

@@ -199,7 +199,26 @@ describe('computeProjectHeaderDropPreview', () => {
     // 'a' (index 0) moves to the end; 'b' and 'c' each shift up by its section
     // height to close the gap it leaves behind.
     expect(preview?.dropIndex).toBe(3)
+    expect(preview?.dropPlaceholderY).toBe(352)
     expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({ b: -28, c: -28 })
+  })
+
+  it('anchors an upward placeholder at the target slot without assuming equal heights', () => {
+    const preview = computeProjectHeaderDropPreview({
+      pointerY: 105,
+      containerTop: 0,
+      scrollTop: 0,
+      sidebarRepoHeaderIds: ['a', 'b', 'c'],
+      rects: [
+        { repoId: 'a', bucketKey: 'ungrouped', headerIndex: 0, top: 100, bottom: 128 },
+        { repoId: 'b', bucketKey: 'ungrouped', headerIndex: 1, top: 260, bottom: 288 },
+        { repoId: 'c', bucketKey: 'ungrouped', headerIndex: 2, top: 340, bottom: 368 }
+      ],
+      draggedRepoId: 'c',
+      draggedSectionHeight: 80
+    })
+
+    expect(preview?.dropPlaceholderY).toBe(100)
   })
 
   it('snaps a drop inside the last expanded project section to its bottom boundary', () => {
@@ -254,6 +273,8 @@ describe('computeProjectHeaderDropPreview', () => {
     // pointerY 150 sits in 'a's body; nearer boundary is 'b's top (216 vs 224).
     // With only two headers, dropIndex 1 is 'a's own post-removal slot: no-op.
     expect(preview?.dropIndex).toBe(1)
+    expect(preview?.dropPlaceholderY).toBe(100)
+    expect(preview?.dropPlaceholderHeight).toBe(28)
     expect(Object.fromEntries(preview!.previewOffsetsByRepoId)).toEqual({})
   })
 
