@@ -326,6 +326,8 @@ type ProjectGroupDeleteDialogState = {
 // Prevents jarring position shifts when background events (AI starting work,
 // terminal title changes) trigger score recalculations.
 const SORT_SETTLE_MS = 3_000
+const PROJECT_HEADER_DRAG_TRANSITION_CLASS =
+  'transition-transform duration-150 ease-out will-change-transform motion-reduce:transition-none'
 const USER_SCROLL_MEASUREMENT_ADJUSTMENT_SUPPRESS_MS = 500
 const EMPTY_PROJECT_GROUPS: readonly ProjectGroup[] = []
 const EMPTY_AGENT_STATUS_BY_PANE_KEY: AppState['agentStatusByPaneKey'] = {}
@@ -1736,7 +1738,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
   }, [sidebarProjectGroupHeaderIdsByBucket])
   const commitProjectGroupOrder = useCallback(
     (repoId: string, projectGroupId: string | null, order: number) => {
-      void moveProjectToGroup(repoId, projectGroupId, order)
+      return moveProjectToGroup(repoId, projectGroupId, order).then(() => undefined)
     },
     [moveProjectToGroup]
   )
@@ -4118,6 +4120,17 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
           className="relative w-full"
           style={{ height: `${virtualizer.getTotalSize()}px` }}
         >
+          {repoDrag.state.dropPlaceholderY !== null && repoDrag.state.dropPlaceholderHeight > 0 ? (
+            <div
+              role="presentation"
+              data-repo-drop-placeholder
+              className="pointer-events-none absolute left-2 right-2 z-10 rounded-md border border-dashed border-worktree-sidebar-ring/70 bg-worktree-sidebar-accent/35 transition-[top,height] duration-150 ease-out motion-reduce:transition-none"
+              style={{
+                top: `${repoDrag.state.dropPlaceholderY}px`,
+                height: `${repoDrag.state.dropPlaceholderHeight}px`
+              }}
+            />
+          ) : null}
           {canReorderProjectGroupHeaders &&
           projectGroupDrag.state.draggingGroupId !== null &&
           projectGroupDrag.state.dropIndicatorY !== null ? (
@@ -4330,8 +4343,8 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                     // Why: a transition on the dragged row would make it lag the
                     // cursor, so only the parting neighbours animate.
                     repoDrag.state.draggingRepoId !== null &&
-                      !isDraggingThis &&
-                      'transition-transform duration-150 ease-out will-change-transform',
+                      (!isDraggingThis || repoDrag.state.settling) &&
+                      PROJECT_HEADER_DRAG_TRANSITION_CLASS,
                     isDraggingThis && 'z-30 will-change-transform'
                   )}
                   style={
@@ -5073,7 +5086,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   className={cn(
                     'absolute left-0 right-0 top-0',
                     (worktreeDragState.draggingWorktreeId !== null || isProjectHeaderDragActive) &&
-                      'transition-transform duration-150 ease-out will-change-transform'
+                      PROJECT_HEADER_DRAG_TRANSITION_CLASS
                   )}
                   style={{
                     transform: getWorktreeVirtualRowTransform(
@@ -5109,8 +5122,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   ref={measureVirtualRowElement}
                   className={cn(
                     'absolute left-0 right-0 top-0',
-                    isProjectHeaderDragActive &&
-                      'transition-transform duration-150 ease-out will-change-transform'
+                    isProjectHeaderDragActive && PROJECT_HEADER_DRAG_TRANSITION_CLASS
                   )}
                   style={{
                     transform: getVirtualRowTransform(
@@ -5148,8 +5160,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   ref={measureVirtualRowElement}
                   className={cn(
                     'absolute left-0 right-0 top-0',
-                    isProjectHeaderDragActive &&
-                      'transition-transform duration-150 ease-out will-change-transform'
+                    isProjectHeaderDragActive && PROJECT_HEADER_DRAG_TRANSITION_CLASS
                   )}
                   style={{
                     transform: getVirtualRowTransform(
@@ -5185,8 +5196,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   ref={measureVirtualRowElement}
                   className={cn(
                     'absolute left-0 right-0 top-0 px-2 pb-1.5',
-                    isProjectHeaderDragActive &&
-                      'transition-transform duration-150 ease-out will-change-transform'
+                    isProjectHeaderDragActive && PROJECT_HEADER_DRAG_TRANSITION_CLASS
                   )}
                   style={{
                     transform: getVirtualRowTransform(
@@ -5245,8 +5255,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                   ref={measureVirtualRowElement}
                   className={cn(
                     'absolute left-0 right-0 top-0',
-                    isProjectHeaderDragActive &&
-                      'transition-transform duration-150 ease-out will-change-transform'
+                    isProjectHeaderDragActive && PROJECT_HEADER_DRAG_TRANSITION_CLASS
                   )}
                   style={{
                     transform: getVirtualRowTransform(
@@ -5309,7 +5318,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                 className={cn(
                   'absolute left-0 right-0 top-0',
                   (worktreeDragState.draggingWorktreeId !== null || isProjectHeaderDragActive) &&
-                    'transition-transform duration-150 ease-out will-change-transform'
+                    PROJECT_HEADER_DRAG_TRANSITION_CLASS
                 )}
                 style={{
                   transform: getWorktreeVirtualRowTransform(

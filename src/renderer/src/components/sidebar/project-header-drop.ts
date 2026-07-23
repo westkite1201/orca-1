@@ -22,6 +22,8 @@ export type ProjectHeaderDragRect = {
 }
 
 export type ProjectHeaderDropPreview = WorktreeSidebarHeaderDropPreview & {
+  dropPlaceholderY: number | null
+  dropPlaceholderHeight: number
   previewOffsetsByRepoId: ReadonlyMap<string, number>
 }
 
@@ -241,8 +243,20 @@ export function computeProjectHeaderDropPreview(args: {
   if (!preview) {
     return null
   }
+  const sourceIndex = sidebarRepoHeaderIds.indexOf(args.draggedRepoId)
+  const sourceRect = rects.find((rect) => rect.repoId === args.draggedRepoId)
+  const isSourceSlot = preview.dropIndex === sourceIndex || preview.dropIndex === sourceIndex + 1
   return {
     ...preview,
+    // Why: sections passed on a downward move have already shifted upward by
+    // the source height, so the placeholder must follow that opened gap.
+    dropPlaceholderY:
+      sourceIndex === -1
+        ? null
+        : isSourceSlot && sourceRect
+          ? sourceRect.top
+          : preview.dropSlotY - (preview.dropIndex > sourceIndex ? args.draggedSectionHeight : 0),
+    dropPlaceholderHeight: args.draggedSectionHeight,
     previewOffsetsByRepoId: buildSidebarHeaderPreviewOffsets({
       orderedIds: sidebarRepoHeaderIds,
       draggedId: args.draggedRepoId,

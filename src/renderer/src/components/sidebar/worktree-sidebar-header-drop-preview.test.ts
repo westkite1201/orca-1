@@ -86,17 +86,29 @@ describe('computeWorktreeSidebarHeaderDropPreview — interior-gap boundary snap
 
   it('snaps to the previous header boundary when the pointer sits nearer it', () => {
     // 205 sits in the gap between 'a' and 'b', closer to 204 than to 236.
-    expect(previewAt(prevBoundaryY + 1)).toEqual({ dropIndex: 1, dropIndicatorY: prevBoundaryY })
+    expect(previewAt(prevBoundaryY + 1)).toEqual({
+      dropIndex: 1,
+      dropIndicatorY: prevBoundaryY,
+      dropSlotY: prevSectionBottom
+    })
   })
 
   it('snaps to the next header boundary when the pointer sits nearer it', () => {
     // 235 sits in the gap between 'a' and 'b', closer to 236 than to 204.
-    expect(previewAt(nextBoundaryY - 1)).toEqual({ dropIndex: 1, dropIndicatorY: nextBoundaryY })
+    expect(previewAt(nextBoundaryY - 1)).toEqual({
+      dropIndex: 1,
+      dropIndicatorY: nextBoundaryY,
+      dropSlotY: nextHeaderTop
+    })
   })
 
   it('breaks an exact midpoint tie toward the next header boundary', () => {
     // worktree-sidebar-header-drop-preview.ts:138 documents ties resolving to
     // the next header's boundary.
-    expect(previewAt(midpointY)).toEqual({ dropIndex: 1, dropIndicatorY: nextBoundaryY })
+    expect(previewAt(midpointY)).toEqual({
+      dropIndex: 1,
+      dropIndicatorY: nextBoundaryY,
+      dropSlotY: nextHeaderTop
+    })
   })
 })
