@@ -6,9 +6,8 @@ import {
   measureProjectHeaderDragRects,
   type ProjectHeaderDropPreview
 } from './project-header-drop'
-import { suppressClickAfterProjectHeaderDrag } from './project-header-drag-click-suppression'
-import { commitProjectHeaderDragDrop } from './project-header-drag-commit'
 import { useProjectHeaderDragCursor } from './project-header-drag-cursor'
+import { endProjectHeaderDrag } from './project-header-drag-end'
 import {
   EMPTY_HEADER_PREVIEW_OFFSETS,
   getProjectHeaderDragPointerOffsetY,
@@ -40,6 +39,8 @@ export function useRepoHeaderDrag({
   const [state, setState] = useState<RepoDragState>(INITIAL_REPO_DRAG_STATE)
   const [sessionArmed, setSessionArmed] = useState(false)
   const latestDropIndexRef = useRef<number | null>(null)
+  const latestDropPreviewRef = useRef<ProjectHeaderDropPreview | null>(null)
+  const settlingRef = useRef(false)
   latestDropIndexRef.current = state.dropIndex
   const orderedIdsRef = useRef(orderedRepoIds)
   orderedIdsRef.current = orderedRepoIds
@@ -98,19 +99,26 @@ export function useRepoHeaderDrag({
   const applyDrop = useCallback(
     (repoId: string, drop: ProjectHeaderDropPreview | null, pointerOffsetY: number | null) => {
       latestDropIndexRef.current = drop?.dropIndex ?? null
+      latestDropPreviewRef.current = drop
       const nextState: RepoDragState = drop
-        ? { draggingRepoId: repoId, pointerOffsetY, ...drop }
+        ? { draggingRepoId: repoId, pointerOffsetY, settling: false, ...drop }
         : {
             draggingRepoId: repoId,
             pointerOffsetY,
+            settling: false,
             dropIndex: null,
             dropIndicatorY: null,
+            dropPlaceholderY: null,
+            dropPlaceholderHeight: 0,
             previewOffsetsByRepoId: EMPTY_HEADER_PREVIEW_OFFSETS
           }
       setState((prev) =>
         prev.draggingRepoId === nextState.draggingRepoId &&
         prev.dropIndex === nextState.dropIndex &&
         prev.dropIndicatorY === nextState.dropIndicatorY &&
+        prev.dropPlaceholderY === nextState.dropPlaceholderY &&
+        prev.dropPlaceholderHeight === nextState.dropPlaceholderHeight &&
+        prev.settling === nextState.settling &&
         // Why: the pointer delta moves on nearly every frame, so it has to take
         // part in the bail-out or the dragged header would never re-render.
         prev.pointerOffsetY === nextState.pointerOffsetY &&
@@ -133,45 +141,32 @@ export function useRepoHeaderDrag({
   const endDrag = useCallback(
     (commit: boolean) => {
       cancelAutoscroll()
-      // Why: latestDropIndexRef mirrors rendered state, so read it before the
-      // reset rather than relying on React to batch the re-render.
-      const latestDropIndex = latestDropIndexRef.current
-      // Why: reset before an early return so a cancelled drag never leaves a
-      // lifted project section or preview gap behind.
-      setState(INITIAL_REPO_DRAG_STATE)
       setSessionArmed(false)
       const session = dragSessionRef.current
-      if (!session) {
-        return
-      }
-      try {
-        session.handleEl.releasePointerCapture(session.pointerId)
-      } catch {
-        // capture may already be released (pointercancel, element unmounted)
-      }
-      if (session.promoted) {
-        clickSwallowTimeoutRef.current = suppressClickAfterProjectHeaderDrag(
-          session.handleEl,
-          () => {
-            clickSwallowTimeoutRef.current = null
-          }
-        )
-      }
-      const sidebarDropIndex =
-        commit && session.promoted && latestDropIndex !== null ? latestDropIndex : null
       dragSessionRef.current = null
-      if (sidebarDropIndex === null) {
-        return
-      }
-
-      commitProjectHeaderDragDrop({
+      endProjectHeaderDrag({
+        commit,
         session,
-        sidebarDropIndex,
+        dropIndex: latestDropIndexRef.current,
+        dropPreview: latestDropPreviewRef.current,
         orderedRepoIds: orderedIdsRef.current,
         repoById: repoByIdRef.current,
         usesProjectGroupOrdering: usesProjectGroupOrderingRef.current,
         onCommitRepoOrder: onCommitRepoOrderRef.current,
-        onCommitProjectGroupOrder: onCommitProjectGroupOrderRef.current
+        onCommitProjectGroupOrder: onCommitProjectGroupOrderRef.current,
+        onSettle: (offsetY) => {
+          settlingRef.current = true
+          setState((current) => ({ ...current, pointerOffsetY: offsetY, settling: true }))
+        },
+        onFinish: () => {
+          settlingRef.current = false
+          latestDropIndexRef.current = null
+          latestDropPreviewRef.current = null
+          setState(INITIAL_REPO_DRAG_STATE)
+        },
+        onClickSwallowTimeout: (timeout) => {
+          clickSwallowTimeoutRef.current = timeout
+        }
       })
     },
     [cancelAutoscroll]
@@ -211,8 +206,11 @@ export function useRepoHeaderDrag({
         setState({
           draggingRepoId: session.repoId,
           pointerOffsetY: pointerOffsetY(session),
+          settling: false,
           dropIndex: null,
           dropIndicatorY: null,
+          dropPlaceholderY: null,
+          dropPlaceholderHeight: 0,
           previewOffsetsByRepoId: EMPTY_HEADER_PREVIEW_OFFSETS
         })
       }
@@ -273,6 +271,9 @@ export function useRepoHeaderDrag({
 
   const onHandlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLElement>, repoId: string) => {
+      if (settlingRef.current) {
+        return
+      }
       const session = createProjectHeaderDragSession({
         event,
         repoId,

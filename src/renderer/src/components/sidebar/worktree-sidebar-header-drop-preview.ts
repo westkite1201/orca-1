@@ -10,6 +10,7 @@ export type WorktreeSidebarHeaderDragRect = {
 export type WorktreeSidebarHeaderDropPreview = {
   dropIndex: number
   dropIndicatorY: number
+  dropSlotY: number
 }
 
 const INDICATOR_GAP_PX = 4
@@ -64,7 +65,8 @@ export function computeWorktreeSidebarHeaderDropPreview<
   if (boundaryDrop.kind === 'drop') {
     return {
       dropIndex: boundaryDrop.dropIndex,
-      dropIndicatorY: Math.max(args.scrollTop, boundaryDrop.indicatorY)
+      dropIndicatorY: Math.max(args.scrollTop, boundaryDrop.indicatorY),
+      dropSlotY: boundaryDrop.dropIndex === 0 ? first.top : lastBoundaryBottom
     }
   }
 
@@ -81,7 +83,10 @@ export function computeWorktreeSidebarHeaderDropPreview<
 
     return {
       dropIndex,
-      dropIndicatorY: Math.max(args.scrollTop, indicatorY)
+      dropIndicatorY: Math.max(args.scrollTop, indicatorY),
+      dropSlotY: nextRect
+        ? nextRect.top
+        : Math.max(hoveredRect.bottom, hoveredRect.sectionBottom ?? hoveredRect.bottom)
     }
   }
 
@@ -95,13 +100,15 @@ export function computeWorktreeSidebarHeaderDropPreview<
   }
   return {
     dropIndex: boundary.dropIndex,
-    dropIndicatorY: Math.max(args.scrollTop, boundary.indicatorY)
+    dropIndicatorY: Math.max(args.scrollTop, boundary.indicatorY),
+    dropSlotY: boundary.slotY
   }
 }
 
 type WorktreeSidebarHeaderBoundarySlot = {
   dropIndex: number
   indicatorY: number
+  slotY: number
 }
 
 function pickNearestHeaderBoundarySlot(
@@ -122,11 +129,16 @@ function pickNearestHeaderBoundarySlot(
     ? {
         dropIndex: prevRect.headerIndex + 1,
         indicatorY:
-          Math.max(prevRect.bottom, prevRect.sectionBottom ?? prevRect.bottom) + INDICATOR_GAP_PX
+          Math.max(prevRect.bottom, prevRect.sectionBottom ?? prevRect.bottom) + INDICATOR_GAP_PX,
+        slotY: Math.max(prevRect.bottom, prevRect.sectionBottom ?? prevRect.bottom)
       }
     : null
   const beforeNext: WorktreeSidebarHeaderBoundarySlot | null = nextRect
-    ? { dropIndex: nextRect.headerIndex, indicatorY: Math.max(0, nextRect.top - INDICATOR_GAP_PX) }
+    ? {
+        dropIndex: nextRect.headerIndex,
+        indicatorY: Math.max(0, nextRect.top - INDICATOR_GAP_PX),
+        slotY: nextRect.top
+      }
     : null
 
   if (!afterPrev) {
