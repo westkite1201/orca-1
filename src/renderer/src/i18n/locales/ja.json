@@ -20,14 +20,8 @@
     "description": "Jaws に issue または目標を与えると、作業レーンを計画し、変更作業を分離して実行した後、結果を統合して検証します。",
     "discoveryRetrying": "既存の実行を確認するため再接続しています…",
     "diff": {
-      "added": "追加 {{count}} 件",
-      "copied": "コピー {{count}} 件",
-      "deleted": "削除 {{count}} 件",
       "files": "{{count}} ファイル",
-      "modified": "変更 {{count}} 件",
-      "oneFile": "1 ファイル",
-      "renamed": "名前変更 {{count}} 件",
-      "untracked": "未追跡 {{count}} 件"
+      "oneFile": "1 ファイル"
     },
     "gitWorktree": "Git ワークツリー",
     "goal": "Issue または目標",

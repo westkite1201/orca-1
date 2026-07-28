@@ -20,14 +20,8 @@
     "description": "Dale a Jaws una incidencia o un objetivo. Planificará líneas de trabajo, aislará los cambios, integrará el resultado y lo verificará.",
     "discoveryRetrying": "Volviendo a conectar para buscar una ejecución existente…",
     "diff": {
-      "added": "{{count}} añadidos",
-      "copied": "{{count}} copiados",
-      "deleted": "{{count}} eliminados",
       "files": "{{count}} archivos",
-      "modified": "{{count}} modificados",
-      "oneFile": "1 archivo",
-      "renamed": "{{count}} renombrados",
-      "untracked": "{{count}} sin seguimiento"
+      "oneFile": "1 archivo"
     },
     "gitWorktree": "Worktree de Git",
     "goal": "Incidencia u objetivo",

@@ -20,14 +20,8 @@
     "description": "Jaws에 이슈나 목표를 주면 작업 레인을 계획하고, 변경 작업을 격리해 실행한 뒤 결과를 통합하고 검증합니다.",
     "discoveryRetrying": "기존 실행을 확인하기 위해 다시 연결하는 중…",
     "diff": {
-      "added": "추가 {{count}}개",
-      "copied": "복사 {{count}}개",
-      "deleted": "삭제 {{count}}개",
       "files": "파일 {{count}}개",
-      "modified": "수정 {{count}}개",
-      "oneFile": "파일 1개",
-      "renamed": "이름 변경 {{count}}개",
-      "untracked": "추적 안 됨 {{count}}개"
+      "oneFile": "파일 1개"
     },
     "gitWorktree": "Git 워크트리",
     "goal": "이슈 또는 목표",

@@ -20,14 +20,8 @@
     "description": "向 Jaws 提交议题或目标。它会规划工作通道、隔离变更工作、集成结果并进行验证。",
     "discoveryRetrying": "正在重新连接以检查现有运行…",
     "diff": {
-      "added": "新增 {{count}} 个",
-      "copied": "复制 {{count}} 个",
-      "deleted": "删除 {{count}} 个",
       "files": "{{count}} 个文件",
-      "modified": "修改 {{count}} 个",
-      "oneFile": "1 个文件",
-      "renamed": "重命名 {{count}} 个",
-      "untracked": "未跟踪 {{count}} 个"
+      "oneFile": "1 个文件"
     },
     "gitWorktree": "Git 工作树",
     "goal": "议题或目标",

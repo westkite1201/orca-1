@@ -14218,5 +14218,55 @@
     "sidebar": {
       "label": "Agent Dashboard"
     }
+  },
+  "harness": {
+    "runComparison": "Start orchestrator",
+    "branchPending": "Branch pending",
+    "result": "Result",
+    "verificationPassed": "Verification passed · {{seconds}}s",
+    "verificationCommandPassed": "Verification command passed · {{seconds}}s",
+    "verificationFailed": "Verification failed · {{seconds}}s",
+    "checkingExisting": "Checking for an existing run…",
+    "discoveryRetrying": "Reconnecting to check for an existing run…",
+    "activeRunConflict": "An active orchestrator run already exists. Clear this form to open it.",
+    "ownerUpgradeRequired": "Update the worktree owner runtime to use Orchestrator.",
+    "retry": "Retry",
+    "gitWorktree": "Git worktree",
+    "selectWorktree": "Select a worktree",
+    "noGitRepository": "Add a Git repository to start an orchestrator run.",
+    "goal": "Issue or goal",
+    "goalPlaceholder": "Paste an issue or describe the outcome",
+    "verificationCommand": "Verification command",
+    "verificationPlaceholder": "pnpm test",
+    "cancel": "Cancel",
+    "starting": "Starting…",
+    "resuming": "Resuming…",
+    "resume": "Resume",
+    "newComparison": "New run",
+    "close": "Close",
+    "coordinator": "Codex coordinator",
+    "status": {
+      "pending": "Pending",
+      "creating": "Creating",
+      "ready": "Ready",
+      "running": "Running",
+      "workerDone": "Worker done",
+      "verifying": "Verifying",
+      "verified": "Verified",
+      "failed": "Failed",
+      "preparing": "Preparing",
+      "completed": "Completed"
+    },
+    "description": "Give Jaws an issue or goal. It will plan lanes, isolate changes, integrate the result, and verify it.",
+    "comparisonRunTitle": "Comparison run",
+    "comparisonResultTitle": "Comparison result",
+    "comparisonRunDescription": "Compare both candidates, their Git evidence, and verification.",
+    "orchestratorRunTitle": "Orchestrator run",
+    "orchestratorResultTitle": "Orchestrator result",
+    "orchestratorRunDescription": "Track the coordinator, Git evidence, and verification for this run.",
+    "diff": {
+      "oneFile": "1 file",
+      "files": "{{count}} files"
+    }
   }
 }
