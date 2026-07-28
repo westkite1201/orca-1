@@ -11,6 +11,7 @@ import {
   type LocalBuildCompatibility
 } from '../../shared/local-build-compatibility'
 import { isValidAppVersion } from '../../shared/app-version'
+import productProfile from '../../shared/product-profile.json'
 
 const MAX_MANIFEST_BYTES = 256 * 1024
 const MAX_COMPATIBILITY_BYTES = 64 * 1024
@@ -115,7 +116,11 @@ function extractCompatibility(zipFile: FileHandle): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       '/usr/bin/unzip',
-      ['-p', '/dev/fd/3', `Orca.app/Contents/Resources/${LOCAL_BUILD_COMPATIBILITY_FILENAME}`],
+      [
+        '-p',
+        '/dev/fd/3',
+        `${productProfile.name}.app/Contents/Resources/${LOCAL_BUILD_COMPATIBILITY_FILENAME}`
+      ],
       { stdio: ['ignore', 'pipe', 'ignore', zipFile.fd] }
     )
     const chunks: Buffer[] = []

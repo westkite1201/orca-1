@@ -4,8 +4,8 @@ import { getDevInstanceIdentity } from './dev-instance-identity'
 describe('dev-instance-identity', () => {
   it('keeps packaged identity stable', () => {
     expect(getDevInstanceIdentity(false, {})).toMatchObject({
-      name: 'Orca',
-      appName: 'Orca',
+      name: 'Jaws',
+      appName: 'Jaws',
       isDev: false,
       devLabel: null,
       dockBadgeLabel: null,
@@ -20,9 +20,9 @@ describe('dev-instance-identity', () => {
     // Per-branch label differs (window title / app menu)...
     expect(a.name).not.toBe(b.name)
     // ...but the Keychain-driving appName is identical and distinct from prod.
-    expect(a.appName).toBe('Orca Dev')
-    expect(b.appName).toBe('Orca Dev')
-    expect(a.appName).not.toBe('Orca')
+    expect(a.appName).toBe('Jaws Dev')
+    expect(b.appName).toBe('Jaws Dev')
+    expect(a.appName).not.toBe('Jaws')
   })
 
   it('derives a readable dev label from worktree and branch env', () => {

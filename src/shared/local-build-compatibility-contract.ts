@@ -1,6 +1,6 @@
 export const LOCAL_BUILD_COMPATIBILITY_CONTRACT = {
   formatVersion: 1,
-  appId: 'com.stablyai.orca',
+  appId: 'com.seoyeonkim.jaws',
   stateSchemaVersion: 1,
   readableStateSchemaVersions: [1],
   daemonProtocolVersion: 29,
