@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '../../store'
-import type { NativeChatSession } from '../../../../shared/native-chat-types'
+import { useNativeChatLaunchDraftSignal } from './use-native-chat-launch-draft-adoption'
 import { useNativeChatLiveSession } from './use-native-chat-live-session'
 import { selectNativeChatViewState } from './native-chat-view-state'
 import { NativeChatMessageList } from './NativeChatMessageList'
@@ -46,12 +46,14 @@ import {
   emptyNativeChatContextMenuActions,
   useNativeChatContextMenu
 } from './use-native-chat-context-menu'
-import type { NativeChatContextMenuActions } from './use-native-chat-context-menu'
 import { resolveNativeChatFileLinkContext } from './native-chat-file-link'
 import { selectNativeChatRuntimeEnvironmentId } from './native-chat-runtime-owner'
 import { useNativeChatPasteBridge } from './use-native-chat-paste-bridge'
 import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
-import type { NativeChatViewProps } from './native-chat-view-types'
+import type {
+  NativeChatResolvedViewProps,
+  NativeChatViewProps
+} from './native-chat-view-types'
 import { JawsChatSurface } from './JawsChatSurface'
 
 export type { NativeChatViewProps } from './native-chat-view-types'
@@ -118,18 +120,7 @@ function NativeChatResolvedView({
   onSwitchToTerminal,
   readTerminalScreen,
   contextMenuActions
-}: {
-  worktreeId: string
-  paneKey: string
-  agent: NativeChatSession['agent']
-  sessionId: string | null
-  transcriptPath: string | null
-  targetPtyId: string | null
-  terminalTabId: string
-  onSwitchToTerminal?: () => void
-  readTerminalScreen?: () => string | null
-  contextMenuActions?: Omit<NativeChatContextMenuActions, 'onPaste'>
-}): React.JSX.Element {
+}: NativeChatResolvedViewProps): React.JSX.Element {
   // Primitive owner selection (no useShallow): routes the pane's read/subscribe to
   // the remote runtime host for a runtime-owned pane; null keeps the local path.
   const runtimeEnvironmentId = useAppStore((s) =>
@@ -145,6 +136,15 @@ function NativeChatResolvedView({
   const launchPrompt = useAppStore((s) => s.nativeChatLaunchPromptByTabId[terminalTabId] ?? null)
   const clearNativeChatLaunchPrompt = useAppStore((s) => s.clearNativeChatLaunchPrompt)
   const paneLaunchPrompt = launchPrompt?.agent === agent ? launchPrompt : null
+  // Launch context prefilled into the TUI input as an unsent draft; the
+  // composer adopts it so the GUI view shows the same context as the TUI.
+  // Shape matches NativeChatComposer's two launch-draft props, so it spreads.
+  const launchDraftSignal = useNativeChatLaunchDraftSignal({
+    terminalTabId,
+    agent,
+    messages: session.messages,
+    transcriptLoading: session.readPhase === 'loading'
+  })
   // The live-session merge reconciles hooks with replayable transcript turn
   // boundaries; all working consumers must use that one lifecycle decision.
   const liveWorking = session.status === 'working'
@@ -448,6 +448,7 @@ function NativeChatResolvedView({
           onSlashCommand={onSlashCommand}
           onSwitchToTerminal={onSwitchToTerminal}
           readTerminalScreen={readTerminalScreen}
+          {...launchDraftSignal}
         />
       )}
       {contextMenu.menu}

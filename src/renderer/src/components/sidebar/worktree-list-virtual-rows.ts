@@ -1,7 +1,7 @@
 import { defaultRangeExtractor } from '@tanstack/react-virtual'
 import type { Range, VirtualItem } from '@tanstack/react-virtual'
-import type { HostSectionRow } from './host-section-rows'
-import { PINNED_GROUP_KEY } from './worktree-list-groups'
+import { getLineageGroupKey, PINNED_GROUP_KEY } from './worktree-list-groups'
+import { getRenderRowKey, type RenderRow } from './worktree-list-row-key'
 
 export const GROUP_HEADER_ROW_HEIGHT = 28
 export const HOST_HEADER_ROW_HEIGHT = 32
@@ -10,10 +10,39 @@ const IMPORTED_WORKTREES_LINE_ROW_HEIGHT = 36
 const PENDING_CREATION_ROW_HEIGHT = 56
 const FOLDER_WORKSPACE_ROW_HEIGHT = 64
 
-type WorktreeItemRow = Extract<HostSectionRow, { type: 'item' }>
-export type RenderRow =
-  | HostSectionRow
-  | { type: 'lineage-group'; key: string; rows: WorktreeItemRow[] }
+export { getRenderRowKey, type RenderRow }
+
+/**
+ * Old row key -> current row key for rows that were re-keyed without moving.
+ *
+ * A parent's key flips between `wt:` and `lineage-group:` the moment it gains
+ * its first child (and back when it loses its last), even though the row still
+ * starts at the same pixel. Without this, a scroll anchor recorded under the
+ * old key resolves a fallback row below it and the sidebar visibly jumps.
+ */
+export function buildLineageRowRekeyMap(rows: readonly RenderRow[]): ReadonlyMap<string, string> {
+  const rekeyed = new Map<string, string>()
+  for (const row of rows) {
+    if (row.type === 'lineage-group') {
+      const groupKey = getRenderRowKey(row)
+      for (const member of row.rows) {
+        rekeyed.set(`wt:${member.rowKey}`, groupKey)
+      }
+      continue
+    }
+    if (row.type !== 'item') {
+      continue
+    }
+    // Why: deliberately unguarded by lineageChildCount — the dissolve case (last
+    // child deleted) is exactly when the count is already 0 but an anchor still
+    // holds the group key.
+    rekeyed.set(
+      `lineage-group:${row.sectionKey}:${getLineageGroupKey(row.worktree.id)}`,
+      getRenderRowKey(row)
+    )
+  }
+  return rekeyed
+}
 
 export function shouldUseHeaderTopSpacing(args: {
   rows: readonly RenderRow[]

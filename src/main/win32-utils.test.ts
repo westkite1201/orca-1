@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   getCmdExePath,
+  getRegExePath,
   getSpawnArgsForWindows,
   isPermissionError,
   isWindowsBatchScript,
@@ -39,6 +40,20 @@ describe('isWindowsBatchScript', () => {
     withPlatform('linux', () => {
       expect(isWindowsBatchScript('/usr/bin/foo.cmd')).toBe(false)
     })
+  })
+})
+
+describe('getRegExePath', () => {
+  it('falls back to a local absolute system path for unsafe roots', () => {
+    expect(getRegExePath({ SystemRoot: '' })).toBe('C:\\Windows\\System32\\reg.exe')
+    expect(getRegExePath({ SystemRoot: 'Windows' })).toBe('C:\\Windows\\System32\\reg.exe')
+    expect(getRegExePath({ SystemRoot: '\\\\server\\share' })).toBe(
+      'C:\\Windows\\System32\\reg.exe'
+    )
+  })
+
+  it('uses an absolute custom Windows root', () => {
+    expect(getRegExePath({ SystemRoot: 'D:\\Windows' })).toBe('D:\\Windows\\System32\\reg.exe')
   })
 })
 
@@ -104,17 +119,29 @@ describe('getSpawnArgsForWindows', () => {
 
   it('rejects unsafe args for .cmd scripts on win32', () => {
     withPlatform('win32', () => {
-      expect(() => getSpawnArgsForWindows('C:\\tools\\agent.cmd', ['hello & goodbye'])).toThrow(
-        'UNSAFE_WINDOWS_BATCH_ARGUMENTS'
-      )
+      for (const argument of ['hello & goodbye', 'close)', '(open']) {
+        expect(() => getSpawnArgsForWindows('C:\\tools\\agent.cmd', [argument])).toThrow(
+          'UNSAFE_WINDOWS_BATCH_ARGUMENTS'
+        )
+      }
     })
   })
 
   it('rejects unsafe command paths for .cmd scripts on win32', () => {
     withPlatform('win32', () => {
-      expect(() => getSpawnArgsForWindows('C:\\bad&path\\agent.cmd', ['login'])).toThrow(
-        'UNSAFE_WINDOWS_BATCH_ARGUMENTS'
-      )
+      for (const command of ['C:\\bad&path\\agent.cmd', 'C:\\bad(path\\agent.cmd']) {
+        expect(() => getSpawnArgsForWindows(command, ['login'])).toThrow(
+          'UNSAFE_WINDOWS_BATCH_ARGUMENTS'
+        )
+      }
+    })
+  })
+
+  it('allows punctuation that is not a cmd command operator', () => {
+    withPlatform('win32', () => {
+      expect(
+        getSpawnArgsForWindows('C:\\tools\\agent.cmd', ['package,name;version']).spawnArgs
+      ).toEqual(['/d', '/c', 'C:\\tools\\agent.cmd', 'package,name;version'])
     })
   })
 })

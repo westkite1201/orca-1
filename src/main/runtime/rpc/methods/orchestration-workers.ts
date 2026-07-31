@@ -8,8 +8,10 @@ import { assertOrchestrationWorktreeCreationSupported } from './orchestration-fo
 import { WorkerStartParams } from './orchestration-worker-start-schema'
 import { assertLocalWorkerStartOptions } from './orchestration-worker-start-validation'
 import {
+  createExistingWorktreeWorkerTerminal,
   createWorkerWorktree,
   monitorWorkerSetup,
+  requireWorkerAuthority,
   type WorkerEffect,
   type WorkerSetupReceipt
 } from './orchestration-worker-topology'
@@ -134,6 +136,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
       let terminalHandle = params.terminal
+      let terminalRevealWarning: string | undefined
       let failedStage = 'terminal_create'
       let setupReceipt: WorkerSetupReceipt = {
         requested: 'not_applicable',
@@ -166,18 +169,15 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
             worktreeId: resolvedWorktree!.id,
             effects
           })
-          const terminal = await runtime.createTerminal(`id:${resolvedWorktree!.id}`, {
-            command: agent,
-            title: `worker-${task.id}`,
-            presentation: 'background'
+          const terminal = await createExistingWorktreeWorkerTerminal({
+            runtime,
+            worktreeId: resolvedWorktree!.id,
+            agent: agent as TuiAgent,
+            taskId: task.id,
+            effects
           })
           terminalHandle = terminal.handle
-          effects.push({
-            kind: 'terminal',
-            role: 'agent',
-            action: 'created',
-            id: terminal.handle
-          })
+          terminalRevealWarning = terminal.warning
         } else {
           effects.push({
             kind: 'terminal',
@@ -219,16 +219,11 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
               : `Agent did not become ready (${wait.status}).`
           )
         }
-        const paneKey = runtime.getTerminalPaneKey(terminalHandle)
-        const processIncarnation = runtime.getTerminalProcessIncarnation(terminalHandle)
-        if (!paneKey || !processIncarnation) {
-          throw new Error('stable_pane_required')
-        }
+        const terminalAuthority = requireWorkerAuthority(runtime, terminalHandle)
         const capability = db.prepareStartingWorkerAuthority({
           dispatchId: started.dispatch.id,
           handle: terminalHandle,
-          paneKey,
-          processIncarnation,
+          ...terminalAuthority,
           worktreeId: resolvedWorktree.id,
           effects,
           setupState: setupReceipt.state
@@ -270,7 +265,8 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           setup: setupReceipt,
           timeoutMs: params.timeoutMs ?? 60_000,
           effects,
-          residualResources: []
+          residualResources: [],
+          ...(terminalRevealWarning ? { warning: terminalRevealWarning } : {})
         }
       } catch (error) {
         return failWorkerStartWithReceipt({

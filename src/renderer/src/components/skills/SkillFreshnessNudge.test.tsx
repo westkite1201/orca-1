@@ -51,6 +51,7 @@ function eligibleInventory(): SkillFreshnessInventory {
     schemaVersion: 1,
     installations: [placement()],
     eligibleUpdateNames: ['orca-cli'],
+    scanIssues: [],
     scannedAt: 1
   }
 }
@@ -154,6 +155,7 @@ describe('SkillFreshnessNudge', () => {
       schemaVersion: 1,
       installations: [placement({ status: 'current', observedPackageDigest: 'current' })],
       eligibleUpdateNames: [],
+      scanIssues: [],
       scannedAt: 2
     }
     await rerenderNudge()
@@ -212,7 +214,61 @@ describe('SkillFreshnessNudge', () => {
       schemaVersion: 1,
       installations: [placement(), placement({ id: 'repo-copy', topology: 'repo-scope' })],
       eligibleUpdateNames: [],
+      scanIssues: [],
       scannedAt: 1
+    }
+
+    await renderNudge()
+
+    expect(mocks.toastInfo).not.toHaveBeenCalled()
+  })
+
+  it('keeps a project copy out of the dismissal key it persists', async () => {
+    // Why: the global update never reaches a project copy, so its identity must not enter
+    // the dismissal tuple — re-checking out that repo mints a new inode, which would
+    // re-raise a nudge the user already dismissed for the same global revision.
+    mocks.inventory = {
+      schemaVersion: 1,
+      installations: [
+        placement(),
+        placement({
+          id: 'repo-copy',
+          topology: 'repo-scope',
+          sourceKind: 'repo',
+          unresolvedPath: '/home/projects/work/.agents/skills/orca-cli',
+          resolvedPath: '/home/projects/work/.agents/skills/orca-cli',
+          physicalIdentity: 'physical-repo-orca-cli'
+        })
+      ],
+      eligibleUpdateNames: ['orca-cli'],
+      scanIssues: [],
+      scannedAt: 1
+    }
+
+    await renderNudge()
+    mocks.toastInfo.mock.calls[0]?.[1].onDismiss()
+
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      dismissedSkillFreshnessNudges: [DISMISSAL_KEY]
+    })
+  })
+
+  it('stays dismissed when only a project copy changed identity', async () => {
+    mocks.dismissed = [DISMISSAL_KEY]
+    mocks.inventory = {
+      schemaVersion: 1,
+      installations: [
+        placement(),
+        placement({
+          id: 'repo-copy',
+          topology: 'repo-scope',
+          sourceKind: 'repo',
+          physicalIdentity: 'physical-repo-orca-cli-after-checkout'
+        })
+      ],
+      eligibleUpdateNames: ['orca-cli'],
+      scanIssues: [],
+      scannedAt: 2
     }
 
     await renderNudge()

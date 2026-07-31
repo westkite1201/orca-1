@@ -1,3 +1,4 @@
+import type { NativeChatSession } from '../../../../shared/native-chat-types'
 import type { TuiAgent } from '../../../../shared/types'
 import type { NativeChatContextMenuActions } from './use-native-chat-context-menu'
 
@@ -17,6 +18,19 @@ export type NativeChatViewProps = {
   /** Return this pane to the hosted terminal surface. */
   onSwitchToTerminal?: () => void
   /** Current xterm screen reader used to recover agent-reported session state. */
+  readTerminalScreen?: () => string | null
+  contextMenuActions?: Omit<NativeChatContextMenuActions, 'onPaste'>
+}
+
+export type NativeChatResolvedViewProps = {
+  worktreeId: string
+  paneKey: string
+  agent: NativeChatSession['agent']
+  sessionId: string | null
+  transcriptPath: string | null
+  targetPtyId: string | null
+  terminalTabId: string
+  onSwitchToTerminal?: () => void
   readTerminalScreen?: () => string | null
   contextMenuActions?: Omit<NativeChatContextMenuActions, 'onPaste'>
 }

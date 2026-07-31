@@ -40,6 +40,7 @@ import {
 } from '../components/tab-bar/group-tab-order'
 import { resolveTerminalLayoutRoot } from './remote-terminal-layout-resolution'
 import { parseRemoteRuntimePtyId } from './runtime-terminal-stream'
+import { applyNativeChatLaunchDraftResolved } from './native-chat-launch-draft-runtime-resolution'
 
 type RegisteredTerminalTab = {
   tabId: string
@@ -245,6 +246,7 @@ export type RuntimeMobileSessionSyncKey = {
   // Why: compared by reference; reallocation signals a real layout/title change, avoiding stringifying thousands of tabs. See docs/agent-working-pane-typing-lag.md.
   terminalLayoutsByTabId: AppState['terminalLayoutsByTabId']
   runtimePaneTitlesByTabId: AppState['runtimePaneTitlesByTabId']
+  nativeChatLaunchDraftByTabId: AppState['nativeChatLaunchDraftByTabId']
   groupsByWorktree: AppState['groupsByWorktree']
   activeGroupIdByWorktree: AppState['activeGroupIdByWorktree']
   layoutByWorktree: AppState['layoutByWorktree']
@@ -300,6 +302,7 @@ export function canSkipRuntimeMobileSessionSyncKeyBuild(
     state.activeTabId === previousState.activeTabId &&
     state.terminalLayoutsByTabId === previousState.terminalLayoutsByTabId &&
     state.runtimePaneTitlesByTabId === previousState.runtimePaneTitlesByTabId &&
+    state.nativeChatLaunchDraftByTabId === previousState.nativeChatLaunchDraftByTabId &&
     state.agentStatusEpoch === previousState.agentStatusEpoch &&
     state.agentStatusByPaneKey === previousState.agentStatusByPaneKey
   )
@@ -336,6 +339,7 @@ export function getRuntimeMobileSessionSyncKey(
   return {
     terminalLayoutsByTabId: state.terminalLayoutsByTabId,
     runtimePaneTitlesByTabId: state.runtimePaneTitlesByTabId,
+    nativeChatLaunchDraftByTabId: state.nativeChatLaunchDraftByTabId,
     groupsByWorktree: state.groupsByWorktree,
     activeGroupIdByWorktree: state.activeGroupIdByWorktree,
     layoutByWorktree: state.layoutByWorktree ?? EMPTY_LAYOUT_BY_WORKTREE,
@@ -580,6 +584,7 @@ export function runtimeMobileSessionSyncKeysEqual(
   return (
     a.terminalLayoutsByTabId === b.terminalLayoutsByTabId &&
     a.runtimePaneTitlesByTabId === b.runtimePaneTitlesByTabId &&
+    a.nativeChatLaunchDraftByTabId === b.nativeChatLaunchDraftByTabId &&
     a.groupsByWorktree === b.groupsByWorktree &&
     a.activeGroupIdByWorktree === b.activeGroupIdByWorktree &&
     a.layoutByWorktree === b.layoutByWorktree &&
@@ -730,9 +735,16 @@ async function syncRuntimeGraph(): Promise<void> {
 
   try {
     const result = await window.api.runtime.syncWindowGraph(graph)
-    getStoreState()?.setRuntimeAgentOrchestrationByPaneKey?.(
-      result?.agentOrchestrationByPaneKey ?? {}
-    )
+    const currentState = getStoreState()
+    currentState?.setRuntimeAgentOrchestrationByPaneKey?.(result?.agentOrchestrationByPaneKey ?? {})
+    for (const resolution of result?.nativeChatLaunchDraftResolutions ?? []) {
+      if (currentState) {
+        applyNativeChatLaunchDraftResolved(currentState, {
+          type: 'nativeChatLaunchDraftResolved',
+          ...resolution
+        })
+      }
+    }
   } catch (error) {
     console.error('[runtime] Failed to sync renderer graph:', error)
   }
@@ -1363,6 +1375,16 @@ function buildMobileTerminalSurfaceTabs(
     : undefined
   const savedPtyIdsByLeafId = sanitizedSavedLayout?.ptyIdsByLeafId ?? {}
   const terminalTheme = resolveMobileTerminalTheme(state, systemPrefersDark)
+  // Agent-matched like the desktop consumer: a pane whose agent changed keeps its
+  // tab id, so an unmatched seed would prefill the new agent's chat with stale text.
+  const seededLaunchDraft = state.nativeChatLaunchDraftByTabId?.[terminal.id]
+  const launchDraftEntry =
+    seededLaunchDraft &&
+    !seededLaunchDraft.resolved &&
+    seededLaunchDraft.agent === terminal.launchAgent
+      ? seededLaunchDraft
+      : null
+  const publishedLaunchDraft = launchDraftEntry?.text.trim() ? launchDraftEntry : null
   const container = registered?.getContainer()
   const firstChild = container?.firstElementChild
   const liveLayoutRoot = serializePaneTree(
@@ -1423,6 +1445,14 @@ function buildMobileTerminalSurfaceTabs(
       ...(terminalTheme ? { terminalTheme } : {}),
       ...(agentStatus ? { agentStatus } : {}),
       ...(terminal.launchAgent ? { launchAgent: terminal.launchAgent } : {}),
+      // Launch context that exists only as an unsent TUI-input draft; mobile
+      // prefills its chat composer from it (desktop keeps its own seed store).
+      ...(publishedLaunchDraft
+        ? {
+            launchDraft: publishedLaunchDraft.text,
+            launchDraftCreatedAt: publishedLaunchDraft.createdAt
+          }
+        : {}),
       parentLayout,
       isActive: isDesktopTabActive && leafId === activeLeafId
     }

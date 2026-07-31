@@ -13,9 +13,12 @@ import {
 } from './agent-scratch-worktrees'
 import { isExplicitlyImportedExternalWorktreePath } from './external-worktree-inbox'
 import productProfile from './product-profile.json'
+import {
+  effectiveExternalWorktreeVisibility,
+  isLegacyRepoForExternalWorktreeVisibility
+} from './external-worktree-visibility'
 import type {
   DetectedWorktree,
-  ExternalWorktreeVisibility,
   GlobalSettings,
   OrcaWorkspaceLayout,
   Repo,
@@ -24,30 +27,11 @@ import type {
   WorktreeOwnership
 } from './types'
 
-export const EXTERNAL_WORKTREE_VISIBILITY_ROLLOUT_AT = Date.UTC(2026, 4, 23)
-
-export function isLegacyRepoForExternalWorktreeVisibility(repo: Repo): boolean {
-  if (typeof repo.externalWorktreeVisibilityLegacy === 'boolean') {
-    return repo.externalWorktreeVisibilityLegacy
-  }
-  if (repo.externalWorktreeVisibility === undefined) {
-    return true
-  }
-  if (!Number.isFinite(repo.addedAt)) {
-    return true
-  }
-  return repo.addedAt < EXTERNAL_WORKTREE_VISIBILITY_ROLLOUT_AT
-}
-
-export function effectiveExternalWorktreeVisibility(
-  repo: Pick<Repo, 'externalWorktreeVisibility'>,
-  isLegacyRepoForVisibility: boolean
-): ExternalWorktreeVisibility {
-  if (repo.externalWorktreeVisibility) {
-    return repo.externalWorktreeVisibility
-  }
-  return isLegacyRepoForVisibility ? 'show' : 'hide'
-}
+export {
+  effectiveExternalWorktreeVisibility,
+  EXTERNAL_WORKTREE_VISIBILITY_ROLLOUT_AT,
+  isLegacyRepoForExternalWorktreeVisibility
+} from './external-worktree-visibility'
 
 export function buildKnownOrcaWorkspaceLayouts(
   settings: Pick<GlobalSettings, 'workspaceDir' | 'nestWorkspaces' | 'workspaceDirHistory'>,

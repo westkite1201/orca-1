@@ -27,7 +27,7 @@ export const JAWS_METHODS: RpcMethod[] = [
       const repo = params.repo ? await runtime.showRepo(params.repo) : null
       const worktree = params.worktree ? await runtime.showManagedWorktree(params.worktree) : null
       return {
-        runs: await runtime.getJawsService().list({
+        runs: runtime.getJawsService().list({
           ...(repo ? { repoId: repo.id } : {}),
           ...(worktree ? { sourceWorktreeId: worktree.id } : {})
         })
@@ -38,7 +38,7 @@ export const JAWS_METHODS: RpcMethod[] = [
     name: 'jaws.runShow',
     params: JawsRun,
     handler: async (params, { runtime }) => ({
-      run: await runtime.getJawsService().show(params.run)
+      run: runtime.getJawsService().show(params.run)
     })
   })
 ]

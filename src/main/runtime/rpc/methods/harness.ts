@@ -30,21 +30,21 @@ export const HARNESS_METHODS: RpcMethod[] = [
     params: HarnessList,
     handler: async (params, { runtime }) => {
       const repo = params.repo ? await runtime.showRepo(params.repo) : null
-      return { runs: await runtime.getHarnessService().list(repo?.id) }
+      return { runs: runtime.getHarnessService().list(repo?.id) }
     }
   }),
   defineMethod({
     name: 'harness.show',
     params: HarnessRun,
     handler: async (params, { runtime }) => ({
-      run: await runtime.getHarnessService().show(params.run)
+      run: runtime.getHarnessService().show(params.run)
     })
   }),
   defineMethod({
     name: 'harness.resume',
     params: HarnessRun,
     handler: async (params, { runtime }) => ({
-      run: await runtime.getHarnessService().resume(params.run)
+      run: runtime.getHarnessService().resume(params.run)
     })
   })
 ]

@@ -87,7 +87,8 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
             linkedLinearIssue: linkedLinearIssue?.identifier,
             linkedLinearIssueWorkspaceId: params.linearWorkspace,
             linkedLinearIssueOrganizationUrlKey: linkedLinearIssue?.organizationUrlKey,
-            runHooks: setupDecision === 'run',
+            // setupDecision runs setup without the legacy runHooks activation side effect.
+            runHooks: false,
             setupDecision,
             awaitTerminalProvisioning: true,
             observeSetupCompletion: true,

@@ -16,6 +16,7 @@ const { writeMacBuildCompatibility } = require('./scripts/mac-build-compatibilit
 const { verifyPackagedPluginResources } = require('./scripts/verify-packaged-plugin-resources.cjs')
 const productProfile = require('../src/shared/product-profile.json')
 const productSlug = productProfile.userDataDirectoryName
+const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.cjs')
 
 const isMacRelease = process.env.ORCA_MAC_RELEASE === '1'
 const isLinuxArm64Release = process.env.ORCA_LINUX_ARM64_RELEASE === '1'
@@ -85,12 +86,17 @@ module.exports = {
     '!skill-guides{,/**/*}',
     '!skill-stubs{,/**/*}',
     '!tests{,/**/*}',
+    // Why: examples/ is plugin authoring documentation with no runtime consumer —
+    // bundled plugins ship via extraResources from resources/plugins/launch/. It also
+    // carries hostile-panel, the adversarial fixture the containment tests point at,
+    // which must never reach a user's install.
+    '!examples{,/**/*}',
     // Why: pr-evidence/ is a local e2e screenshot output (ORCA_CAPTURE_EVIDENCE);
     // it is gitignored, but exclude it defensively so a stray local capture at
     // package time never bloats app.asar.
     '!pr-evidence{,/**/*}',
     '!Casks{,/**/*}',
-    '!{AGENTS.md,CLAUDE.md,DEVELOPING.md,bundle-size-progress.md}',
+    '!{AGENTS.md,CLAUDE.md,DEVELOPING.md,bundle-size-progress.md,ORCHESTRATION_IMPLEMENTATION_CHECKLIST.md,ORCHESTRATION_STRUCTURED_OUTPUT_DESIGN.md}',
     '!out/**/*.test.js',
     // Why: Vite's manifest is only used to project the paired web client.
     '!out/renderer/.vite{,/**/*}',
@@ -138,6 +144,7 @@ module.exports = {
     'out/main/agent-hooks/**',
     'out/main/antigravity/**',
     'out/main/claude/**',
+    'out/main/claude-accounts/keychain.js',
     'out/main/codex/**',
     'out/main/copilot/**',
     'out/main/cursor/**',
@@ -145,7 +152,6 @@ module.exports = {
     'out/main/gemini/**',
     'out/main/grok/**',
     'out/main/hermes/**',
-    'out/main/win32-utils.js',
     'out/main/daemon-entry.js',
     'out/main/plugin-host-entry.js',
     'out/main/computer-sidecar.js',
@@ -175,7 +181,7 @@ module.exports = {
           )
         : join(context.appOutDir, 'resources')
     if (!existsSync(resourcesDir)) {
-      return
+      throw new Error(`Missing packaged resources directory: ${resourcesDir}`)
     }
     if (context.electronPlatformName === 'darwin') {
       const architectureByEnum = { 1: 'x64', 3: 'arm64' }
@@ -205,7 +211,16 @@ module.exports = {
     // arm64=3, universal=4 (universal contains the host slice, so run it).
     const archEnumByNodeArch = { ia32: 0, x64: 1, armv7l: 2, arm64: 3 }
     const hostArchEnum = archEnumByNodeArch[process.arch]
-    if (context.arch === hostArchEnum || context.arch === 4) {
+    const canExecuteTargetArch = context.arch === hostArchEnum || context.arch === 4
+    verifySkillsCliRuntime(join(resourcesDir, 'app.asar.unpacked', 'out'), resourcesDir, {
+      executeCommands: canExecuteTargetArch
+    })
+    if (!canExecuteTargetArch) {
+      console.log(
+        `[verify-skills-cli-runtime] skipped command probes on cross-arch slice (target ${context.arch}, host ${process.arch})`
+      )
+    }
+    if (canExecuteTargetArch) {
       verifyPackagedDaemonEntryBoots(resourcesDir)
     } else {
       // Why: a cross-arch slice can't be booted by the host Node, but the

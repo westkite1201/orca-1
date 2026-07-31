@@ -223,7 +223,7 @@ export function getExperimentalSearchEntry() {
       )
     ),
     ephemeralVms: findEntry(
-      translate('auto.components.settings.ephemeralVms.search.title', 'Per-Workspace Environments')
+      translate('auto.components.settings.ephemeralVms.search.cloudVmTitle', 'Cloud VM')
     )
   } as const
 }

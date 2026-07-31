@@ -44,6 +44,17 @@ export function parsePaneKey(
   return { tabId, leafId, stablePaneId: leafId }
 }
 
+// Why: the tab half can change on pane break-out, while opaque legacy keys
+// have no safe equivalence beyond exact equality.
+export function hasSamePaneIdentity(assigneePaneKey: string, senderPaneKey: string): boolean {
+  if (assigneePaneKey === senderPaneKey) {
+    return true
+  }
+  const assigneeLeaf = parsePaneKey(assigneePaneKey)?.leafId
+  const senderLeaf = parsePaneKey(senderPaneKey)?.leafId
+  return Boolean(assigneeLeaf && senderLeaf && assigneeLeaf === senderLeaf)
+}
+
 export function parseLegacyNumericPaneKey(
   paneKey: unknown
 ): { tabId: string; numericPaneId: string; paneKey: string } | null {

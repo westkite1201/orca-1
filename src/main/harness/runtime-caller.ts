@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { AutomationPrecheckResult } from '../../shared/automations-types'
 import type { HarnessAgent } from '../../shared/harness-types'
+import { hasSamePaneIdentity } from '../../shared/stable-pane-id'
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
-import { hasSamePaneIdentity } from '../runtime/orchestration/lifecycle-reconciliation'
 import { RpcDispatcher } from '../runtime/rpc/dispatcher'
 
 export type HarnessRuntimeCaller = {

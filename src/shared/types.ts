@@ -46,6 +46,7 @@ import type { UsagePercentageDisplay } from './usage-percentage-display'
 import type { StatusBarUsageMode } from './status-bar-usage-mode'
 import type { PersistedNativeChatSessionOptions } from './native-chat-session-options'
 import type { CodexResetCreditAttemptLedger } from './codex-reset-credit-attempt-ledger'
+import type { TaskSourceContext } from './task-source-context'
 
 // Re-exported for backward compat with renderer call sites that import
 // `WorkspaceCreateTelemetrySource` from '../../../shared/types'.
@@ -165,6 +166,7 @@ export type ProjectHostSetup = {
 
 export type ProjectHostSetupExistingFolderArgs = {
   projectId: string
+  projectProviderIdentity?: ProjectProviderIdentity
   hostId: ExecutionHostId
   path: string
   kind?: RepoKind
@@ -187,6 +189,7 @@ export type ProjectHostSetupCreateArgs = {
 
 export type ProjectHostSetupCloneArgs = {
   projectId: string
+  projectProviderIdentity?: ProjectProviderIdentity
   hostId: ExecutionHostId
   url: string
   destination: string
@@ -326,7 +329,8 @@ export type FolderWorkspace = {
   folderPath: string
   /** SSH target ID for folder workspaces whose folder path lives remotely. */
   connectionId?: string | null
-  linkedTask: FolderWorkspaceLinkedTask | null
+  linkedTask: WorkspaceLinkedItem | null
+  linkedTaskSourceContext?: TaskSourceContext | null
   comment: string
   isArchived: boolean
   isUnread: boolean
@@ -343,7 +347,7 @@ export type FolderWorkspace = {
   updatedAt: number
 }
 
-export type FolderWorkspaceLinkedTask = {
+export type WorkspaceLinkedItem = {
   provider: 'github' | 'gitlab' | 'linear' | 'jira'
   type: 'issue' | 'pr' | 'mr'
   number: number
@@ -353,6 +357,8 @@ export type FolderWorkspaceLinkedTask = {
   jiraIdentifier?: string
   repoId?: string
 }
+
+export type FolderWorkspaceLinkedTask = WorkspaceLinkedItem
 
 export type NestedRepoScanOptions = {
   maxDepth?: number
@@ -499,6 +505,8 @@ export type Worktree = {
   linkedBitbucketPR?: number | null
   linkedAzureDevOpsPR?: number | null
   linkedGiteaPR?: number | null
+  linkedWorkItem?: WorkspaceLinkedItem | null
+  linkedTaskSourceContext?: TaskSourceContext | null
   isArchived: boolean
   isUnread: boolean
   isPinned: boolean
@@ -622,6 +630,8 @@ export type WorktreeMeta = {
   linkedAzureDevOpsPR?: number | null
   /** Optional for backward compatibility — see Worktree.linkedGiteaPR. */
   linkedGiteaPR?: number | null
+  linkedWorkItem?: WorkspaceLinkedItem | null
+  linkedTaskSourceContext?: TaskSourceContext | null
   isArchived: boolean
   isUnread: boolean
   isPinned: boolean
@@ -1534,12 +1544,13 @@ export type GitHubAssignableUser = {
   avatarUrl: string
 }
 
-export type GitHubPRCheckSummary = {
-  state: 'success' | 'failure' | 'pending' | 'none'
+export type ProviderCheckSummary = {
+  state: 'success' | 'failure' | 'pending' | 'neutral' | 'none'
   total: number
   passed: number
   failed: number
   pending: number
+  neutral: number
 }
 
 export type GitHubPRReviewSummary = {
@@ -1578,7 +1589,7 @@ export type GitHubWorkItem = {
   reviewRequests?: GitHubAssignableUser[]
   latestReviews?: GitHubPRReviewSummary[]
   assignees?: GitHubAssignableUser[]
-  checksSummary?: GitHubPRCheckSummary
+  checksSummary?: ProviderCheckSummary
   mergeable?: PRMergeableState
   autoMergeEnabled?: boolean
   autoMergeAllowed?: boolean | null
@@ -2099,6 +2110,13 @@ export type OrcaHooks = {
   defaultTabs?: OrcaDefaultTabTemplate[] // Terminal tabs to create once for a new worktree
   environmentRecipes?: OrcaVmRecipe[] // Project-scoped per-workspace environment recipes
   environmentRecipeDiagnostics?: OrcaVmRecipeDiagnostic[] // Non-fatal validation issues from environmentRecipes
+  worktree?: OrcaWorktreeDefaults // Project-scoped defaults applied when a worktree is created
+}
+
+export type OrcaWorktreeDefaults = {
+  // Why: shared (symlinked) rather than copied — large rebuildable dirs like
+  // node_modules should be one install serving every worktree.
+  sharedDirectories?: string[]
 }
 
 export type OrcaDefaultTabTemplate = {
@@ -2150,6 +2168,7 @@ export type WorktreeStartupLaunch = {
   launchConfig?: SleepingAgentLaunchConfig
   launchToken?: string
   launchAgent?: TuiAgent
+  viewMode?: 'terminal' | 'chat'
   startupCommandDelivery?: StartupCommandDelivery
   telemetry?: { agent_kind: AgentKind; launch_source: LaunchSource; request_kind: RequestKind }
 }
@@ -2216,6 +2235,8 @@ export type CreateWorktreeArgs = {
   linkedBitbucketPR?: number | null
   linkedAzureDevOpsPR?: number | null
   linkedGiteaPR?: number | null
+  linkedWorkItem?: WorkspaceLinkedItem | null
+  linkedTaskSourceContext?: TaskSourceContext | null
   pushTarget?: GitPushTarget
   workspaceStatus?: WorkspaceStatus
   manualOrder?: number
@@ -2267,6 +2288,7 @@ export type CreateWorktreeResult = {
   }
   defaultTabs?: WorktreeDefaultTabsLaunch
   warning?: string
+  baseFallback?: WorktreeCreateBaseFallback
   initialBaseStatus?: WorktreeBaseStatusEvent
   localBaseRefRefresh?: LocalBaseRefRefreshResult
   localBaseRefUpdateSuggestion?: LocalBaseRefUpdateSuggestion
@@ -2279,6 +2301,11 @@ export type CreateWorktreeResult = {
     surface?: 'visible' | 'background'
   }
   timing?: WorktreeCreateTiming
+}
+
+export type WorktreeCreateBaseFallback = {
+  requestedRef: string
+  localRef: string
 }
 
 export type PreservedWorktreeBranch = {
@@ -2532,6 +2559,7 @@ export type TuiAgent =
   | 'grok' // xAI Grok CLI
   | 'devin' // Devin CLI
   | 'ante' // Ante (Antigma Labs)
+  | 'trae' // Trae CLI
 
 export type TaskViewPresetId = 'all' | 'issues' | 'review' | 'my-issues' | 'my-prs' | 'prs'
 
@@ -2782,6 +2810,8 @@ export type GlobalSettings = {
   localhostWorktreeLabelsEnabled?: boolean
   /** Tracks the one-time first-use prompt for terminal link routing (avoid silently changing where links open). */
   openLinksInAppPreferencePrompted: boolean
+  /** Opt-in: Shift+modifier click inverts openLinksInApp instead of always forcing the system browser. Off keeps the historical one-way escape hatch. */
+  openLinksInAppModifierInverts?: boolean
   /** Opt-in: open new coding-agent tabs in native chat instead of the raw terminal; optional for legacy settings. */
   openAgentTabsInChatByDefault?: boolean
   /** Experimental native chat surface for Claude/Codex sessions; off by default. */
@@ -2849,6 +2879,10 @@ export type GlobalSettings = {
   terminalScopeHistoryByWorktree: boolean
   /** Kill switch for hidden terminal view parking: unmount long-hidden panes while a pane-less watcher keeps PTY side effects alive. */
   terminalHiddenViewParking?: boolean
+  /** Kill switch for SSH terminal parking (C1): SSH panes park like local ones; reveal restores from main's headless model, falling back to relay replay. */
+  terminalSshViewParking?: boolean
+  /** Kill switch for the hidden-worktree retention budget (C1): force-parks the least-recently-hidden un-parkable worktrees beyond a count budget or TTL. */
+  terminalHiddenWorktreeRetentionBudget?: boolean
   /** Kill switch for main-process PTY side-effect authority; on (default) = title/bell/agent facts via pty:sideEffect channel, not renderer byte parsing. */
   terminalMainSideEffectAuthority?: boolean
   /** Kill switch for main's hidden-delivery gate (Phase 4): drops PTY bytes to hidden views after model ingestion; requires terminalMainSideEffectAuthority. */
@@ -2970,6 +3004,8 @@ export type GlobalSettings = {
   experimentalAgentDashboardPopout?: boolean
   /** How the Agent Dashboard opens: an in-window companion board or a separate pop-out window. Defaults to in-window. */
   experimentalAgentDashboardMode?: AgentDashboardMode
+  /** Includes stale quiet agents as a fourth Agent Dashboard column. */
+  experimentalAgentDashboardShowIdle?: boolean
   /** One-shot migration guard for defaulting the Agents view off; later explicit opt-ins persist normally. */
   experimentalActivityDefaultedOffForAllUsers?: boolean
   /** Experimental: persistent terminal-pane attention ring for bell + agent-completion events. Opt-in while tuning signal/noise. */
@@ -3182,6 +3218,7 @@ export type WorktreeCardProperty =
   // Task metadata on workspace cards; provider-specific persisted values kept for older profiles.
   | 'issue'
   | 'linear-issue'
+  | 'jira-issue'
   | 'pr'
   | 'automation'
   // Badge marking workspaces created through `orca worktree create`.
@@ -3273,6 +3310,7 @@ export type PersistedUIState = {
   rightSidebarExplorerView: RightSidebarExplorerView
   rightSidebarWidth: number
   markdownTocPanelWidth?: number
+  combinedDiffFileTreeWidth?: number
   groupBy: 'none' | 'workspace-status' | 'repo' | 'pr-status'
   sortBy: 'name' | 'smart' | 'recent' | 'repo' | 'manual'
   /** Project header ordering in `groupBy: 'repo'`, independent of `sortBy`: 'manual' uses persisted order + header drag, 'recent' by latest visible activity. */
@@ -3393,6 +3431,8 @@ export type PersistedUIState = {
   _inlineAgentsDefaultedForAllUsers?: boolean
   /** One-shot migration flag for split-out card properties, set once so later deliberate unchecks of Linear issue/Ports stick across restarts. */
   _expandedWorktreeCardPropertiesDefaulted?: boolean
+  /** One-shot backfill flag for 'jira-issue', which joined the defaults after the expansion migration had already stamped upgraded profiles. */
+  _jiraIssueWorktreeCardPropertyDefaulted?: boolean
   /** totalAgentsSpawned snapshot at first sighting of the current app version, so the nag counts agents since last update (not from zero). */
   starNagBaselineAgents?: number | null
   /** App version that set the current baseline; a version change re-captures the baseline on next spawn, restarting the nag countdown. */
@@ -3556,6 +3596,8 @@ export type PersistedState = {
 }
 
 // ─── Filesystem ─────────────────────────────────────────────
+export type FilesystemPathFlavor = 'posix' | 'win32'
+
 export type DirEntry = {
   name: string
   isDirectory: boolean

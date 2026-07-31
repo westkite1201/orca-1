@@ -17,6 +17,8 @@ export type WorkerEffect = {
   hookFound?: boolean
   startupPolicy?: string
   terminalId?: string
+  surface?: 'visible' | 'background'
+  warning?: string
 }
 
 export type WorkerSetupReceipt = {
@@ -33,6 +35,46 @@ export type WorkerSetupReceipt = {
     | 'not_configured'
     | 'spawn_failed'
     | 'not_applicable'
+}
+
+export function requireWorkerAuthority(runtime: OrcaRuntimeService, terminalHandle: string) {
+  const authority = runtime.getOrchestrationDispatchAuthority(terminalHandle)
+  const paneKey = authority?.paneKey ?? runtime.getTerminalPaneKey(terminalHandle)
+  const processIncarnation =
+    authority?.processIncarnation ?? runtime.getTerminalProcessIncarnation(terminalHandle)
+  if (!paneKey || !processIncarnation) {
+    throw new Error('stable_pane_required')
+  }
+  return {
+    paneKey,
+    processIncarnation,
+    ...(authority?.launchTokenHash ? { launchTokenHash: authority.launchTokenHash } : {})
+  }
+}
+
+export async function createExistingWorktreeWorkerTerminal(args: {
+  runtime: OrcaRuntimeService
+  worktreeId: string
+  agent: TuiAgent
+  taskId: string
+  effects: WorkerEffect[]
+}): Promise<{ handle: string; warning?: string }> {
+  const terminal = await args.runtime.createTerminal(`id:${args.worktreeId}`, {
+    command: args.agent,
+    title: `worker-${args.taskId}`,
+    // Why: dispatching a worker is background work; it must not pull the sidebar
+    // to the worker's workspace while the user is reading somewhere else.
+    surfaceOwner: false
+  })
+  args.effects.push({
+    kind: 'terminal',
+    role: 'agent',
+    action: 'created',
+    id: terminal.handle,
+    surface: terminal.surface,
+    warning: terminal.warning
+  })
+  return { handle: terminal.handle, warning: terminal.warning }
 }
 
 export function applyWaitForSetupOutcome(
@@ -93,7 +135,8 @@ export async function createWorkerWorktree(args: {
     linkedLinearIssue: linkedLinearIssue?.identifier,
     linkedLinearIssueWorkspaceId: params.linearWorkspace,
     linkedLinearIssueOrganizationUrlKey: linkedLinearIssue?.organizationUrlKey,
-    runHooks: setupDecision === 'run',
+    // setupDecision runs setup without the legacy runHooks activation side effect.
+    runHooks: false,
     setupDecision,
     awaitTerminalProvisioning: true,
     observeSetupCompletion: true,

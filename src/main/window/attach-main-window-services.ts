@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { app, ipcMain } from 'electron'
-import type { BrowserWindow } from 'electron'
+import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { Store } from '../persistence'
 import type {
   CreateWorktreeResult,
@@ -11,6 +11,12 @@ import type {
   WorktreeStartupLaunch
 } from '../../shared/types'
 import productProfile from '../../shared/product-profile.json'
+import {
+  acknowledgePendingTccPromptNotice,
+  consumePendingTccPromptNotice,
+  dismissTccPromptNotice,
+  releasePendingTccPromptNotice
+} from '../macos-tcc-prompt-notice'
 import { registerRepoHandlers } from '../ipc/repos'
 import { registerWorktreeHandlers } from '../ipc/worktrees'
 import { registerWorkspaceCleanupHandlers } from '../ipc/workspace-cleanup'
@@ -32,10 +38,11 @@ import {
   getUpdateStatus,
   quitAndInstall,
   setupAutoUpdater,
+  dismissAvailableUpdate,
   dismissNudge,
   type UpdateInstallMode
 } from '../updater'
-import { scheduleHistoryGc } from '../terminal-history'
+import { scheduleHistoryGc } from '../terminal-history-gc'
 import { hydrateLocalPtyRegistryAtBoot } from '../memory/hydrate-local-pty-registry'
 import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-auth-service'
 import { getKnownWorktreeIdsForHistoryGc } from './history-gc-worktree-ids'
@@ -44,6 +51,7 @@ import type {
   RuntimeMarkdownSaveTabResult
 } from '../../shared/mobile-markdown-document'
 import type { RuntimeMobileSessionTabMove } from '../../shared/runtime-types'
+import type { TerminalTabCreateReply } from '../../shared/terminal-reveal-identity'
 import { isNativeFileDropPayload, type NativeFileDropPayload } from '../../shared/native-file-drop'
 import { requestMobileMarkdownFromRenderer } from './mobile-markdown-request-relay'
 import { requestTerminalTabCloseFromRenderer } from './terminal-tab-close-request-relay'
@@ -67,6 +75,8 @@ export function ensureAutoUpdaterConfigured(): void {
 
 let appReloadHandlerTokenCounter = 0
 let activeAppReloadHandlerToken: number | null = null
+let tccPromptHandlerTokenCounter = 0
+let activeTccPromptHandlerToken: number | null = null
 let runtimeNotifierTokenCounter = 0
 let activeRuntimeNotifierToken: number | null = null
 
@@ -135,6 +145,7 @@ export function attachMainWindowServices(
   registerSshHandlers(store, () => mainWindow, runtime)
   registerRemoteWorkspaceHandlers(store, () => mainWindow)
   registerFileDropRelay(mainWindow)
+  registerTccPromptNoticeHandlers(mainWindow)
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.
   let updaterSetupDone = false
   const setupAutoUpdaterDeferred = (): void => {
@@ -202,6 +213,63 @@ export function attachMainWindowServices(
   mainWindow.on('closed', () => {
     // Why: clear main-owned guest registrations on close so stale tab→webContents ids don't leak across relaunch/hot-reload.
     browserManager.unregisterAll()
+  })
+}
+
+function registerTccPromptNoticeHandlers(mainWindow: BrowserWindow): void {
+  const handlerToken = ++tccPromptHandlerTokenCounter
+  if (activeTccPromptHandlerToken !== null) {
+    releasePendingTccPromptNotice(activeTccPromptHandlerToken)
+  }
+  activeTccPromptHandlerToken = handlerToken
+  const consumeChannel = 'macosTccPrompts:consumePending'
+  const acknowledgeChannel = 'macosTccPrompts:acknowledgePending'
+  const releaseChannel = 'macosTccPrompts:releasePending'
+  const dismissChannel = 'macosTccPrompts:dismiss'
+  ipcMain.removeHandler(consumeChannel)
+  ipcMain.removeHandler(acknowledgeChannel)
+  ipcMain.removeHandler(releaseChannel)
+  ipcMain.removeHandler(dismissChannel)
+  const mainWebContents = mainWindow.webContents
+  const releaseOwnerClaim = (): void => releasePendingTccPromptNotice(handlerToken)
+  // Why: a renderer reload/crash destroys its claim callbacks without closing the BrowserWindow.
+  mainWebContents.on('did-start-loading', () => {
+    if (mainWebContents.isLoadingMainFrame()) {
+      releaseOwnerClaim()
+    }
+  })
+  mainWebContents.on('render-process-gone', releaseOwnerClaim)
+  const ownsNotice = (event: IpcMainInvokeEvent): boolean =>
+    !mainWindow.isDestroyed() && !mainWebContents.isDestroyed() && event.sender === mainWebContents
+  ipcMain.handle(consumeChannel, (event) =>
+    ownsNotice(event) ? consumePendingTccPromptNotice(handlerToken) : null
+  )
+  ipcMain.handle(acknowledgeChannel, (event, claimId: number) => {
+    if (ownsNotice(event) && Number.isSafeInteger(claimId)) {
+      acknowledgePendingTccPromptNotice(handlerToken, claimId)
+    }
+  })
+  ipcMain.handle(releaseChannel, (event, claimId: number) => {
+    if (ownsNotice(event) && Number.isSafeInteger(claimId)) {
+      releasePendingTccPromptNotice(handlerToken, claimId)
+    }
+  })
+  ipcMain.handle(dismissChannel, (event) => {
+    if (ownsNotice(event)) {
+      dismissTccPromptNotice()
+    }
+  })
+  // Why: macOS can stay windowless; drop stale closures without letting an old close clear newer handlers.
+  mainWindow.on('closed', () => {
+    if (activeTccPromptHandlerToken !== handlerToken) {
+      return
+    }
+    releaseOwnerClaim()
+    ipcMain.removeHandler(consumeChannel)
+    ipcMain.removeHandler(acknowledgeChannel)
+    ipcMain.removeHandler(releaseChannel)
+    ipcMain.removeHandler(dismissChannel)
+    activeTccPromptHandlerToken = null
   })
 }
 
@@ -283,14 +351,20 @@ function registerRuntimeWindowLifecycle(
     revealTerminalSession: (worktreeId, opts) =>
       new Promise((resolve, reject) => {
         const requestId = randomUUID()
+        const expectedIdentity = opts.expectedProcessIdentity
+          ? opts.tabId && opts.leafId
+            ? { worktreeId, tabId: opts.tabId, leafId: opts.leafId, ptyId: opts.ptyId }
+            : null
+          : undefined
+        if (expectedIdentity === null) {
+          reject(new Error('terminal_reveal_identity_required'))
+          return
+        }
         const timer = setTimeout(() => {
           ipcMain.removeListener('terminal:tabCreateReply', handler)
           reject(new Error('Terminal reveal timed out'))
         }, 10_000)
-        const handler = (
-          event: Electron.IpcMainEvent,
-          reply: { requestId: string; tabId?: string; title?: string; error?: string }
-        ): void => {
+        const handler = (event: Electron.IpcMainEvent, reply: TerminalTabCreateReply): void => {
           // Why: requestId is renderer-supplied, so only the targeted main window may satisfy the reveal.
           if (event.sender !== mainWindow.webContents || reply.requestId !== requestId) {
             return
@@ -301,7 +375,22 @@ function registerRuntimeWindowLifecycle(
             reject(new Error(reply.error))
             return
           }
-          resolve({ tabId: reply.tabId!, title: reply.title })
+          if (
+            expectedIdentity &&
+            (!reply.identity ||
+              reply.identity.worktreeId !== expectedIdentity.worktreeId ||
+              reply.identity.tabId !== expectedIdentity.tabId ||
+              reply.identity.leafId !== expectedIdentity.leafId ||
+              reply.identity.ptyId !== expectedIdentity.ptyId)
+          ) {
+            reject(new Error('terminal_reveal_identity_mismatch'))
+            return
+          }
+          resolve({
+            tabId: reply.tabId!,
+            title: reply.title,
+            ...(reply.identity ? { identity: reply.identity } : {})
+          })
         }
         ipcMain.on('terminal:tabCreateReply', handler)
         send('ui:createTerminal', {
@@ -316,6 +405,7 @@ function registerRuntimeWindowLifecycle(
           ...(opts.viewMode ? { viewMode: opts.viewMode } : {}),
           activate: opts.activate !== false,
           ...(opts.presentation ? { presentation: opts.presentation } : {}),
+          ...(opts.surfaceOwner === false ? { surfaceOwner: false } : {}),
           // Why: pre-minted tabId aligns the renderer tab id with the paneKey baked into the PTY env, so hook events route right.
           ...(opts.tabId !== undefined ? { tabId: opts.tabId } : {}),
           ...(opts.leafId !== undefined ? { leafId: opts.leafId } : {}),
@@ -323,8 +413,15 @@ function registerRuntimeWindowLifecycle(
           ...(opts.splitDirection !== undefined ? { splitDirection: opts.splitDirection } : {}),
           ...(opts.splitTelemetrySource !== undefined
             ? { splitTelemetrySource: opts.splitTelemetrySource }
-            : {})
+            : {}),
+          ...(opts.focus !== undefined ? { focus: opts.focus } : {})
         })
+      }),
+    resolveLegacyWorkerTerminalRecovery: (paneKey, resolution, ptyId) =>
+      send('agentStatus:legacyWorkerTerminalRecovery', {
+        paneKey,
+        resolution,
+        ...(ptyId ? { ptyId } : {})
       }),
     splitTerminal: (tabId, paneRuntimeId, opts) => {
       send('ui:splitTerminal', {
@@ -379,6 +476,8 @@ function registerRuntimeWindowLifecycle(
       send('runtime:terminalFitOverrideChanged', { ptyId, mode, cols, rows }),
     terminalDriverChanged: (ptyId, driver) =>
       send('runtime:terminalDriverChanged', { ptyId, driver }),
+    nativeChatLaunchDraftResolved: (tabId, resolution) =>
+      send('runtime:nativeChatLaunchDraftResolved', { tabId, ...resolution }),
     browserDriverChanged: (browserPageId, driver) =>
       send('runtime:browserDriverChanged', { browserPageId, driver })
   })
@@ -429,6 +528,7 @@ export function registerUpdaterHandlers(_store: Store): void {
   ipcMain.removeHandler('updater:download')
   ipcMain.removeHandler('updater:quitAndInstall')
   ipcMain.removeHandler('updater:dismissNudge')
+  ipcMain.removeHandler('updater:dismissAvailableUpdate')
 
   ipcMain.handle('updater:getVersion', () => app.getVersion())
   if (!productProfile.updatesEnabled) {
@@ -439,6 +539,7 @@ export function registerUpdaterHandlers(_store: Store): void {
     ipcMain.handle('updater:download', () => undefined)
     ipcMain.handle('updater:quitAndInstall', () => undefined)
     ipcMain.handle('updater:dismissNudge', () => undefined)
+    ipcMain.handle('updater:dismissAvailableUpdate', () => undefined)
     return
   }
   ipcMain.handle('updater:getStatus', () => getUpdateStatus())
@@ -449,4 +550,5 @@ export function registerUpdaterHandlers(_store: Store): void {
   ipcMain.handle('updater:download', () => downloadUpdate())
   ipcMain.handle('updater:quitAndInstall', () => quitAndInstall())
   ipcMain.handle('updater:dismissNudge', () => dismissNudge())
+  ipcMain.handle('updater:dismissAvailableUpdate', () => dismissAvailableUpdate())
 }

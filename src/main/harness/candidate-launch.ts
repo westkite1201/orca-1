@@ -6,8 +6,8 @@ import type {
   RuntimeTerminalWait,
   RuntimeWorktreeCreateResult
 } from '../../shared/runtime-types'
+import { hasSamePaneIdentity } from '../../shared/stable-pane-id'
 import type { DispatchContextRow, TaskRow } from '../runtime/orchestration/types'
-import { hasSamePaneIdentity } from '../runtime/orchestration/lifecycle-reconciliation'
 import {
   harnessCandidateBranch,
   harnessRecoveryStartedAt,
