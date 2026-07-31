@@ -13772,6 +13772,38 @@
       "nativeChat": {
         "contextMenu": {
           "copy": "コピー"
+        },
+        "jaws": {
+          "approvalNeeded": "承認が必要",
+          "materializingLinear": "Linear イシューを作成中",
+          "decisionRequired": "確認が必要",
+          "starting": "開始中",
+          "running": "実行中",
+          "verified": "検証済み",
+          "failed": "失敗",
+          "desktopApproval": "この計画はデスクトップ版 Orca で承認してください。",
+          "title": "Jaws マルチワークツリー計画",
+          "linearIssues": "Linear イシュー",
+          "linearTarget": "チーム {{team}}",
+          "linearProject": "プロジェクト {{project}}",
+          "linearRoot": "ルート",
+          "pending": "保留中",
+          "worktreeSummary": "統合 1 件 + ワーカーワークツリー {{tasks}} 件 · コーディネーター目標: 同時稼働は最大 {{concurrency}} 件",
+          "verificationEvidence": "終了コード {{exitCode}} · {{duration}} ms",
+          "timedOut": "タイムアウト",
+          "reviewTasks": "承認済みタスク {{count}} 件を確認",
+          "dependsOn": "依存先: {{dependencies}}",
+          "finalVerification": "最終検証",
+          "retry": "承認済み計画を再試行",
+          "approve": "計画を承認して実行",
+          "publishingReview": "Publishing review",
+          "reviewReady": "Review ready",
+          "desktopReviewRetry": "Open the desktop Orca app to retry review publication.",
+          "draftReview": "Draft review",
+          "reviewResult": "Draft review",
+          "manualReview": "Manual review required",
+          "openVerifiedCommit": "Open verified commit",
+          "retryReview": "Retry review publication"
         }
       },
       "orca": {

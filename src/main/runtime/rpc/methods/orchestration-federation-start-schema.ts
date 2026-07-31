@@ -1,5 +1,11 @@
 import { z } from 'zod'
+import { parseLinearIssueInput } from '../../../../shared/linear-links'
 import { OptionalFiniteNumber, OptionalString, requiredString } from '../schemas'
+
+const OptionalLinearIssue = OptionalString.refine(
+  (value) => value === undefined || parseLinearIssueInput(value) !== null,
+  'Invalid Linear issue identifier or URL.'
+)
 
 export const FederationAttachStartParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
@@ -12,6 +18,8 @@ export const FederationAttachStartParams = z.object({
   baseBranch: OptionalString,
   displayName: OptionalString,
   comment: OptionalString,
+  linearIssue: OptionalLinearIssue,
+  linearWorkspace: OptionalString,
   setup: z.enum(['run', 'skip', 'inherit']).optional(),
   setupSource: z.enum(['explicit_request', 'orchestration_default']).optional(),
   terminal: OptionalString,

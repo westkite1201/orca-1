@@ -3,6 +3,7 @@ import type { ExecutionHostId } from './execution-host'
 import type { RemovedSshTargetTombstone, SshRemotePtyLease, SshTarget } from './ssh-types'
 import type { Automation, AutomationExecutionTargetType, AutomationRun } from './automations-types'
 import type { HarnessRun } from './harness-types'
+import type { JawsRun } from './jaws-types'
 import type { WorkspaceSource } from './workspace-source'
 import type { GitHubProjectSettings } from './github-project-types'
 import type {
@@ -3546,6 +3547,7 @@ export type PersistedState = {
   automations: Automation[]
   automationRuns: AutomationRun[]
   harnessRuns: HarnessRun[]
+  jawsRuns: JawsRun[]
   onboarding: OnboardingState
   /** Main-owned telemetry de-dupe marker; never exposed through PersistedUIState. */
   featureInteractionTelemetryBuckets?: FeatureInteractionTelemetryBucketState

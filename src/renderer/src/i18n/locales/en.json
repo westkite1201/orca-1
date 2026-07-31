@@ -13745,6 +13745,38 @@
       "nativeChat": {
         "contextMenu": {
           "copy": "Copy"
+        },
+        "jaws": {
+          "approvalNeeded": "Approval needed",
+          "materializingLinear": "Creating Linear issues",
+          "decisionRequired": "Review required",
+          "starting": "Starting",
+          "running": "Running",
+          "verified": "Verified",
+          "failed": "Failed",
+          "desktopApproval": "Open the desktop Orca app to approve this plan.",
+          "title": "Jaws multi-worktree plan",
+          "linearIssues": "Linear issues",
+          "linearTarget": "Team {{team}}",
+          "linearProject": "Project {{project}}",
+          "linearRoot": "Root",
+          "pending": "Pending",
+          "worktreeSummary": "1 integration + {{tasks}} worker worktrees · coordinator target: at most {{concurrency}} active",
+          "verificationEvidence": "Exit {{exitCode}} · {{duration}} ms",
+          "timedOut": "Timed out",
+          "reviewTasks": "Review {{count}} approved tasks",
+          "dependsOn": "Depends on {{dependencies}}",
+          "finalVerification": "Final verification",
+          "retry": "Retry approved plan",
+          "approve": "Approve plan and run",
+          "publishingReview": "Publishing review",
+          "reviewReady": "Review ready",
+          "desktopReviewRetry": "Open the desktop Orca app to retry review publication.",
+          "draftReview": "Draft review",
+          "reviewResult": "Draft review",
+          "manualReview": "Manual review required",
+          "openVerifiedCommit": "Open verified commit",
+          "retryReview": "Retry review publication"
         }
       },
       "orca": {

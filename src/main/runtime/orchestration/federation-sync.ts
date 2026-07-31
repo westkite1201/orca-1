@@ -206,6 +206,7 @@ function parseFederatedLifecycle(
     body: message.body,
     completedBy: `dispatch:${dispatchId}`,
     filesModified: payload.filesModified,
+    commitSha: payload.commitSha,
     reportPath: payload.reportPath,
     completedAt: new Date().toISOString()
   })
@@ -222,6 +223,7 @@ function parseWorkerReportPayload(payload: string | null): {
   dispatchId: string
   outcome: WorkerReportOutcome
   filesModified: string[]
+  commitSha: string | null
   reportPath: string | null
 } {
   let parsed: unknown
@@ -248,6 +250,11 @@ function parseWorkerReportPayload(payload: string | null): {
     filesModified: Array.isArray(report.filesModified)
       ? report.filesModified.filter((file): file is string => typeof file === 'string')
       : [],
+    commitSha:
+      typeof report.commitSha === 'string' &&
+      /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(report.commitSha)
+        ? report.commitSha.toLowerCase()
+        : null,
     reportPath: typeof report.reportPath === 'string' ? report.reportPath : null
   }
 }

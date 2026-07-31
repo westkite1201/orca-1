@@ -220,5 +220,10 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     name: 'skills',
     keys: ['skills list', 'skills get'],
     load: async () => (await import('./handlers/skills.js')).SKILL_HANDLERS
+  },
+  {
+    name: 'jaws',
+    keys: ['jaws plan propose', 'jaws run list', 'jaws run show'],
+    load: async () => (await import('./handlers/jaws.js')).JAWS_HANDLERS
   }
 ]

@@ -31,6 +31,11 @@ Environments:
 Environment Recipes:
   vm recipe doctor          Validate a per-workspace environment recipe
 
+Jaws:
+  jaws plan propose         Propose a multi-worktree execution plan
+  jaws run list             List Jaws plans and runs
+  jaws run show             Show one Jaws plan or run
+
 Automations:
   automations list          List scheduled Orca automations
   automations show          Show one Orca automation
@@ -530,6 +535,7 @@ export function formatFlagHelp(flag: string): string {
     'parent-worktree':
       '--parent-worktree <selector> Parent worktree selector such as id:<repo-id>::<path>, branch:<branch>, issue:<number>, path:<path>, or active/current',
     path: '--path <path>          Path argument for the command',
+    'plan-file': '--plan-file <path|-> Jaws plan JSON file, or - for stdin',
     prompt: '--prompt <text>        Prompt text for agent-backed commands',
     query: '--query <text>        Search text for matching refs',
     ref: '--ref <ref>            Base ref to persist for the repo',
@@ -546,6 +552,7 @@ export function formatFlagHelp(flag: string): string {
     'dispatch-id': '--dispatch-id <id>    Dispatch id to include in orchestration payload JSON',
     'files-modified': '--files-modified <csv> Comma-separated files for orchestration payload JSON',
     'report-path': '--report-path <path>  Report path to include in orchestration payload JSON',
+    'commit-sha': '--commit-sha <sha>     Commit SHA to include in orchestration payload JSON',
     phase: '--phase <text>        Worker phase to include in orchestration payload JSON',
     'timeout-ms': '--timeout-ms <ms>     Maximum wait time before timing out',
     'to-element-index': '--to-element-index <n> Destination element index from get-app-state',

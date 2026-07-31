@@ -6,6 +6,7 @@ import { defineMethod, type RpcMethod } from '../core'
 import { startFederatedWorker } from './orchestration-federated-worker-start'
 import { assertOrchestrationWorktreeCreationSupported } from './orchestration-folder-worktree-placement'
 import { WorkerStartParams } from './orchestration-worker-start-schema'
+import { assertLocalWorkerStartOptions } from './orchestration-worker-start-validation'
 import {
   createWorkerWorktree,
   monitorWorkerSetup,
@@ -55,27 +56,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
       const requestedWorktree = params.worktree ?? 'current'
       const createsWorktree =
         requestedWorktree === 'new-child' || requestedWorktree === 'new-top-level'
-      if (params.terminal && params.agent) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          '--terminal reuses an existing agent and cannot combine with --agent.'
-        )
-      }
-      if (createsWorktree && params.terminal) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          '--terminal cannot combine with new-worktree creation.'
-        )
-      }
-      if (createsWorktree && !params.name) {
-        throw new OrchestrationError('invalid_argument', 'New worktrees require --name.')
-      }
-      if (!createsWorktree && (params.name || params.repo || params.baseBranch || params.setup)) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          'Creation and setup options apply only to new-child or new-top-level worktrees.'
-        )
-      }
+      assertLocalWorkerStartOptions(params, createsWorktree)
       const agent = params.agent
       if (!params.terminal && (!agent || !isTuiAgent(agent))) {
         throw new OrchestrationError(
@@ -126,6 +107,8 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         name: params.name ?? null,
         repo: params.repo ?? (createsWorktree ? coordinatorWorktree.repoId : null),
         baseBranch: params.baseBranch ?? null,
+        linearIssue: params.linearIssue ?? null,
+        linearWorkspace: params.linearWorkspace ?? null,
         terminal: params.terminal ?? null,
         agent: agent ?? null,
         timeoutMs: params.timeoutMs ?? 60_000,

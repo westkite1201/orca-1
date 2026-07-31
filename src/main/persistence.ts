@@ -157,6 +157,18 @@ import {
   type HarnessRun,
   type HarnessRunCreateInput
 } from '../shared/harness-types'
+import {
+  isConfirmedJawsLinearMaterialization,
+  jawsLinearMaterializationSchema,
+  jawsPlanSchema,
+  jawsReviewPublicationSchema,
+  jawsRunSchema,
+  type JawsLinearMaterialization,
+  type JawsPlan,
+  type JawsReviewPublication,
+  type JawsRun,
+  type JawsRunCreateInput
+} from '../shared/jaws-types'
 import { pruneWorkspaceSessionBrowserHistory } from '../shared/workspace-session-browser-history'
 import {
   FOLDER_WORKSPACE_INSTANCE_SEPARATOR,
@@ -2141,6 +2153,7 @@ const MAX_CLAUDE_LIVE_PTY_SESSION_IDS = 200
 const MAX_REMOVED_SSH_TARGET_TOMBSTONES = 50
 
 const MAX_TERMINAL_HARNESS_RUNS = 50
+const MAX_TERMINAL_JAWS_RUNS = 50
 
 function isTerminalHarnessRun(run: HarnessRun): boolean {
   const status = deriveHarnessRunStatus(run)
@@ -2163,6 +2176,151 @@ function pruneHarnessRuns(runs: readonly HarnessRun[]): HarnessRun[] {
 
   // Why: active runs must remain resumable; only detailed output from old terminal runs is evicted.
   return runs.filter((run) => !isTerminalHarnessRun(run) || recentTerminalRunIds.has(run.id))
+}
+
+function pruneJawsRuns(runs: readonly JawsRun[], harnessRuns: readonly HarnessRun[]): JawsRun[] {
+  const harnessById = new Map(harnessRuns.map((run) => [run.id, run]))
+  const isTerminalJawsRun = (run: JawsRun): boolean => {
+    if (run.error !== null) {
+      return true
+    }
+    if (run.harnessRunId === null) {
+      return false
+    }
+    const harnessRun = harnessById.get(run.harnessRunId)
+    return !harnessRun || isTerminalHarnessRun(harnessRun)
+  }
+  const terminalRunIds = new Set(
+    runs
+      .filter(isTerminalJawsRun)
+      .sort(
+        (left, right) =>
+          right.updatedAt - left.updatedAt ||
+          right.createdAt - left.createdAt ||
+          right.id.localeCompare(left.id)
+      )
+      .slice(0, MAX_TERMINAL_JAWS_RUNS)
+      .map((run) => run.id)
+  )
+
+  // Why: drafts and interrupted approvals remain recoverable; only terminal history is bounded.
+  return runs.filter((run) => !isTerminalJawsRun(run) || terminalRunIds.has(run.id))
+}
+
+function createJawsLinearMaterialization(
+  plan: JawsPlan,
+  now: number
+): JawsLinearMaterialization | null {
+  if (!plan.linear) {
+    return null
+  }
+  const effects: JawsLinearMaterialization['effects'] = [
+    {
+      key: 'root',
+      kind: plan.linear.rootIssue.kind === 'create' ? 'root_create' : 'root_read',
+      writeId: plan.linear.rootIssue.kind === 'create' ? randomUUID() : null,
+      state: 'planned',
+      remoteId: null,
+      error: null,
+      updatedAt: now
+    },
+    ...plan.tasks.map((task) => ({
+      key: `child:${task.key}`,
+      kind: 'child_create' as const,
+      writeId: randomUUID(),
+      state: 'planned' as const,
+      remoteId: null,
+      error: null,
+      updatedAt: now
+    })),
+    ...plan.tasks.flatMap((task) =>
+      task.dependsOn.map((dependency) => ({
+        key: `relation:${dependency}:${task.key}`,
+        kind: 'relation' as const,
+        writeId: null,
+        state: 'planned' as const,
+        remoteId: null,
+        error: null,
+        updatedAt: now
+      }))
+    )
+  ]
+  return {
+    status: 'planned',
+    rootIssue: null,
+    items: plan.tasks.map((task) => ({ key: task.key, issue: null })),
+    effects,
+    error: null,
+    updatedAt: now
+  }
+}
+
+function createJawsReviewPublication(plan: JawsPlan, now: number): JawsReviewPublication | null {
+  if (!plan.review) {
+    return null
+  }
+  return {
+    status: 'planned',
+    provider: plan.review.provider,
+    baseBranch: plan.review.baseBranch,
+    headBranch: null,
+    headSha: null,
+    review: null,
+    manualUrl: null,
+    effects: [
+      {
+        key: 'push',
+        kind: 'push',
+        writeId: null,
+        state: 'planned',
+        remoteId: null,
+        error: null,
+        updatedAt: now
+      },
+      {
+        key: 'create',
+        kind: 'create',
+        writeId: null,
+        state: 'planned',
+        remoteId: null,
+        error: null,
+        updatedAt: now
+      },
+      ...(plan.linear
+        ? [
+            {
+              key: 'linear:root:attachment',
+              kind: 'root_attachment' as const,
+              writeId: randomUUID(),
+              state: 'planned' as const,
+              remoteId: null,
+              error: null,
+              updatedAt: now
+            },
+            {
+              key: 'linear:root:comment',
+              kind: 'root_comment' as const,
+              writeId: randomUUID(),
+              state: 'planned' as const,
+              remoteId: null,
+              error: null,
+              updatedAt: now
+            },
+            ...plan.tasks.map((task) => ({
+              key: `linear:child:${task.key}:state`,
+              kind: 'child_state' as const,
+              writeId: null,
+              state: 'planned' as const,
+              remoteId: null,
+              error: null,
+              updatedAt: now
+            }))
+          ]
+        : [])
+    ],
+    error: null,
+    updatedAt: now
+  }
 }
 
 function normalizeClaudeLivePtySessionIds(value: unknown): string[] {
@@ -3455,46 +3613,95 @@ export class Store {
             if (!Array.isArray(parsed.harnessRuns)) {
               return []
             }
-            const normalizedRuns = parsed.harnessRuns.map((run) => ({
-              ...run,
-              // Why: comparison was the only legacy behavior; missing or unknown
-              // values must retain that behavior instead of silently orchestrating.
-              mode: (run.mode === 'orchestrator'
-                ? 'orchestrator'
-                : 'comparison') as HarnessRun['mode'],
-              candidates: run.candidates.map((candidate) => {
-                if (
-                  (run.mode !== 'comparison' && run.mode !== 'orchestrator') ||
-                  candidate.agentTerminalPaneKey === undefined ||
-                  candidate.verificationTerminalHandle === undefined ||
-                  candidate.verificationTerminalPaneKey === undefined ||
-                  candidate.verificationTerminalOwnership === undefined ||
-                  candidate.workerResult === undefined ||
-                  candidate.recoveryStartedAt === undefined ||
-                  candidate.childLaneDrainStartedAt === undefined
-                ) {
-                  this.loadNeedsSave = true
-                }
-                return {
-                  ...candidate,
-                  agentTerminalPaneKey: candidate.agentTerminalPaneKey ?? null,
-                  verificationTerminalHandle: candidate.verificationTerminalHandle ?? null,
-                  verificationTerminalPaneKey: candidate.verificationTerminalPaneKey ?? null,
-                  verificationTerminalOwnership:
-                    candidate.verificationTerminalOwnership === 'pending' ||
-                    candidate.verificationTerminalOwnership === 'owned' ||
-                    candidate.verificationTerminalOwnership === 'stopped'
-                      ? candidate.verificationTerminalOwnership
-                      : null,
-                  workerResult: candidate.workerResult ?? null,
-                  recoveryStartedAt: candidate.recoveryStartedAt ?? null,
-                  childLaneDrainStartedAt: candidate.childLaneDrainStartedAt ?? null
-                }
-              }) as HarnessRun['candidates']
-            }))
+            const normalizedRuns = parsed.harnessRuns.map((run) => {
+              const approvedPlan = jawsPlanSchema.safeParse(run.approvedPlan)
+              const approvedLinearMaterialization = jawsLinearMaterializationSchema.safeParse(
+                run.approvedLinearMaterialization
+              )
+              const invalidLinearMaterialization =
+                approvedPlan.success && approvedPlan.data.linear
+                  ? !approvedLinearMaterialization.success ||
+                    !isConfirmedJawsLinearMaterialization(
+                      approvedPlan.data,
+                      approvedLinearMaterialization.data
+                    )
+                  : run.approvedLinearMaterialization !== undefined
+              const invalidApprovedPlan =
+                ((run.approvedPlan !== undefined || Boolean(run.jawsRunId)) &&
+                  !approvedPlan.success) ||
+                invalidLinearMaterialization
+              if (invalidApprovedPlan) {
+                this.loadNeedsSave = true
+              }
+              return {
+                ...run,
+                // Why: comparison was the only legacy behavior; missing or unknown
+                // values must retain that behavior instead of silently orchestrating.
+                mode: (run.mode === 'orchestrator'
+                  ? 'orchestrator'
+                  : 'comparison') as HarnessRun['mode'],
+                ...(approvedPlan.success
+                  ? { approvedPlan: approvedPlan.data }
+                  : { approvedPlan: undefined }),
+                ...(approvedLinearMaterialization.success && !invalidLinearMaterialization
+                  ? { approvedLinearMaterialization: approvedLinearMaterialization.data }
+                  : { approvedLinearMaterialization: undefined }),
+                // Why: never resume a corrupted approved run through the legacy re-planning prompt.
+                fatalError: invalidApprovedPlan
+                  ? (run.fatalError ?? 'Persisted approved Jaws plan failed validation.')
+                  : run.fatalError,
+                completedAt: invalidApprovedPlan
+                  ? (run.completedAt ?? run.updatedAt ?? run.createdAt)
+                  : run.completedAt,
+                candidates: run.candidates.map((candidate) => {
+                  if (
+                    (run.mode !== 'comparison' && run.mode !== 'orchestrator') ||
+                    candidate.agentTerminalPaneKey === undefined ||
+                    candidate.verificationTerminalHandle === undefined ||
+                    candidate.verificationTerminalPaneKey === undefined ||
+                    candidate.verificationTerminalOwnership === undefined ||
+                    candidate.workerResult === undefined ||
+                    candidate.recoveryStartedAt === undefined ||
+                    candidate.childLaneDrainStartedAt === undefined
+                  ) {
+                    this.loadNeedsSave = true
+                  }
+                  return {
+                    ...candidate,
+                    agentTerminalPaneKey: candidate.agentTerminalPaneKey ?? null,
+                    verificationTerminalHandle: candidate.verificationTerminalHandle ?? null,
+                    verificationTerminalPaneKey: candidate.verificationTerminalPaneKey ?? null,
+                    verificationTerminalOwnership:
+                      candidate.verificationTerminalOwnership === 'pending' ||
+                      candidate.verificationTerminalOwnership === 'owned' ||
+                      candidate.verificationTerminalOwnership === 'stopped'
+                        ? candidate.verificationTerminalOwnership
+                        : null,
+                    workerResult: candidate.workerResult ?? null,
+                    recoveryStartedAt: candidate.recoveryStartedAt ?? null,
+                    childLaneDrainStartedAt: candidate.childLaneDrainStartedAt ?? null
+                  }
+                }) as HarnessRun['candidates']
+              }
+            })
             const runs = pruneHarnessRuns(normalizedRuns)
             if (runs.length !== normalizedRuns.length) {
               this.loadNeedsSave = true
+            }
+            return runs
+          })(),
+          jawsRuns: (() => {
+            if (!Array.isArray(parsed.jawsRuns)) {
+              return []
+            }
+            const runs: JawsRun[] = []
+            for (const value of parsed.jawsRuns) {
+              const parsedRun = jawsRunSchema.safeParse(value)
+              if (parsedRun.success) {
+                runs.push(parsedRun.data)
+              } else {
+                this.loadNeedsSave = true
+              }
             }
             return runs
           })(),
@@ -3569,6 +3776,12 @@ export class Store {
     result = folderScopeConnectionMigration.state
 
     if (gcStaleWorktreeMeta(result) > 0) {
+      this.loadNeedsSave = true
+    }
+
+    const retainedJawsRuns = pruneJawsRuns(result.jawsRuns, result.harnessRuns)
+    if (retainedJawsRuns.length !== result.jawsRuns.length) {
+      result = { ...result, jawsRuns: retainedJawsRuns }
       this.loadNeedsSave = true
     }
 
@@ -4795,6 +5008,163 @@ export class Store {
     this.scheduleSave()
   }
 
+  // ── Jaws ──────────────────────────────────────────────────────────
+
+  listJawsRuns(filters: { repoId?: string; sourceWorktreeId?: string } = {}): JawsRun[] {
+    return (this.state.jawsRuns ?? [])
+      .filter(
+        (run) =>
+          (!filters.repoId || run.repoId === filters.repoId) &&
+          (!filters.sourceWorktreeId || run.sourceWorktreeId === filters.sourceWorktreeId)
+      )
+      .sort((left, right) => right.createdAt - left.createdAt)
+  }
+
+  getJawsRun(runId: string): JawsRun | null {
+    return (this.state.jawsRuns ?? []).find((run) => run.id === runId) ?? null
+  }
+
+  saveJawsPlan(input: JawsRunCreateInput): JawsRun {
+    const jawsRunsBefore = [...(this.state.jawsRuns ?? [])]
+    const existing = this.listJawsRuns({ sourceWorktreeId: input.sourceWorktreeId }).find(
+      (run) => run.approvalStartedAt === null
+    )
+    const now = Date.now()
+    const run: JawsRun = existing
+      ? {
+          ...existing,
+          repoId: input.repoId,
+          sourceWorktreePath: input.sourceWorktreePath,
+          baseSha: input.baseSha,
+          revision: existing.revision + 1,
+          planHash: input.planHash,
+          plan: structuredClone(input.plan),
+          linearMaterialization: createJawsLinearMaterialization(input.plan, now),
+          reviewPublication: createJawsReviewPublication(input.plan, now),
+          error: null,
+          updatedAt: now
+        }
+      : {
+          id: randomUUID(),
+          repoId: input.repoId,
+          sourceWorktreeId: input.sourceWorktreeId,
+          sourceWorktreePath: input.sourceWorktreePath,
+          baseSha: input.baseSha,
+          revision: 1,
+          planHash: input.planHash,
+          plan: structuredClone(input.plan),
+          linearMaterialization: createJawsLinearMaterialization(input.plan, now),
+          reviewPublication: createJawsReviewPublication(input.plan, now),
+          approvalStartedAt: null,
+          harnessRunId: null,
+          error: null,
+          createdAt: now,
+          updatedAt: now
+        }
+    this.state.jawsRuns = existing
+      ? (this.state.jawsRuns ?? []).map((entry) => (entry.id === run.id ? run : entry))
+      : [...(this.state.jawsRuns ?? []), run]
+    this.state.jawsRuns = pruneJawsRuns(this.state.jawsRuns, this.state.harnessRuns ?? [])
+    try {
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.jawsRuns = jawsRunsBefore
+      throw error
+    }
+    return run
+  }
+
+  markJawsApprovalStarted(runId: string): JawsRun {
+    const run = this.getJawsRun(runId)
+    if (!run) {
+      throw new Error('Jaws run not found.')
+    }
+    if (run.harnessRunId) {
+      return run
+    }
+    return this.replaceJawsRun({
+      ...run,
+      approvalStartedAt: run.approvalStartedAt ?? Date.now(),
+      error: null,
+      updatedAt: Date.now()
+    })
+  }
+
+  attachJawsHarnessRun(runId: string, harnessRunId: string): JawsRun {
+    const run = this.getJawsRun(runId)
+    if (!run) {
+      throw new Error('Jaws run not found.')
+    }
+    const harnessRun = this.getHarnessRun(harnessRunId)
+    if (!harnessRun || harnessRun.jawsRunId !== runId) {
+      throw new Error('The Harness run is not correlated with this Jaws run.')
+    }
+    return this.replaceJawsRun({
+      ...run,
+      harnessRunId,
+      error: null,
+      updatedAt: Date.now()
+    })
+  }
+
+  failJawsApproval(runId: string, error: string): JawsRun {
+    const run = this.getJawsRun(runId)
+    if (!run) {
+      throw new Error('Jaws run not found.')
+    }
+    return this.replaceJawsRun({ ...run, error: error.trim(), updatedAt: Date.now() })
+  }
+
+  updateJawsLinearMaterialization(
+    runId: string,
+    materialization: JawsLinearMaterialization
+  ): JawsRun {
+    const run = this.getJawsRun(runId)
+    if (!run) {
+      throw new Error('Jaws run not found.')
+    }
+    if (!run.plan.linear) {
+      throw new Error('This Jaws run has no Linear plan.')
+    }
+    return this.replaceJawsRun({
+      ...run,
+      linearMaterialization: structuredClone(
+        jawsLinearMaterializationSchema.parse(materialization)
+      ),
+      updatedAt: Date.now()
+    })
+  }
+
+  updateJawsReviewPublication(runId: string, publication: JawsReviewPublication): JawsRun {
+    const run = this.getJawsRun(runId)
+    if (!run) {
+      throw new Error('Jaws run not found.')
+    }
+    if (!run.plan.review) {
+      throw new Error('This Jaws run has no review plan.')
+    }
+    return this.replaceJawsRun({
+      ...run,
+      reviewPublication: structuredClone(jawsReviewPublicationSchema.parse(publication)),
+      updatedAt: Date.now()
+    })
+  }
+
+  private replaceJawsRun(run: JawsRun): JawsRun {
+    const jawsRunsBefore = [...(this.state.jawsRuns ?? [])]
+    this.state.jawsRuns = (this.state.jawsRuns ?? []).map((entry) =>
+      entry.id === run.id ? run : entry
+    )
+    this.state.jawsRuns = pruneJawsRuns(this.state.jawsRuns, this.state.harnessRuns ?? [])
+    try {
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.jawsRuns = jawsRunsBefore
+      throw error
+    }
+    return run
+  }
+
   // ── Harness ───────────────────────────────────────────────────────
 
   listHarnessRuns(repoId?: string): HarnessRun[] {
@@ -4816,6 +5186,10 @@ export class Store {
     const verificationCommand = input.verificationCommand.trim()
     const baseSha = input.baseSha.trim()
     const mode = input.mode ?? 'comparison'
+    const approvedPlan = input.approvedPlan ? jawsPlanSchema.parse(input.approvedPlan) : undefined
+    const approvedLinearMaterialization = input.approvedLinearMaterialization
+      ? jawsLinearMaterializationSchema.parse(input.approvedLinearMaterialization)
+      : undefined
     if (
       !repoId ||
       !sourceWorktreeId ||
@@ -4826,8 +5200,22 @@ export class Store {
     ) {
       throw new Error('Harness runs require a repository, source worktree, goal, command, and SHA.')
     }
+    if (approvedPlan && mode !== 'orchestrator') {
+      throw new Error('Approved plans require orchestrator mode.')
+    }
+    if (
+      approvedPlan?.linear &&
+      (!approvedLinearMaterialization ||
+        !isConfirmedJawsLinearMaterialization(approvedPlan, approvedLinearMaterialization))
+    ) {
+      throw new Error('Linear materialization must be confirmed before Harness starts.')
+    }
+    if (approvedLinearMaterialization && !approvedPlan?.linear) {
+      throw new Error('Linear materialization requires an approved Linear plan.')
+    }
 
     const harnessRunsBefore = [...(this.state.harnessRuns ?? [])]
+    const jawsRunsBefore = [...(this.state.jawsRuns ?? [])]
     const now = Date.now()
     const createCandidate = <TAgent extends HarnessAgent>(
       agent: TAgent
@@ -4867,6 +5255,13 @@ export class Store {
       verificationCommand,
       baseSha,
       mode,
+      ...(input.jawsRunId ? { jawsRunId: input.jawsRunId.trim() } : {}),
+      ...(approvedPlan ? { approvedPlan: structuredClone(approvedPlan) } : {}),
+      ...(approvedLinearMaterialization
+        ? {
+            approvedLinearMaterialization: structuredClone(approvedLinearMaterialization)
+          }
+        : {}),
       candidates:
         mode === 'orchestrator'
           ? [createCandidate('codex')]
@@ -4877,12 +5272,14 @@ export class Store {
       completedAt: null
     }
     this.state.harnessRuns = pruneHarnessRuns([...(this.state.harnessRuns ?? []), run])
+    this.state.jawsRuns = pruneJawsRuns(this.state.jawsRuns ?? [], this.state.harnessRuns)
     try {
       // Why: worktrees and PTYs may launch as soon as this returns; the run
       // identity must already be crash-durable before those side effects begin.
       this.flushOrThrow()
     } catch (error) {
       this.state.harnessRuns = harnessRunsBefore
+      this.state.jawsRuns = jawsRunsBefore
       throw error
     }
     return run
@@ -4895,6 +5292,7 @@ export class Store {
     options: { durability?: 'best-effort' | 'required' } = {}
   ): HarnessRun {
     const harnessRunsBefore = [...(this.state.harnessRuns ?? [])]
+    const jawsRunsBefore = [...(this.state.jawsRuns ?? [])]
     const runIndex = (this.state.harnessRuns ?? []).findIndex((run) => run.id === runId)
     if (runIndex === -1) {
       throw new Error('Harness run not found.')
@@ -4960,6 +5358,7 @@ export class Store {
     this.state.harnessRuns[runIndex] = nextRun
     if (nextRun.completedAt !== null) {
       this.state.harnessRuns = pruneHarnessRuns(this.state.harnessRuns)
+      this.state.jawsRuns = pruneJawsRuns(this.state.jawsRuns ?? [], this.state.harnessRuns)
     }
     if (options.durability === 'required') {
       try {
@@ -4968,6 +5367,7 @@ export class Store {
         // Why: a verification PTY must not launch from lifecycle state that
         // exists only in memory after an atomic write failure.
         this.state.harnessRuns = harnessRunsBefore
+        this.state.jawsRuns = jawsRunsBefore
         throw error
       }
     } else {
@@ -4994,6 +5394,7 @@ export class Store {
     }
     this.state.harnessRuns[runIndex] = failed
     this.state.harnessRuns = pruneHarnessRuns(this.state.harnessRuns)
+    this.state.jawsRuns = pruneJawsRuns(this.state.jawsRuns ?? [], this.state.harnessRuns)
     this.flush()
     return failed
   }

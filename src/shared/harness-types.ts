@@ -1,4 +1,5 @@
 import type { GitBranchChangeStatus } from './git-status-types'
+import type { JawsLinearMaterialization, JawsPlan } from './jaws-types'
 
 export type HarnessAgent = 'codex' | 'claude'
 
@@ -92,6 +93,9 @@ export type HarnessRun = {
   goal: string
   verificationCommand: string
   baseSha: string
+  jawsRunId?: string
+  approvedPlan?: JawsPlan
+  approvedLinearMaterialization?: JawsLinearMaterialization
   candidates: HarnessCandidate[]
   fatalError: string | null
   createdAt: number
@@ -102,7 +106,12 @@ export type HarnessRun = {
 export type HarnessRunCreateInput = Pick<
   HarnessRun,
   'repoId' | 'sourceWorktreeId' | 'sourceWorktreePath' | 'goal' | 'verificationCommand' | 'baseSha'
-> & { mode?: HarnessRunMode }
+> & {
+  mode?: HarnessRunMode
+  jawsRunId?: string
+  approvedPlan?: JawsPlan
+  approvedLinearMaterialization?: JawsLinearMaterialization
+}
 
 export type HarnessStartInput = {
   /** Runtime worktree selector, such as `id:<worktree-id>`. */
@@ -110,6 +119,10 @@ export type HarnessStartInput = {
   goal: string
   verificationCommand: string
   mode?: HarnessRunMode
+  expectedBaseSha?: string
+  jawsRunId?: string
+  approvedPlan?: JawsPlan
+  approvedLinearMaterialization?: JawsLinearMaterialization
 }
 
 export type HarnessCandidatePatch = Partial<

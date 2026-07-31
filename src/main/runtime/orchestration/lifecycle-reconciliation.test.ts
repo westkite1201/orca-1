@@ -43,12 +43,20 @@ describe('lifecycle reconciliation', () => {
       to: 'term_coordinator',
       subject: 'Done',
       type: 'worker_done',
-      payload: JSON.stringify({ taskId: task.id, dispatchId: dispatch.id, outcome: 'succeeded' }),
+      payload: JSON.stringify({
+        taskId: task.id,
+        dispatchId: dispatch.id,
+        outcome: 'succeeded',
+        commitSha: 'a'.repeat(40)
+      }),
       senderPaneKey: `tab_w:${LEAF_A}`
     })
 
     expect(reconcileLifecycleMessage(db, message).action).toBe('completed')
     expect(db.getTask(task.id)?.status).toBe('completed')
+    expect(JSON.parse(db.getTask(task.id)?.result ?? '{}')).toMatchObject({
+      commitSha: 'a'.repeat(40)
+    })
   })
 
   it('fails both the dispatch and task from an authenticated failed worker report', () => {

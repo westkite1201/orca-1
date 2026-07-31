@@ -9,6 +9,7 @@ import type {
   TerminalPreviewConnectResult,
   TerminalPreviewDataPayload
 } from '../shared/terminal-preview'
+import type { JawsPlanApproval, JawsReviewRetry, JawsRunView } from '../shared/jaws-types'
 import type { CliInstallStatus } from '../shared/cli-install-types'
 import type { AgentHookInstallStatus } from '../shared/agent-hook-types'
 import type { CodexConfigSyncStatus } from '../shared/codex-config-sync-types'
@@ -4094,6 +4095,13 @@ const api = {
       }
     }
   },
+
+  jaws: {
+    approvePlan: (args: JawsPlanApproval): Promise<{ run: JawsRunView }> =>
+      ipcRenderer.invoke('jaws:approvePlan', args),
+    retryReview: (args: JawsReviewRetry): Promise<{ run: JawsRunView }> =>
+      ipcRenderer.invoke('jaws:retryReview', args)
+  } satisfies NonNullable<PreloadApi['jaws']>,
 
   runtime: {
     syncWindowGraph: (graph: RuntimeSyncWindowGraph): Promise<RuntimeSyncWindowGraphResult> =>

@@ -13772,6 +13772,38 @@
       "nativeChat": {
         "contextMenu": {
           "copy": "Copiar"
+        },
+        "jaws": {
+          "approvalNeeded": "Se necesita aprobación",
+          "materializingLinear": "Creando incidencias de Linear",
+          "decisionRequired": "Se necesita revisión",
+          "starting": "Iniciando",
+          "running": "En ejecución",
+          "verified": "Verificado",
+          "failed": "Fallido",
+          "desktopApproval": "Abre la aplicación de escritorio Orca para aprobar este plan.",
+          "title": "Plan de múltiples árboles de trabajo de Jaws",
+          "linearIssues": "Incidencias de Linear",
+          "linearTarget": "Equipo {{team}}",
+          "linearProject": "Proyecto {{project}}",
+          "linearRoot": "Raíz",
+          "pending": "Pendiente",
+          "worktreeSummary": "1 integración + {{tasks}} árboles de trabajo · objetivo del coordinador: como máximo {{concurrency}} activos",
+          "verificationEvidence": "Salida {{exitCode}} · {{duration}} ms",
+          "timedOut": "Tiempo agotado",
+          "reviewTasks": "Revisar {{count}} tareas aprobadas",
+          "dependsOn": "Depende de {{dependencies}}",
+          "finalVerification": "Verificación final",
+          "retry": "Reintentar el plan aprobado",
+          "approve": "Aprobar el plan y ejecutar",
+          "publishingReview": "Publishing review",
+          "reviewReady": "Review ready",
+          "desktopReviewRetry": "Open the desktop Orca app to retry review publication.",
+          "draftReview": "Draft review",
+          "reviewResult": "Draft review",
+          "manualReview": "Manual review required",
+          "openVerifiedCommit": "Open verified commit",
+          "retryReview": "Retry review publication"
         }
       },
       "orca": {

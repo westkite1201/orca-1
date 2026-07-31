@@ -50,6 +50,7 @@ import { registerShellHandlers } from './shell'
 import { registerPetHandlers } from './pet'
 import { registerPluginHandlers } from './plugins'
 import { registerUIHandlers, setTrustedUIRendererWebContentsId } from './ui'
+import { registerJawsHandlers } from './jaws'
 import { registerEmulatorFrameStreamHandlers } from './emulator-frame-stream'
 import { registerEmulatorVideoStreamHandlers } from './emulator-video-stream'
 import { registerSpeechHandlers } from './speech'
@@ -210,6 +211,7 @@ export function registerCoreHandlers(
   }
   registerFilesystemWatcherHandlers()
   registerRuntimeHandlers(runtime)
+  registerJawsHandlers(runtime)
   registerRuntimeEnvironmentHandlers(store)
   registerEphemeralVmHandlers(store, pluginService)
   registerAiVaultHandlers({

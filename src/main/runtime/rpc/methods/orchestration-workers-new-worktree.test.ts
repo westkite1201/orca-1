@@ -229,6 +229,23 @@ describe('orchestration new-worktree workers', () => {
     )
   })
 
+  it('links a new worker worktree to its approved Linear issue', async () => {
+    mockCreatedWorktree()
+
+    await startWorker({
+      linearIssue: 'https://linear.app/westkitedev/issue/WES-42',
+      linearWorkspace: 'workspace-1'
+    })
+
+    expect(runtime.createManagedWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({
+        linkedLinearIssue: 'WES-42',
+        linkedLinearIssueWorkspaceId: 'workspace-1',
+        linkedLinearIssueOrganizationUrlKey: 'westkitedev'
+      })
+    )
+  })
+
   it('reports an absent setup hook as not configured without failing the start', async () => {
     mockCreatedWorktree({ hookFound: false })
 

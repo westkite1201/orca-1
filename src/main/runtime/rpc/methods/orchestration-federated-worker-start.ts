@@ -79,6 +79,8 @@ export async function startFederatedWorker(args: {
       name: params.name ?? null,
       repo: params.repo ?? null,
       baseBranch: params.baseBranch ?? null,
+      linearIssue: params.linearIssue ?? null,
+      linearWorkspace: params.linearWorkspace ?? null,
       terminal: params.terminal ?? null,
       agent: params.agent ?? null,
       timeoutMs: params.timeoutMs ?? 60_000,
@@ -114,6 +116,8 @@ export async function startFederatedWorker(args: {
         baseBranch: params.baseBranch,
         displayName: params.displayName,
         comment: params.comment,
+        linearIssue: params.linearIssue,
+        linearWorkspace: params.linearWorkspace,
         setup: createsWorktree ? (params.setup ?? 'run') : undefined,
         setupSource: createsWorktree
           ? params.setup
@@ -243,6 +247,15 @@ function validateRemoteWorkerStart(params: WorkerStartInput, createsWorktree: bo
     throw new OrchestrationError(
       'invalid_argument',
       'Creation and setup options apply only to remote new-top-level worktrees.'
+    )
+  }
+  if (params.linearWorkspace && !params.linearIssue) {
+    throw new OrchestrationError('invalid_argument', '--linear-workspace requires --linear-issue.')
+  }
+  if (!createsWorktree && (params.linearIssue || params.linearWorkspace)) {
+    throw new OrchestrationError(
+      'invalid_argument',
+      'Linear linking applies only to remote new-top-level worktrees.'
     )
   }
   if (params.terminal && params.agent) {

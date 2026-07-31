@@ -272,7 +272,11 @@ function reconcileWorkerDoneMessage(
     payload.filesModified.every((file) => typeof file === 'string')
       ? payload.filesModified
       : []
-
+  const commitSha =
+    typeof payload.commitSha === 'string' &&
+    /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(payload.commitSha)
+      ? payload.commitSha.toLowerCase()
+      : null
   const result = JSON.stringify({
     provenance: 'worker_report',
     outcome,
@@ -282,6 +286,7 @@ function reconcileWorkerDoneMessage(
     body: msg.body,
     completedBy: msg.from_handle,
     filesModified,
+    commitSha,
     reportPath: typeof payload.reportPath === 'string' ? payload.reportPath : null,
     completedAt: new Date().toISOString()
   })

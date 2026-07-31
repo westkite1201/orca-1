@@ -1,4 +1,5 @@
 import type { TuiAgent } from '../../../../shared/types'
+import { parseLinearIssueInput } from '../../../../shared/linear-links'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
 
@@ -67,6 +68,8 @@ export async function createWorkerWorktree(args: {
     baseBranch?: string
     displayName?: string
     comment?: string
+    linearIssue?: string
+    linearWorkspace?: string
     setup?: 'run' | 'skip' | 'inherit'
     from: string
   }
@@ -79,6 +82,7 @@ export async function createWorkerWorktree(args: {
 }> {
   const { runtime, db, dispatchId, requestedWorktree, coordinatorWorktree, params, effects } = args
   const setupDecision = params.setup ?? 'run'
+  const linkedLinearIssue = params.linearIssue ? parseLinearIssueInput(params.linearIssue) : null
   db.recordWorkerStage({ dispatchId, stage: 'worktree_creating', effects })
   const created = await runtime.createManagedWorktree({
     repoSelector: params.repo ?? coordinatorWorktree.repoId,
@@ -86,6 +90,9 @@ export async function createWorkerWorktree(args: {
     baseBranch: params.baseBranch,
     displayName: params.displayName,
     comment: params.comment,
+    linkedLinearIssue: linkedLinearIssue?.identifier,
+    linkedLinearIssueWorkspaceId: params.linearWorkspace,
+    linkedLinearIssueOrganizationUrlKey: linkedLinearIssue?.organizationUrlKey,
     runHooks: setupDecision === 'run',
     setupDecision,
     awaitTerminalProvisioning: true,

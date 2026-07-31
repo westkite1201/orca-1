@@ -443,6 +443,7 @@ import type {
 import type { AutomationService } from '../automations/service'
 import { HarnessService, type HarnessStore } from '../harness/service'
 import { createHarnessRuntimeCaller } from '../harness/runtime-caller'
+import { JawsService, type JawsStore } from '../jaws/service'
 import { runHarnessVerificationTerminal } from '../harness/verification-terminal-session'
 import { RuntimeBrowserCommands } from './orca-runtime-browser'
 import { RemoteRuntimeTerminalCreateIdempotency } from './remote-runtime-terminal-create-idempotency'
@@ -1037,6 +1038,14 @@ type RuntimeStore = {
   createHarnessRun?: Store['createHarnessRun']
   updateHarnessCandidate?: Store['updateHarnessCandidate']
   failHarnessRun?: Store['failHarnessRun']
+  listJawsRuns?: Store['listJawsRuns']
+  getJawsRun?: Store['getJawsRun']
+  saveJawsPlan?: Store['saveJawsPlan']
+  markJawsApprovalStarted?: Store['markJawsApprovalStarted']
+  updateJawsLinearMaterialization?: Store['updateJawsLinearMaterialization']
+  updateJawsReviewPublication?: Store['updateJawsReviewPublication']
+  attachJawsHarnessRun?: Store['attachJawsHarnessRun']
+  failJawsApproval?: Store['failJawsApproval']
   getSparsePresets?: Store['getSparsePresets']
   saveSparsePreset?: Store['saveSparsePreset']
   getMobileClientTabSelections?: Store['getMobileClientTabSelections']
@@ -2599,6 +2608,7 @@ export class OrcaRuntimeService {
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
   private _harnessService: HarnessService | null = null
+  private _jawsService: JawsService | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -3512,10 +3522,93 @@ export class OrcaRuntimeService {
       createHarnessRuntimeCaller(this),
       {
         autoMonitor: this.ptyController !== null,
-        deferExecutionUntilMonitoring: true
+        deferExecutionUntilMonitoring: true,
+        onRunTerminal: async (run) => {
+          if (run.jawsRunId) {
+            await this.getJawsService()
+              .handleHarnessTerminal(run)
+              .catch((error) => {
+                console.error('[jaws] failed to publish a verified Harness run', error)
+              })
+          }
+        }
       }
     )
     return this._harnessService
+  }
+
+  getJawsService(): JawsService {
+    if (this._jawsService) {
+      return this._jawsService
+    }
+    const store = this.store
+    if (
+      !store?.listJawsRuns ||
+      !store.getJawsRun ||
+      !store.saveJawsPlan ||
+      !store.markJawsApprovalStarted ||
+      !store.updateJawsLinearMaterialization ||
+      !store.updateJawsReviewPublication ||
+      !store.attachJawsHarnessRun ||
+      !store.failJawsApproval
+    ) {
+      throw new Error('runtime_unavailable')
+    }
+    const linearClient = {
+      readIssue: (input: string, workspaceId: string) =>
+        this.linearIssueContext({
+          input,
+          workspaceId,
+          include: {
+            comments: false,
+            children: false,
+            attachments: false,
+            relations: true,
+            activity: false
+          },
+          depth: 0
+        }),
+      createIssue: (input: Parameters<OrcaRuntimeService['linearIssueCreate']>[0]) =>
+        this.linearIssueCreate(input),
+      writeRelation: (input: Parameters<OrcaRuntimeService['linearIssueRelationWrite']>[0]) =>
+        this.linearIssueRelationWrite(input),
+      addComment: (input: Parameters<OrcaRuntimeService['linearIssueAddComment']>[0]) =>
+        this.linearIssueAddComment(input),
+      attachLink: (input: Parameters<OrcaRuntimeService['linearIssueAttachLink']>[0]) =>
+        this.linearIssueAttachLink(input),
+      setState: (input: Parameters<OrcaRuntimeService['linearIssueSetState']>[0]) =>
+        this.linearIssueSetState(input)
+    }
+    this._jawsService = new JawsService(
+      store as RuntimeStore & JawsStore,
+      this.getHarnessService(),
+      linearClient,
+      {
+        getStatus: (worktreeId) => this.getRuntimeGitStatus(`id:${worktreeId}`),
+        compare: (worktreeId, baseRef) =>
+          this.getRuntimeGitBranchCompare(`id:${worktreeId}`, baseRef),
+        listTasks: (runId) => this.getOrchestrationDb().listTasks({ runId }),
+        getUpstreamStatus: (worktreeId) => this.getRuntimeGitUpstreamStatus(`id:${worktreeId}`),
+        push: async (worktreeId) => {
+          await this.pushRuntimeGit(`id:${worktreeId}`, true)
+        },
+        findReview: (repoId, branch, headSha) =>
+          this.getHostedReviewForBranch({
+            repoSelector: `id:${repoId}`,
+            branch,
+            currentHeadOid: headSha
+          }),
+        createReview: (repoId, worktreeId, input) =>
+          this.createHostedReview({
+            ...input,
+            repoSelector: `id:${repoId}`,
+            worktreeSelector: `id:${worktreeId}`
+          }),
+        getManualUrl: (worktreeId, headSha) =>
+          this.getRuntimeGitRemoteCommitUrl(`id:${worktreeId}`, headSha)
+      }
+    )
+    return this._jawsService
   }
 
   async runHarnessVerification(args: {
@@ -3881,6 +3974,22 @@ export class OrcaRuntimeService {
     this.ptyController = controller
     if (controller && this._harnessService) {
       this.getHarnessService().activateMonitoring()
+    }
+    if (
+      controller &&
+      this.store
+        ?.listJawsRuns?.()
+        .some(
+          (run) =>
+            run.reviewPublication?.status === 'planned' ||
+            run.reviewPublication?.status === 'publishing'
+        )
+    ) {
+      void this.getJawsService()
+        .resumeReviewPublications()
+        .catch((error) => {
+          console.error('[jaws] failed to resume review publication', error)
+        })
     }
   }
 

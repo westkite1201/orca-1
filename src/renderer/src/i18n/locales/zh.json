@@ -13772,6 +13772,38 @@
       "nativeChat": {
         "contextMenu": {
           "copy": "复制"
+        },
+        "jaws": {
+          "approvalNeeded": "需要批准",
+          "materializingLinear": "正在创建 Linear 问题",
+          "decisionRequired": "需要检查",
+          "starting": "正在启动",
+          "running": "运行中",
+          "verified": "已验证",
+          "failed": "失败",
+          "desktopApproval": "请在 Orca 桌面应用中批准此计划。",
+          "title": "Jaws 多工作树计划",
+          "linearIssues": "Linear 问题",
+          "linearTarget": "团队 {{team}}",
+          "linearProject": "项目 {{project}}",
+          "linearRoot": "根问题",
+          "pending": "等待中",
+          "worktreeSummary": "1 个集成工作树 + {{tasks}} 个工作工作树 · 协调器目标：最多 {{concurrency}} 个处于活动状态",
+          "verificationEvidence": "退出码 {{exitCode}} · {{duration}} 毫秒",
+          "timedOut": "已超时",
+          "reviewTasks": "查看 {{count}} 个已批准任务",
+          "dependsOn": "依赖于 {{dependencies}}",
+          "finalVerification": "最终验证",
+          "retry": "重试已批准计划",
+          "approve": "批准计划并运行",
+          "publishingReview": "Publishing review",
+          "reviewReady": "Review ready",
+          "desktopReviewRetry": "Open the desktop Orca app to retry review publication.",
+          "draftReview": "Draft review",
+          "reviewResult": "Draft review",
+          "manualReview": "Manual review required",
+          "openVerifiedCommit": "Open verified commit",
+          "retryReview": "Retry review publication"
         }
       },
       "orca": {

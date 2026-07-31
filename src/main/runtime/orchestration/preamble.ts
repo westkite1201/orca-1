@@ -84,6 +84,7 @@ Slack, GitHub comments, or any other channel to reach a human during the run.
     --body "<3-sentence summary: what you did, what you found, what's left>" \\
     --task-id ${params.taskId} --dispatch-id ${params.dispatchId} --outcome succeeded \\
     --files-modified "path/a,path/b" \\
+    --commit-sha "<optional: full commit SHA for committed code work>" \\
     --report-path "<optional: path to the full artifact>"
 
   # BEHAVIOR RULE: send a heartbeat every ${HEARTBEAT_INTERVAL_MIN} minutes

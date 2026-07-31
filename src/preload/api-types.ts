@@ -8,6 +8,7 @@ import type {
   HostedReviewInfo,
   HostedReviewProvider
 } from '../shared/hosted-review'
+import type { JawsPlanApproval, JawsReviewRetry, JawsRunView } from '../shared/jaws-types'
 import type { NativeFileDropPayload } from '../shared/native-file-drop'
 import type { DashboardSnapshot, DashboardRevealAgentArgs } from '../shared/dashboard-snapshot'
 import type {
@@ -2618,6 +2619,10 @@ export type PreloadApi = {
   openCodeUsage: OpenCodeUsageApi
   aiVault: AiVaultApi
   nativeChat: NativeChatApi
+  jaws?: {
+    approvePlan: (args: JawsPlanApproval) => Promise<{ run: JawsRunView }>
+    retryReview: (args: JawsReviewRetry) => Promise<{ run: JawsRunView }>
+  }
   fs: {
     readDir: (args: { dirPath: string; connectionId?: string }) => Promise<DirEntry[]>
     readFile: (args: {

@@ -436,6 +436,7 @@ export function getDefaultPersistedState(homedir: string): PersistedState {
     automations: [],
     automationRuns: [],
     harnessRuns: [],
+    jawsRuns: [],
     onboarding: getDefaultOnboardingState(),
     featureInteractionTelemetryBuckets: {},
     codexResetCreditAttemptLedger: structuredClone(EMPTY_CODEX_RESET_CREDIT_ATTEMPT_LEDGER)

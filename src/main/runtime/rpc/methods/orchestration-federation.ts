@@ -1,5 +1,5 @@
-import { isTuiAgent } from '../../../../shared/tui-agent-config'
 import type { TuiAgent } from '../../../../shared/types'
+import { parseLinearIssueInput } from '../../../../shared/linear-links'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
@@ -17,6 +17,7 @@ import {
   persistFederatedSetupWaitOutcome
 } from './orchestration-federation-setup'
 import { FederationAttachStartParams } from './orchestration-federation-start-schema'
+import { assertFederationAttachmentStart } from './orchestration-federation-start-validation'
 import { failFederatedAttachmentWithReceipt } from './orchestration-federation-start-receipt'
 
 export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
@@ -30,47 +31,8 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           'Federated worker attachment requires a durable retry request.'
         )
       }
-      if (params.worktree === 'current' || params.worktree === 'new-child') {
-        throw new OrchestrationError(
-          'invalid_argument',
-          'A remote worker requires an exact existing worktree or new-top-level.'
-        )
-      }
-      const createsWorktree = params.worktree === 'new-top-level'
-      if (createsWorktree && (!params.name || !params.repo)) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          'A remote new-top-level worktree requires --name and an explicit --repo.'
-        )
-      }
-      if (createsWorktree && params.terminal) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          '--terminal cannot combine with remote new-worktree creation.'
-        )
-      }
-      if (
-        !createsWorktree &&
-        (params.name || params.repo || params.baseBranch || params.setup || params.setupSource)
-      ) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          'Creation and setup options apply only to remote new-top-level worktrees.'
-        )
-      }
-      if (params.terminal && params.agent) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          '--terminal reuses an existing agent and cannot combine with --agent.'
-        )
-      }
+      const createsWorktree = assertFederationAttachmentStart(params)
       const agent = params.agent
-      if (!params.terminal && (!agent || !isTuiAgent(agent))) {
-        throw new OrchestrationError(
-          'agent_unconfigured',
-          'A configured --agent is required when federated worker-start creates a terminal.'
-        )
-      }
       if (agent) {
         runtime.validateOrchestrationAgentLauncher(agent as TuiAgent)
       }
@@ -113,12 +75,18 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
             stage: 'worktree_creating'
           })
           const setupDecision = params.setup ?? 'run'
+          const linkedLinearIssue = params.linearIssue
+            ? parseLinearIssueInput(params.linearIssue)
+            : null
           const created = await runtime.createManagedWorktree({
             repoSelector: params.repo as string,
             name: params.name as string,
             baseBranch: params.baseBranch,
             displayName: params.displayName,
             comment: params.comment,
+            linkedLinearIssue: linkedLinearIssue?.identifier,
+            linkedLinearIssueWorkspaceId: params.linearWorkspace,
+            linkedLinearIssueOrganizationUrlKey: linkedLinearIssue?.organizationUrlKey,
             runHooks: setupDecision === 'run',
             setupDecision,
             awaitTerminalProvisioning: true,

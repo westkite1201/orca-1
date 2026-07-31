@@ -13772,6 +13772,38 @@
       "nativeChat": {
         "contextMenu": {
           "copy": "복사"
+        },
+        "jaws": {
+          "approvalNeeded": "승인 필요",
+          "materializingLinear": "Linear 이슈 생성 중",
+          "decisionRequired": "검토 필요",
+          "starting": "시작 중",
+          "running": "실행 중",
+          "verified": "검증 완료",
+          "failed": "실패",
+          "desktopApproval": "이 계획은 데스크톱 Orca 앱에서 승인하세요.",
+          "title": "Jaws 멀티 워크트리 계획",
+          "linearIssues": "Linear 이슈",
+          "linearTarget": "팀 {{team}}",
+          "linearProject": "프로젝트 {{project}}",
+          "linearRoot": "루트",
+          "pending": "대기 중",
+          "worktreeSummary": "통합 워크트리 1개 + 작업 워크트리 {{tasks}}개 · 코디네이터 목표: 최대 {{concurrency}}개 활성",
+          "verificationEvidence": "종료 코드 {{exitCode}} · {{duration}}ms",
+          "timedOut": "시간 초과",
+          "reviewTasks": "승인할 작업 {{count}}개 검토",
+          "dependsOn": "선행 작업: {{dependencies}}",
+          "finalVerification": "최종 검증",
+          "retry": "승인된 계획 다시 시도",
+          "approve": "계획 승인 및 실행",
+          "publishingReview": "Publishing review",
+          "reviewReady": "Review ready",
+          "desktopReviewRetry": "Open the desktop Orca app to retry review publication.",
+          "draftReview": "Draft review",
+          "reviewResult": "Draft review",
+          "manualReview": "Manual review required",
+          "openVerifiedCommit": "Open verified commit",
+          "retryReview": "Retry review publication"
         }
       },
       "orca": {

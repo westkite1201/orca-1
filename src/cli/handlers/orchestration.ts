@@ -114,6 +114,7 @@ function getOptionalStructuredMessagePayload(
   const outcome = getOptionalStringFlag(flags, 'outcome')
   const filesModified = getOptionalStringFlag(flags, 'files-modified')
   const reportPath = getOptionalStringFlag(flags, 'report-path')
+  const commitSha = getOptionalStringFlag(flags, 'commit-sha')
   const phase = getOptionalStringFlag(flags, 'phase')
   const hasStructuredPayload =
     taskId !== undefined ||
@@ -121,6 +122,7 @@ function getOptionalStructuredMessagePayload(
     outcome !== undefined ||
     filesModified !== undefined ||
     reportPath !== undefined ||
+    commitSha !== undefined ||
     phase !== undefined
   if (!hasStructuredPayload) {
     return rawPayload
@@ -156,6 +158,12 @@ function getOptionalStructuredMessagePayload(
   }
   if (reportPath) {
     payload.reportPath = reportPath
+  }
+  if (commitSha) {
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commitSha)) {
+      throw new RuntimeClientError('invalid_argument', 'Invalid --commit-sha.')
+    }
+    payload.commitSha = commitSha.toLowerCase()
   }
   if (phase) {
     payload.phase = phase
@@ -802,6 +810,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       baseBranch: getOptionalStringFlag(flags, 'base-branch'),
       displayName: getOptionalStringFlag(flags, 'display-name'),
       comment: getOptionalStringFlag(flags, 'comment'),
+      linearIssue: getOptionalStringFlag(flags, 'linear-issue'),
+      linearWorkspace: getOptionalStringFlag(flags, 'linear-workspace'),
       setup: getOptionalStringFlag(flags, 'setup'),
       agent: getOptionalStringFlag(flags, 'agent'),
       terminal: getOptionalStringFlag(flags, 'terminal'),

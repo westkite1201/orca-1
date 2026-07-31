@@ -75,7 +75,8 @@ describe('orchestration send structured payload flags', () => {
         ['dispatch-id', 'ctx_1'],
         ['outcome', 'succeeded'],
         ['files-modified', 'src/a.ts, src/b.ts'],
-        ['report-path', 'reports/done.md']
+        ['report-path', 'reports/done.md'],
+        ['commit-sha', 'a'.repeat(40)]
       ])
     )
 
@@ -92,7 +93,8 @@ describe('orchestration send structured payload flags', () => {
         dispatchId: 'ctx_1',
         outcome: 'succeeded',
         filesModified: ['src/a.ts', 'src/b.ts'],
-        reportPath: 'reports/done.md'
+        reportPath: 'reports/done.md',
+        commitSha: 'a'.repeat(40)
       }),
       devMode: false
     })

@@ -1746,6 +1746,206 @@ describe('Store', () => {
     expect(store.listHarnessRuns()).toEqual([])
   })
 
+  it('defaults missing Jaws history to an empty list', async () => {
+    const persisted: Partial<PersistedState> = getDefaultPersistedState(testState.dir)
+    delete persisted.jawsRuns
+    writeDataFile(persisted)
+
+    expect((await createStore()).listJawsRuns()).toEqual([])
+  })
+
+  it('persists and revises one unapproved Jaws plan per source worktree', async () => {
+    const store = await createStore()
+    const input = {
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      baseSha: 'a'.repeat(40),
+      planHash: 'b'.repeat(64),
+      plan: {
+        goal: 'Implement the feature',
+        verificationCommand: 'pnpm test',
+        maxConcurrency: 2,
+        tasks: [{ key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] }]
+      }
+    }
+    const created = store.saveJawsPlan(input)
+    const revised = store.saveJawsPlan({
+      ...input,
+      planHash: 'c'.repeat(64),
+      plan: { ...input.plan, goal: 'Implement the revised feature' }
+    })
+
+    expect(revised).toMatchObject({
+      id: created.id,
+      revision: 2,
+      planHash: 'c'.repeat(64),
+      plan: { goal: 'Implement the revised feature' }
+    })
+    const approved = store.markJawsApprovalStarted(revised.id)
+    expect(approved.approvalStartedAt).not.toBeNull()
+    expect(() =>
+      store.attachJawsHarnessRun(revised.id, '22222222-2222-4222-8222-222222222222')
+    ).toThrow('not correlated')
+    const harnessRun = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: revised.repoId,
+      sourceWorktreeId: revised.sourceWorktreeId,
+      sourceWorktreePath: revised.sourceWorktreePath,
+      goal: revised.plan.goal,
+      verificationCommand: revised.plan.verificationCommand,
+      baseSha: revised.baseSha,
+      jawsRunId: revised.id,
+      approvedPlan: revised.plan
+    })
+    const attached = store.attachJawsHarnessRun(revised.id, harnessRun.id)
+    expect(attached.harnessRunId).toBe(harnessRun.id)
+
+    const reloaded = await createStore()
+    expect(reloaded.getJawsRun(revised.id)).toEqual(attached)
+    expect(reloaded.listJawsRuns({ repoId: 'another-repo' })).toEqual([])
+  })
+
+  it('persists stable Jaws review and Linear result write IDs', async () => {
+    const store = await createStore()
+    const created = store.saveJawsPlan({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      baseSha: 'a'.repeat(40),
+      planHash: 'b'.repeat(64),
+      plan: {
+        goal: 'Implement the feature',
+        verificationCommand: 'pnpm test',
+        maxConcurrency: 1,
+        tasks: [{ key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] }],
+        linear: {
+          workspaceId: 'workspace-1',
+          team: 'WES',
+          project: null,
+          rootIssue: {
+            kind: 'create' as const,
+            title: 'Feature root',
+            description: 'Approved root description'
+          }
+        },
+        review: { provider: 'github' as const, baseBranch: 'main', createDraft: true as const }
+      }
+    })
+    const writeIds = created.reviewPublication?.effects.map((effect) => effect.writeId)
+
+    const persisted = (await createStore()).getJawsRun(created.id)
+
+    expect(persisted?.reviewPublication?.effects.map((effect) => effect.writeId)).toEqual(writeIds)
+    expect(writeIds?.filter(Boolean)).toHaveLength(2)
+  })
+
+  it('persists Linear write IDs and gates Harness on a confirmed mapping', async () => {
+    const store = await createStore()
+    const plan = {
+      goal: 'Implement the feature',
+      verificationCommand: 'pnpm test',
+      maxConcurrency: 1,
+      tasks: [{ key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] }],
+      linear: {
+        workspaceId: 'workspace-1',
+        team: 'WES',
+        project: null,
+        rootIssue: {
+          kind: 'create' as const,
+          title: 'Feature root',
+          description: 'Approved root description'
+        }
+      }
+    }
+    const created = store.saveJawsPlan({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      baseSha: 'a'.repeat(40),
+      planHash: 'b'.repeat(64),
+      plan
+    })
+    const writeIds = created.linearMaterialization?.effects.map((effect) => effect.writeId)
+
+    const reloaded = await createStore()
+    const persisted = reloaded.getJawsRun(created.id)
+    expect(persisted?.linearMaterialization?.effects.map((effect) => effect.writeId)).toEqual(
+      writeIds
+    )
+    expect(() =>
+      reloaded.createHarnessRun({
+        mode: 'orchestrator',
+        repoId: created.repoId,
+        sourceWorktreeId: created.sourceWorktreeId,
+        sourceWorktreePath: created.sourceWorktreePath,
+        goal: plan.goal,
+        verificationCommand: plan.verificationCommand,
+        baseSha: created.baseSha,
+        jawsRunId: created.id,
+        approvedPlan: plan
+      })
+    ).toThrow('Linear materialization must be confirmed')
+
+    const materialization = persisted?.linearMaterialization
+    if (!materialization) {
+      throw new Error('Missing persisted Linear materialization.')
+    }
+    const rootId = '22222222-2222-4222-8222-222222222222'
+    const childId = '33333333-3333-4333-8333-333333333333'
+    const confirmed = reloaded.updateJawsLinearMaterialization(created.id, {
+      ...materialization,
+      status: 'confirmed',
+      rootIssue: {
+        id: rootId,
+        identifier: 'WES-1',
+        title: 'Feature root',
+        url: 'https://linear.app/westkitedev/issue/WES-1',
+        stateId: 'state-todo',
+        parentId: null
+      },
+      items: [
+        {
+          key: 'API',
+          issue: {
+            id: childId,
+            identifier: 'WES-2',
+            title: 'Build API',
+            url: 'https://linear.app/westkitedev/issue/WES-2',
+            stateId: 'state-todo',
+            parentId: rootId
+          }
+        }
+      ],
+      effects: materialization.effects.map((effect) => ({
+        ...effect,
+        state: 'confirmed',
+        remoteId: effect.key === 'root' ? rootId : childId
+      })),
+      error: null
+    })
+    const confirmedMaterialization = confirmed.linearMaterialization
+    if (!confirmedMaterialization) {
+      throw new Error('Missing confirmed Linear materialization.')
+    }
+    const harness = reloaded.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: created.repoId,
+      sourceWorktreeId: created.sourceWorktreeId,
+      sourceWorktreePath: created.sourceWorktreePath,
+      goal: plan.goal,
+      verificationCommand: plan.verificationCommand,
+      baseSha: created.baseSha,
+      jawsRunId: created.id,
+      approvedPlan: plan,
+      approvedLinearMaterialization: confirmedMaterialization
+    })
+
+    expect((await createStore()).getHarnessRun(harness.id)?.approvedLinearMaterialization).toEqual(
+      confirmedMaterialization
+    )
+  })
+
   it('persists comparison runs with fixed Codex and Claude candidates', async () => {
     const store = await createStore()
     const run = store.createHarnessRun({
@@ -1892,6 +2092,46 @@ describe('Store', () => {
     })
   })
 
+  it.each(['missing', 'invalid'] as const)(
+    'fails closed when an approved Jaws plan is %s after restart',
+    async (problem) => {
+      const store = await createStore()
+      const approvedPlan = {
+        goal: 'Implement the feature',
+        verificationCommand: 'pnpm test',
+        maxConcurrency: 1,
+        tasks: [{ key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] }]
+      }
+      const run = store.createHarnessRun({
+        mode: 'orchestrator',
+        repoId: 'repo-1',
+        sourceWorktreeId: 'repo-1::/repo',
+        sourceWorktreePath: '/repo',
+        goal: approvedPlan.goal,
+        verificationCommand: approvedPlan.verificationCommand,
+        baseSha: 'a'.repeat(40),
+        jawsRunId: '11111111-1111-4111-8111-111111111111',
+        approvedPlan
+      })
+      const persisted = readDataFile() as PersistedState
+      if (problem === 'missing') {
+        delete persisted.harnessRuns[0].approvedPlan
+      } else {
+        ;(persisted.harnessRuns[0].approvedPlan as { maxConcurrency: number }).maxConcurrency = 99
+      }
+      writeDataFile(persisted)
+
+      const recovered = (await createStore()).getHarnessRun(run.id)
+
+      expect(recovered).toMatchObject({
+        mode: 'orchestrator',
+        approvedPlan: undefined,
+        fatalError: 'Persisted approved Jaws plan failed validation.',
+        completedAt: expect.any(Number)
+      })
+    }
+  )
+
   it('throws and rolls back a required Harness lifecycle write on disk failure', async () => {
     const store = await createStore()
     const run = store.createHarnessRun({
@@ -1995,6 +2235,65 @@ describe('Store', () => {
     expect(retained.some((run) => run.id === 'terminal-2')).toBe(true)
     reloaded.flush()
     expect((readDataFile() as PersistedState).harnessRuns).toHaveLength(51)
+  })
+
+  it('keeps Jaws history paired with retained Harness runs', async () => {
+    const store = await createStore()
+    const plan = {
+      goal: 'Implement the feature',
+      verificationCommand: 'pnpm test',
+      maxConcurrency: 1,
+      tasks: [{ key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] }]
+    }
+    const jawsTemplate = store.saveJawsPlan({
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      baseSha: 'a'.repeat(40),
+      planHash: 'b'.repeat(64),
+      plan
+    })
+    const harnessTemplate = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: plan.goal,
+      verificationCommand: plan.verificationCommand,
+      baseSha: 'a'.repeat(40),
+      jawsRunId: jawsTemplate.id,
+      approvedPlan: plan
+    })
+    const persisted = readDataFile() as PersistedState
+    const harnessId = (index: number) =>
+      `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`
+    const jawsId = (index: number) =>
+      `10000000-0000-4000-8000-${index.toString().padStart(12, '0')}`
+    persisted.harnessRuns = Array.from({ length: 52 }, (_, index) => ({
+      ...harnessTemplate,
+      id: harnessId(index),
+      jawsRunId: jawsId(index),
+      fatalError: 'Finished.',
+      createdAt: index,
+      updatedAt: index,
+      completedAt: index
+    }))
+    persisted.jawsRuns = Array.from({ length: 52 }, (_, index) => ({
+      ...jawsTemplate,
+      id: jawsId(index),
+      harnessRunId: harnessId(index),
+      approvalStartedAt: index,
+      createdAt: index,
+      updatedAt: index
+    }))
+    writeDataFile(persisted)
+
+    const reloaded = await createStore()
+
+    expect(reloaded.listHarnessRuns()).toHaveLength(50)
+    expect(reloaded.listJawsRuns()).toHaveLength(50)
+    expect(reloaded.getJawsRun(jawsId(0))).toBeNull()
+    expect(reloaded.getJawsRun(jawsId(2))).not.toBeNull()
   })
 
   it('prunes terminal Harness history as runs finish', async () => {

@@ -52,11 +52,13 @@ import { selectNativeChatRuntimeEnvironmentId } from './native-chat-runtime-owne
 import { useNativeChatPasteBridge } from './use-native-chat-paste-bridge'
 import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
 import type { NativeChatViewProps } from './native-chat-view-types'
+import { JawsChatSurface } from './JawsChatSurface'
 
 export type { NativeChatViewProps } from './native-chat-view-types'
 
 /** Resolves an agent terminal into its native conversation and composer UI. */
 export default function NativeChatView({
+  worktreeId,
   terminalTabId,
   paneKey: preferredPaneKey,
   targetPtyId = null,
@@ -89,6 +91,7 @@ export default function NativeChatView({
     >
       {(resolution) => (
         <NativeChatResolvedView
+          worktreeId={worktreeId}
           paneKey={resolution.paneKey}
           agent={resolution.agent}
           sessionId={resolution.sessionId}
@@ -105,6 +108,7 @@ export default function NativeChatView({
 }
 
 function NativeChatResolvedView({
+  worktreeId,
   paneKey,
   agent,
   sessionId,
@@ -115,6 +119,7 @@ function NativeChatResolvedView({
   readTerminalScreen,
   contextMenuActions
 }: {
+  worktreeId: string
   paneKey: string
   agent: NativeChatSession['agent']
   sessionId: string | null
@@ -414,6 +419,7 @@ function NativeChatResolvedView({
           />
         )}
       </div>
+      <JawsChatSurface worktreeId={worktreeId} />
       {/* Live interactive prompt (question / approval) is the bottom input region
           (mobile parity). A question card supplies its own answer input, so it
           fully replaces the composer while active — no stray "Send a message". */}

@@ -2,6 +2,8 @@ import type { TuiAgent } from '../../../../shared/types'
 import type { NativeChatContextMenuActions } from './use-native-chat-context-menu'
 
 export type NativeChatViewProps = {
+  /** Worktree whose Jaws plan is shown beside this conversation. */
+  worktreeId: string
   /** The terminal tab hosting the agent. paneKey is `${tabId}:${leafId}`. */
   terminalTabId: string
   /** Specific split leaf this chat surface replaces. */

@@ -17,6 +17,7 @@ export type LinearIssueSummary = {
   state?: LinearNamedEntity | null
   team?: (LinearNamedEntity & { key?: string | null }) | null
   project?: LinearNamedEntity | null
+  parent?: { id: string; identifier: string } | null
   cycle?: LinearNamedEntity | null
   assignee?: LinearUserSummary | null
   labels: LinearNamedEntity[]
