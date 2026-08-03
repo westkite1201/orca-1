@@ -156,8 +156,10 @@ function createMainWindow(
   }
 }
 
-function createStore(): Store & { flush: MockFn } {
-  return { flush: vi.fn() } as Store & { flush: MockFn }
+function createStore(): Store & { flushPendingAsync: MockFn } {
+  return {
+    flushPendingAsync: vi.fn(() => Promise.resolve())
+  } as Store & { flushPendingAsync: MockFn }
 }
 
 function createRuntime(): RuntimeStub {

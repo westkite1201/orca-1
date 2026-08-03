@@ -18,9 +18,19 @@ const productProfile = require('../src/shared/product-profile.json')
 const productSlug = productProfile.userDataDirectoryName
 const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.cjs')
 
-const isMacRelease = process.env.ORCA_MAC_RELEASE === '1'
+// Why: dev-channel builds must carry the *release* identity — same bundle id,
+// Developer ID signature, and notarization ticket — or Squirrel.Mac refuses to
+// swap them over an installed Orca and macOS treats each build as a new app.
+const isMacHourly = process.env.ORCA_MAC_HOURLY === '1'
+const isMacAdhoc = process.env.ORCA_MAC_ADHOC === '1'
+const isMacRelease = process.env.ORCA_MAC_RELEASE === '1' || isMacHourly || isMacAdhoc
 const isLinuxArm64Release = process.env.ORCA_LINUX_ARM64_RELEASE === '1'
 const localBuildVersion = isMacRelease ? undefined : process.env.ORCA_LOCAL_BUILD_VERSION
+const devChannelBuildVersion = isMacHourly
+  ? process.env.ORCA_HOURLY_BUILD_VERSION
+  : isMacAdhoc
+    ? process.env.ORCA_ADHOC_BUILD_VERSION
+    : undefined
 const appId = productProfile.appId
 const featureWallResources = {
   from: 'resources/onboarding/feature-wall',
@@ -67,7 +77,11 @@ const winSpeechNativeResource = {
 module.exports = {
   appId,
   productName: productProfile.name,
-  ...(localBuildVersion ? { extraMetadata: { version: localBuildVersion } } : {}),
+  ...(devChannelBuildVersion
+    ? { extraMetadata: { version: devChannelBuildVersion } }
+    : localBuildVersion
+      ? { extraMetadata: { version: localBuildVersion } }
+      : {}),
   directories: {
     buildResources: 'resources/build'
   },
@@ -318,6 +332,13 @@ module.exports = {
     // explicit release path so production artifacts remain strict while dev
     // artifacts do not fail with broken ad-hoc launch behavior.
     hardenedRuntime: isMacRelease,
+    // Why dev builds notarize too, despite the ~10min notary round trip: TCC
+    // anchors a notarized Developer ID app's permission grants on identifier +
+    // team, which is cdhash-independent and so survives an update. Without a
+    // ticket there is no such stable identity, so every build reads as a
+    // different client — the grant row stays but stops matching, and file access
+    // under Documents/Desktop/Downloads fails with EPERM and no re-prompt. At 24
+    // builds a day that revokes the user's grants faster than they can re-grant.
     notarize: isMacRelease,
     extraResources: [
       ...commonExtraResources,
@@ -457,8 +478,8 @@ module.exports = {
   // on Intel Macs. The beforeBuild hook performs Orca's targeted rebuild and
   // returns false so electron-builder does not rebuild optional cpu-features.
   npmRebuild: true,
-  // Why: undefined lets electron-builder infer stablyai/orca from package
-  // metadata and emit app-update.yml. Explicit null is the hard off switch.
+  // Why: Jaws has no trusted release feed; explicit null also prevents branch
+  // builds from publishing into Orca's release channels.
   publish: null
 }
 
