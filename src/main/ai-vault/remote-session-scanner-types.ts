@@ -6,12 +6,18 @@ import type { FileWithMtime } from './session-scanner-types'
 import type { AntigravityWorkspaceResolver } from './session-scanner-antigravity-history'
 
 export type RemoteScannerContext = {
-  provider: IFilesystemProvider
+  provider: RemoteSessionFilesystemProvider
   executionHostId: ExecutionHostId
   hostPlatform: RemoteHostPlatform
+  signal?: AbortSignal
   titleCaches: Map<string, Promise<Map<string, string>>>
   antigravityWorkspaceResolver: AntigravityWorkspaceResolver
 }
+
+export type RemoteSessionFilesystemProvider = Pick<
+  IFilesystemProvider,
+  'readDir' | 'readFile' | 'stat'
+>
 
 export type RemoteParserOptions = {
   executionHostId: ExecutionHostId
@@ -21,6 +27,9 @@ export type RemoteParserOptions = {
 export type RemoteSessionSource = {
   agent: AiVaultAgent
   rootDir: string
+  // Codex sources only: the CODEX_HOME the root belongs to, so bridged or
+  // backfilled rollout aliases across remote roots collapse to one canonical row.
+  codexHome?: string
   extensions: readonly string[]
   filePredicate?: (path: string) => boolean
   // Depth 0 denotes a direct child of rootDir.

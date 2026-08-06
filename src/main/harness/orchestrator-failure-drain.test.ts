@@ -9,6 +9,7 @@ import { advanceHarnessCompletion } from './verification'
 function topWorkerDone(subject: string): MessageRow {
   return {
     id: 'message-top',
+    run_id: 'run-1',
     from_handle: 'terminal-codex',
     to_handle: 'jaws-harness:run-1',
     subject,
@@ -31,12 +32,11 @@ function child(status: TaskRow['status']): TaskRow & {
 } {
   return {
     id: 'task-child',
+    run_id: 'run-1',
     parent_id: 'task-top',
     created_by_terminal_handle: 'terminal-codex',
     task_title: 'Child',
     display_name: null,
-    execution_kind: 'worktree',
-    agent_slot: 'codex',
     spec: 'Child work.',
     status,
     deps: '[]',
@@ -65,7 +65,8 @@ function setupRun() {
     status: 'running',
     taskId: 'task-top',
     dispatchId: 'dispatch-top',
-    agentTerminalHandle: 'terminal-codex'
+    agentTerminalHandle: 'terminal-codex',
+    orchestrationRunId: 'orchestration-run'
   })
   return { store, run }
 }
@@ -180,7 +181,7 @@ describe('orchestrator failure drain', () => {
       dispatchId: 'dispatch-child',
       taskId: 'task-child',
       parentTaskId: 'task-top',
-      ownerHandle: `jaws-harness:${run.id}`,
+      ownerHandle: 'terminal-codex',
       error: expect.stringContaining('drain timed out')
     })
     expect(store.getHarnessRun(run.id)?.candidates[0]).toMatchObject({

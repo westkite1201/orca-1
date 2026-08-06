@@ -6,6 +6,7 @@ import { findHarnessWorkerResult } from './worker-result'
 function completion(id: string, sequence: number): MessageRow {
   return {
     id,
+    run_id: 'run-1',
     from_handle: 'terminal-codex',
     to_handle: 'jaws-harness:run-1',
     subject: 'Done',

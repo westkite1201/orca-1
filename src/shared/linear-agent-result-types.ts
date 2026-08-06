@@ -6,6 +6,7 @@ import type {
   LinearIssueTaskUpdateRequest
 } from './linear-agent-access'
 import type { LinearInlineMedia } from './linear-inline-media'
+import type { LinearIssueActivityEntry } from './linear-issue-activity'
 
 export type LinearIssueSummary = {
   id: string
@@ -16,6 +17,7 @@ export type LinearIssueSummary = {
   state?: LinearNamedEntity | null
   team?: (LinearNamedEntity & { key?: string | null }) | null
   project?: LinearNamedEntity | null
+  parent?: { id: string; identifier: string } | null
   cycle?: LinearNamedEntity | null
   assignee?: LinearUserSummary | null
   labels: LinearNamedEntity[]
@@ -71,6 +73,8 @@ export type LinearIssueAttachment = {
 export type LinearIssueRelation = {
   id: string
   type?: string | null
+  direction: 'outbound' | 'inbound'
+  relationship: 'blocks' | 'blockedBy' | 'relatedTo' | 'duplicateOf' | 'duplicatedBy' | 'similar'
   relatedIssue?: Pick<LinearIssueSummary, 'id' | 'identifier' | 'title' | 'url'> | null
 }
 
@@ -88,6 +92,7 @@ export type LinearIssueContextResult = {
   children?: LinearIssueChildNode[]
   attachments?: LinearIssueAttachment[]
   relations?: LinearIssueRelation[]
+  activity?: LinearIssueActivityEntry[]
   inlineMedia?: LinearInlineMedia[]
   meta: {
     requested: {
@@ -308,4 +313,14 @@ export type LinearCreateResult = {
     labelIds?: string[] | null
   }
   meta: { workspaceId: string; writeId: string; deduplicated: boolean }
+}
+
+export type LinearSaveIssueResult = {
+  issue: LinearCreateResult['issue']
+  meta: {
+    workspaceId: string
+    created: boolean
+    writeId?: string
+    deduplicated?: boolean
+  }
 }

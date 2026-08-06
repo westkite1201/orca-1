@@ -5,7 +5,7 @@ const getTerminalHandleMock = vi.hoisted(() => vi.fn())
 const originalTerminalHandle = process.env.ORCA_TERMINAL_HANDLE
 const originalPaneKey = process.env.ORCA_PANE_KEY
 function lifecycleGroupRecipientError(type: 'worker_done' | 'heartbeat'): string {
-  return `${type} messages must be sent to a concrete coordinator terminal handle, not a group address.`
+  return `${type} messages belong to one exact Dispatch and cannot target a group address.`
 }
 
 // Why: isolate the handler's flag-to-param mapping; printResult only writes output.
@@ -15,6 +15,24 @@ vi.mock('../selectors', () => ({ getTerminalHandle: getTerminalHandleMock }))
 import { ORCHESTRATION_HANDLERS } from './orchestration'
 import { RuntimeClientError } from '../runtime-client'
 import { printResult } from '../format'
+
+function staleHandleError(): RuntimeClientError {
+  return new RuntimeClientError('terminal_handle_stale', 'terminal_handle_stale')
+}
+
+// Queues the stale-handle remint chain shared by coordinator commands:
+// stale terminal.show → resolvePane returns liveHandle → downstream RPC result.
+function stubStaleHandleRemint(liveHandle: string, downstream: unknown): void {
+  callMock
+    .mockRejectedValueOnce(staleHandleError())
+    .mockResolvedValueOnce({ result: { terminal: { handle: liveHandle } } })
+    .mockResolvedValueOnce(downstream)
+}
+
+// Queues a stale terminal.show followed by a resolvePane remint that fails with `error`.
+function stubStaleHandleRemintFailure(error: RuntimeClientError): void {
+  callMock.mockRejectedValueOnce(staleHandleError()).mockRejectedValueOnce(error)
+}
 
 afterEach(() => {
   getTerminalHandleMock.mockReset()
@@ -28,46 +46,6 @@ afterEach(() => {
   } else {
     process.env.ORCA_PANE_KEY = originalPaneKey
   }
-})
-
-describe('orchestration reset CLI handler', () => {
-  beforeEach(() => {
-    callMock.mockReset().mockResolvedValue({ result: { reset: 'all' } })
-  })
-
-  const invoke = (flags: Map<string, string | boolean>) =>
-    ORCHESTRATION_HANDLERS['orchestration reset']({
-      flags,
-      client: { call: callMock },
-      json: true
-    } as never)
-
-  it('sends all: true for a bare `reset` (no scope flag)', async () => {
-    await invoke(new Map())
-    expect(callMock).toHaveBeenCalledWith('orchestration.reset', {
-      all: true,
-      tasks: undefined,
-      messages: undefined
-    })
-  })
-
-  it('sends only the tasks scope for --tasks', async () => {
-    await invoke(new Map([['tasks', true]]))
-    expect(callMock).toHaveBeenCalledWith('orchestration.reset', {
-      all: undefined,
-      tasks: true,
-      messages: undefined
-    })
-  })
-
-  it('sends only the all scope for --all (no implicit extra scopes)', async () => {
-    await invoke(new Map([['all', true]]))
-    expect(callMock).toHaveBeenCalledWith('orchestration.reset', {
-      all: true,
-      tasks: undefined,
-      messages: undefined
-    })
-  })
 })
 
 describe('orchestration send structured payload flags', () => {
@@ -95,8 +73,10 @@ describe('orchestration send structured payload flags', () => {
         ['type', 'worker_done'],
         ['task-id', 'task_1'],
         ['dispatch-id', 'ctx_1'],
+        ['outcome', 'succeeded'],
         ['files-modified', 'src/a.ts, src/b.ts'],
-        ['report-path', 'reports/done.md']
+        ['report-path', 'reports/done.md'],
+        ['commit-sha', 'a'.repeat(40)]
       ])
     )
 
@@ -111,8 +91,10 @@ describe('orchestration send structured payload flags', () => {
       payload: JSON.stringify({
         taskId: 'task_1',
         dispatchId: 'ctx_1',
+        outcome: 'succeeded',
         filesModified: ['src/a.ts', 'src/b.ts'],
-        reportPath: 'reports/done.md'
+        reportPath: 'reports/done.md',
+        commitSha: 'a'.repeat(40)
       }),
       devMode: false
     })
@@ -131,6 +113,25 @@ describe('orchestration send structured payload flags', () => {
     )
 
     expect(callMock).toHaveBeenCalledWith('orchestration.send', expect.objectContaining({ body }))
+  })
+
+  it('carries Dispatch authority in the RPC envelope instead of message params', async () => {
+    await invokeSend(
+      new Map<string, string | boolean>([
+        ['from', 'term_worker'],
+        ['subject', 'alive'],
+        ['type', 'heartbeat'],
+        ['dispatch-id', 'ctx_1'],
+        ['dispatch-capability', 'dcap_secret'],
+        ['retry-request', 'mutation_1']
+      ])
+    )
+
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.send',
+      expect.not.objectContaining({ dispatchCapability: expect.anything() }),
+      { orchestrationCapability: 'dcap_secret', orchestrationRequestId: 'mutation_1' }
+    )
   })
 
   it('rejects mixing raw payload with structured payload flags', async () => {
@@ -194,7 +195,8 @@ describe('orchestration send structured payload flags', () => {
         ['from', 'term_worker'],
         ['to', 'term_coord'],
         ['subject', 'done'],
-        ['type', 'worker_done']
+        ['type', 'worker_done'],
+        ['outcome', 'succeeded']
       ])
     )
 
@@ -206,7 +208,7 @@ describe('orchestration send structured payload flags', () => {
       type: 'worker_done',
       priority: undefined,
       threadId: undefined,
-      payload: undefined,
+      payload: JSON.stringify({ outcome: 'succeeded' }),
       devMode: false
     })
   })
@@ -218,7 +220,8 @@ describe('orchestration send structured payload flags', () => {
       new Map<string, string | boolean>([
         ['to', 'term_coord'],
         ['subject', 'done'],
-        ['type', 'worker_done']
+        ['type', 'worker_done'],
+        ['outcome', 'succeeded']
       ])
     )
 
@@ -231,7 +234,7 @@ describe('orchestration send structured payload flags', () => {
       type: 'worker_done',
       priority: undefined,
       threadId: undefined,
-      payload: undefined,
+      payload: JSON.stringify({ outcome: 'succeeded' }),
       devMode: false
     })
   })
@@ -246,7 +249,8 @@ describe('orchestration send structured payload flags', () => {
         new Map<string, string | boolean>([
           ['to', 'term_coord'],
           ['subject', 'update'],
-          ['type', type]
+          ['type', type],
+          ...(type === 'worker_done' ? ([['outcome', 'succeeded']] as const) : [])
         ])
       )
 
@@ -270,7 +274,8 @@ describe('orchestration send structured payload flags', () => {
       new Map<string, string | boolean>([
         ['to', 'term_coord'],
         ['subject', 'done'],
-        ['type', 'worker_done']
+        ['type', 'worker_done'],
+        ['outcome', 'succeeded']
       ])
     )
 
@@ -290,7 +295,8 @@ describe('orchestration send structured payload flags', () => {
         new Map<string, string | boolean>([
           ['to', 'term_coord'],
           ['subject', 'done'],
-          ['type', 'worker_done']
+          ['type', 'worker_done'],
+          ['outcome', 'succeeded']
         ])
       )
     ).rejects.toMatchObject({
@@ -310,7 +316,8 @@ describe('orchestration send structured payload flags', () => {
           new Map<string, string | boolean>([
             ['to', 'term_coord'],
             ['subject', 'update'],
-            ['type', type]
+            ['type', type],
+            ...(type === 'worker_done' ? ([['outcome', 'succeeded']] as const) : [])
           ])
         )
       ).rejects.toMatchObject({ code: 'no_active_sender_terminal' })
@@ -321,7 +328,7 @@ describe('orchestration send structured payload flags', () => {
   )
 })
 
-describe('orchestration coordinator logical identity', () => {
+describe('orchestration dispatch coordinator handle', () => {
   beforeEach(() => {
     callMock.mockReset()
     getTerminalHandleMock.mockReset()
@@ -329,26 +336,39 @@ describe('orchestration coordinator logical identity', () => {
     delete process.env.ORCA_PANE_KEY
   })
 
-  const invoke = (
-    command: 'dispatch' | 'dispatch-show' | 'run',
-    flags: Map<string, string | boolean>
-  ) =>
-    ORCHESTRATION_HANDLERS[`orchestration ${command}`]({
+  const invokeDispatch = (flags: Map<string, string | boolean>) =>
+    ORCHESTRATION_HANDLERS['orchestration dispatch']({
       flags,
       client: { call: callMock },
       cwd: '/tmp/repo',
       json: true
     } as never)
 
-  it('keeps the injected coordinator handle as the durable dispatch inbox', async () => {
-    process.env.ORCA_TERMINAL_HANDLE = 'term_original_coord'
+  const invokeDispatchShow = (flags: Map<string, string | boolean>) =>
+    ORCHESTRATION_HANDLERS['orchestration dispatch-show']({
+      flags,
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+  const invokeRun = (flags: Map<string, string | boolean>) =>
+    ORCHESTRATION_HANDLERS['orchestration coordinator-start']({
+      flags,
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+  it('remints a stale coordinator env handle from the caller pane key', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale_coord'
     process.env.ORCA_PANE_KEY = 'tab_coord:leaf_coord'
-    callMock.mockResolvedValue({
+    stubStaleHandleRemint('term_live_coord', {
       result: { dispatch: { id: 'ctx_1', task_id: 'task_1', status: 'dispatched' } }
     })
+    getTerminalHandleMock.mockRejectedValue(new Error('active terminal fallback is unsafe'))
 
-    await invoke(
-      'dispatch',
+    await invokeDispatch(
       new Map<string, string | boolean>([
         ['task', 'task_1'],
         ['to', 'term_worker'],
@@ -356,12 +376,17 @@ describe('orchestration coordinator logical identity', () => {
       ])
     )
 
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', {
+      terminal: 'term_stale_coord'
+    })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_coord:leaf_coord'
+    })
     expect(getTerminalHandleMock).not.toHaveBeenCalled()
-    expect(callMock).toHaveBeenCalledWith('orchestration.dispatch', {
+    expect(callMock).toHaveBeenNthCalledWith(3, 'orchestration.dispatch', {
       task: 'task_1',
       to: 'term_worker',
-      from: 'term_original_coord',
-      senderPaneKey: 'tab_coord:leaf_coord',
+      from: 'term_live_coord',
       inject: true,
       dryRun: undefined,
       returnPreamble: undefined,
@@ -369,40 +394,100 @@ describe('orchestration coordinator logical identity', () => {
     })
   })
 
-  it('uses the same durable inbox in preamble previews and coordinator runs', async () => {
-    process.env.ORCA_TERMINAL_HANDLE = 'term_original_coord'
-    process.env.ORCA_PANE_KEY = 'tab_coord:leaf_coord'
-    callMock
-      .mockResolvedValueOnce({ result: { dispatch: null, preamble: 'preamble' } })
-      .mockResolvedValueOnce({ result: { runId: 'run_1', status: 'running' } })
+  it('rejects stale coordinator env handles when the caller pane cannot be proven', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale_coord'
+    callMock.mockRejectedValueOnce(staleHandleError())
+    getTerminalHandleMock.mockResolvedValue('term_wrong_active')
 
-    await invoke(
-      'dispatch-show',
+    await expect(
+      invokeDispatch(
+        new Map<string, string | boolean>([
+          ['task', 'task_1'],
+          ['to', 'term_worker']
+        ])
+      )
+    ).rejects.toMatchObject({
+      code: 'no_active_sender_terminal'
+    })
+
+    expect(callMock).toHaveBeenCalledTimes(1)
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+  })
+
+  it('propagates unexpected caller pane remint failures for coordinator commands', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale_coord'
+    process.env.ORCA_PANE_KEY = 'tab_coord:leaf_coord'
+    stubStaleHandleRemintFailure(
+      new RuntimeClientError('runtime_unavailable', 'runtime_unavailable')
+    )
+    getTerminalHandleMock.mockResolvedValue('term_wrong_active')
+
+    await expect(
+      invokeDispatch(
+        new Map<string, string | boolean>([
+          ['task', 'task_1'],
+          ['to', 'term_worker']
+        ])
+      )
+    ).rejects.toMatchObject({
+      code: 'runtime_unavailable'
+    })
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', {
+      terminal: 'term_stale_coord'
+    })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_coord:leaf_coord'
+    })
+    expect(callMock).toHaveBeenCalledTimes(2)
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+  })
+
+  it('uses a live coordinator handle for dispatch-show preamble previews', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale_coord'
+    process.env.ORCA_PANE_KEY = 'tab_coord:leaf_coord'
+    stubStaleHandleRemint('term_live_coord', {
+      result: { dispatch: null, preamble: 'preamble' }
+    })
+    getTerminalHandleMock.mockRejectedValue(new Error('active terminal fallback is unsafe'))
+
+    await invokeDispatchShow(
       new Map<string, string | boolean>([
         ['task', 'task_1'],
         ['preamble', true]
       ])
     )
-    await invoke('run', new Map([['spec', 'run the plan']]))
 
-    expect(callMock).toHaveBeenNthCalledWith(1, 'orchestration.dispatchShow', {
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', {
+      terminal: 'term_stale_coord'
+    })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_coord:leaf_coord'
+    })
+    expect(callMock).toHaveBeenNthCalledWith(3, 'orchestration.dispatchShow', {
       task: 'task_1',
       preamble: true,
-      from: 'term_original_coord',
+      from: 'term_live_coord',
       devMode: false
     })
-    expect(callMock).toHaveBeenNthCalledWith(2, 'orchestration.run', {
-      spec: 'run the plan',
-      from: 'term_original_coord',
-      coordinatorPaneKey: 'tab_coord:leaf_coord',
-      pollIntervalMs: undefined,
-      maxConcurrent: undefined,
-      worktree: undefined
+  })
+
+  it('retires the legacy coordinator command without runtime effects', async () => {
+    await expect(
+      invokeRun(new Map<string, string | boolean>([['spec', 'run the plan']]))
+    ).rejects.toMatchObject({
+      code: 'orchestration_migration_required',
+      data: {
+        reason: 'command_retired',
+        effectsApplied: false,
+        nextCommandArgs: ['skills', 'get', 'orchestration', '--full']
+      }
     })
+    expect(callMock).not.toHaveBeenCalled()
   })
 })
 
-describe('orchestration task-create caller identity', () => {
+describe('orchestration task-create caller handle', () => {
   beforeEach(() => {
     callMock.mockReset()
     getTerminalHandleMock.mockReset()
@@ -410,33 +495,139 @@ describe('orchestration task-create caller identity', () => {
     delete process.env.ORCA_PANE_KEY
   })
 
-  it('sends the durable creator handle and remint-stable pane key together', async () => {
-    process.env.ORCA_TERMINAL_HANDLE = 'term_original_coord'
-    process.env.ORCA_PANE_KEY = 'tab_coord:leaf_coord'
-    callMock.mockResolvedValue({ result: { task: { id: 'task_1', status: 'ready' } } })
-
-    await ORCHESTRATION_HANDLERS['orchestration task-create']({
-      flags: new Map([
-        ['spec', 'do work'],
-        ['execution-kind', 'worktree'],
-        ['agent-slot', 'codex']
-      ]),
+  const invokeTaskCreate = (flags: Map<string, string | boolean>) =>
+    ORCHESTRATION_HANDLERS['orchestration task-create']({
+      flags,
       client: { call: callMock },
       cwd: '/tmp/repo',
       json: true
     } as never)
 
-    expect(getTerminalHandleMock).not.toHaveBeenCalled()
-    expect(callMock).toHaveBeenCalledWith('orchestration.taskCreate', {
+  it('records a live env terminal handle as task creator', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_creator'
+    callMock
+      .mockResolvedValueOnce({ result: { terminal: { handle: 'term_creator' } } })
+      .mockResolvedValueOnce({ result: { task: { id: 'task_1', status: 'ready' } } })
+
+    await invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_creator' })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'orchestration.taskCreate', {
       spec: 'do work',
       taskTitle: undefined,
       displayName: undefined,
-      executionKind: 'worktree',
-      agentSlot: 'codex',
       deps: undefined,
       parent: undefined,
-      callerTerminalHandle: 'term_original_coord',
-      callerPaneKey: 'tab_coord:leaf_coord'
+      run: undefined,
+      callerTerminalHandle: 'term_creator'
+    })
+  })
+
+  it('fails closed when a stale task creator handle cannot be reminted', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale'
+    callMock.mockRejectedValueOnce(staleHandleError())
+    getTerminalHandleMock.mockResolvedValue('term_wrong_active')
+
+    await expect(
+      invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+    ).rejects.toMatchObject({ code: 'no_active_sender_terminal' })
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_stale' })
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+    expect(callMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('propagates runtime unavailability while proving the bound coordinator', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_creator'
+    callMock.mockRejectedValueOnce(
+      new RuntimeClientError('runtime_unavailable', 'runtime_unavailable')
+    )
+
+    await expect(
+      invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+    ).rejects.toMatchObject({ code: 'runtime_unavailable' })
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_creator' })
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+    expect(callMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('propagates runtime unavailability while reminting the bound coordinator', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale'
+    process.env.ORCA_PANE_KEY = 'tab_creator:leaf_creator'
+    stubStaleHandleRemintFailure(
+      new RuntimeClientError('runtime_unavailable', 'runtime_unavailable')
+    )
+    getTerminalHandleMock.mockResolvedValue('term_wrong_active')
+
+    await expect(
+      invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+    ).rejects.toMatchObject({ code: 'runtime_unavailable' })
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_stale' })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_creator:leaf_creator'
+    })
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+    expect(callMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('propagates unexpected caller pane remint failures for task creation', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale'
+    process.env.ORCA_PANE_KEY = 'tab_creator:leaf_creator'
+    stubStaleHandleRemintFailure(new RuntimeClientError('permission_denied', 'denied'))
+    getTerminalHandleMock.mockResolvedValue('term_wrong_active')
+
+    await expect(
+      invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+    ).rejects.toMatchObject({
+      code: 'permission_denied'
+    })
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_stale' })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_creator:leaf_creator'
+    })
+    expect(callMock).toHaveBeenCalledTimes(2)
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+  })
+
+  it('propagates unexpected env handle validation failures', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_creator'
+    callMock.mockRejectedValueOnce(new RuntimeClientError('permission_denied', 'denied'))
+
+    await expect(
+      invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+    ).rejects.toMatchObject({
+      code: 'permission_denied'
+    })
+
+    expect(callMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('remints a stale task creator env handle from the caller pane key', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_stale'
+    process.env.ORCA_PANE_KEY = 'tab_creator:leaf_creator'
+    stubStaleHandleRemint('term_live', {
+      result: { task: { id: 'task_1', status: 'ready' } }
+    })
+    getTerminalHandleMock.mockRejectedValue(new Error('active terminal fallback is unsafe'))
+
+    await invokeTaskCreate(new Map<string, string | boolean>([['spec', 'do work']]))
+
+    expect(callMock).toHaveBeenNthCalledWith(1, 'terminal.show', { terminal: 'term_stale' })
+    expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.resolvePane', {
+      paneKey: 'tab_creator:leaf_creator'
+    })
+    expect(getTerminalHandleMock).not.toHaveBeenCalled()
+    expect(callMock).toHaveBeenNthCalledWith(3, 'orchestration.taskCreate', {
+      spec: 'do work',
+      taskTitle: undefined,
+      displayName: undefined,
+      deps: undefined,
+      parent: undefined,
+      run: undefined,
+      callerTerminalHandle: 'term_live'
     })
   })
 })
@@ -497,11 +688,15 @@ describe('orchestration timeout flag validation', () => {
     // the non-consuming all mode instead of the destructive mark-read default.
     expect(callMock).toHaveBeenCalledWith('orchestration.check', {
       terminal: 'term_worker',
+      terminalPaneKey: undefined,
       unread: false,
       peek: true,
       all: undefined,
       types: undefined,
-      inject: undefined,
+      format: undefined,
+      compatibilityCliCommand: expect.stringMatching(/^orca(?:-ide)?$/),
+      run: undefined,
+      ack: undefined,
       wait: true,
       timeoutMs: 250
     })
@@ -622,32 +817,65 @@ describe('orchestration timeout flag validation', () => {
       'orchestration.ask',
       {
         to: 'term_coord',
+        run: undefined,
         question: 'Proceed?',
+        resume: undefined,
         options: undefined,
         timeoutMs: 123,
-        from: 'term_worker'
+        from: 'term_worker',
+        compatibilityCliCommand: expect.stringMatching(/^orca(?:-ide)?$/),
+        compatibilityWindowsCommand: undefined
       },
-      { timeoutMs: 5_123 }
+      { timeoutMs: 5_123, orchestrationCapability: undefined }
     )
+  })
+
+  it('passes an ask resume without creating a new question payload', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_worker'
+    callMock.mockResolvedValue({
+      result: {
+        answer: 'yes',
+        messageId: 'msg_question',
+        threadId: 'msg_question',
+        timedOut: false
+      }
+    })
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await invokeAsk(new Map<string, string | boolean>([['resume', 'msg_question']]))
+
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.ask',
+      {
+        to: undefined,
+        run: undefined,
+        question: undefined,
+        resume: 'msg_question',
+        options: undefined,
+        timeoutMs: undefined,
+        from: 'term_worker',
+        compatibilityCliCommand: expect.stringMatching(/^orca(?:-ide)?$/),
+        compatibilityWindowsCommand: undefined
+      },
+      { timeoutMs: 605_000, orchestrationCapability: undefined }
+    )
+  })
+
+  it('rejects ambiguous ask create/resume input before RPC', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_worker'
+    await expect(
+      invokeAsk(
+        new Map<string, string | boolean>([
+          ['question', 'new'],
+          ['resume', 'msg_old']
+        ])
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(callMock).not.toHaveBeenCalled()
   })
 })
 
 describe('orchestration task-list brief output', () => {
-  it('passes the parent lane filter to the runtime', async () => {
-    callMock.mockReset().mockResolvedValue({ result: { tasks: [], count: 0 } })
-
-    await ORCHESTRATION_HANDLERS['orchestration task-list']({
-      flags: new Map([['parent', 'task_root']]),
-      client: { call: callMock },
-      json: true
-    } as never)
-
-    expect(callMock).toHaveBeenCalledWith(
-      'orchestration.taskList',
-      expect.objectContaining({ parent: 'task_root' })
-    )
-  })
-
   it('requests server-side brief and falls back client-side for older runtimes', async () => {
     callMock.mockReset().mockResolvedValue({
       result: {

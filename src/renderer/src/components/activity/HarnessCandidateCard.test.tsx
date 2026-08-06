@@ -22,6 +22,7 @@ function candidate(status: HarnessCandidate['status']): HarnessCandidate {
     verificationTerminalHandle: 'verification-terminal',
     verificationTerminalPaneKey: 'verification-tab:verification-leaf',
     verificationTerminalOwnership: 'owned',
+    orchestrationRunId: 'orchestration-run',
     taskId: 'task',
     dispatchId: 'dispatch',
     workerResult: null,

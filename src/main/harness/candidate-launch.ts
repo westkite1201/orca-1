@@ -6,8 +6,8 @@ import type {
   RuntimeTerminalWait,
   RuntimeWorktreeCreateResult
 } from '../../shared/runtime-types'
+import { hasSamePaneIdentity } from '../../shared/stable-pane-id'
 import type { DispatchContextRow, TaskRow } from '../runtime/orchestration/types'
-import { hasSamePaneIdentity } from '../runtime/orchestration/lifecycle-reconciliation'
 import {
   harnessCandidateBranch,
   harnessRecoveryStartedAt,
@@ -294,7 +294,8 @@ export async function dispatchHarnessCandidate(args: {
     const result = await runtime.call<DispatchResult>('orchestration.dispatch', {
       task: candidate.taskId,
       to: terminalHandle,
-      from: `jaws-harness:${run.id}`,
+      from: terminalHandle,
+      run: candidate.orchestrationRunId,
       inject: true
     })
     if (!result.injected || !result.dispatch?.id) {

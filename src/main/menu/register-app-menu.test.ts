@@ -145,7 +145,6 @@ describe('registerAppMenu', () => {
 
     const parentLabel = isMac ? 'Orca' : 'Help'
     const labels = getSubmenu(getTemplate(), parentLabel).map((entry) => entry.label)
-
     expect(labels).not.toContain('Check for Updates...')
     expect(options.onCheckForUpdates).not.toHaveBeenCalled()
   })

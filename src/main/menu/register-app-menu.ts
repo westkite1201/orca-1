@@ -38,6 +38,9 @@ type RegisterAppMenuOptions = {
   onToggleAppearance: (key: AppearanceMenuKey) => void
   getAppearanceState: () => AppearanceMenuState
   getKeybindings?: () => KeybindingOverrides | undefined
+  // Why: the macOS app-menu title. Passed the per-branch dev label since
+  // app.name is now pinned to a stable value for Keychain-key stability.
+  appMenuLabel?: string
 }
 
 function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
@@ -94,10 +97,15 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
     event
   ) => {
     const modifierClick = !event.triggeredByAccelerator
+    const localBuild = isMac && modifierClick && event.altKey === true
     const includePerfPrerelease =
-      modifierClick && (isMac ? event.metaKey === true : event.ctrlKey === true)
-    const includePrerelease = modifierClick && event.shiftKey === true
-    onCheckForUpdates?.({ includePrerelease, includePerfPrerelease })
+      !localBuild && modifierClick && (isMac ? event.metaKey === true : event.ctrlKey === true)
+    const includePrerelease = !localBuild && modifierClick && event.shiftKey === true
+    onCheckForUpdates?.({
+      includePrerelease,
+      includePerfPrerelease,
+      ...(localBuild ? { localBuild: true } : {})
+    })
   }
 
   const checkForUpdatesItem: Electron.MenuItemConstructorOptions | null =
@@ -134,7 +142,7 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
   // redundant "Orca" entry with roles that don't apply, so we omit it there
   // and distribute its items across File / Help instead.
   const macAppMenu: Electron.MenuItemConstructorOptions = {
-    label: app.name,
+    label: options.appMenuLabel ?? app.name,
     submenu: [
       { role: 'about' },
       ...(checkForUpdatesItem ? [checkForUpdatesItem] : []),

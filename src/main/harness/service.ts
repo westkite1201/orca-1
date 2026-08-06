@@ -1,5 +1,9 @@
 import type { Store } from '../persistence'
-import type { HarnessRun, HarnessStartInput } from '../../shared/harness-types'
+import {
+  deriveHarnessRunStatus,
+  type HarnessRun,
+  type HarnessStartInput
+} from '../../shared/harness-types'
 import type { GitStatusResult } from '../../shared/git-status-types'
 import type { RuntimeWorktreeRecord } from '../../shared/runtime-types'
 import { isGitRepoKind } from '../../shared/repo-kind'
@@ -22,6 +26,10 @@ export type HarnessStore = Pick<
 >
 
 type WorktreeShowResult = { worktree: RuntimeWorktreeRecord }
+export type HarnessSourcePreflight = {
+  source: RuntimeWorktreeRecord
+  baseSha: string
+}
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000
 const DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 15 * 60
@@ -32,6 +40,7 @@ export type HarnessServiceOptions = {
   pollIntervalMs?: number
   verificationTimeoutSeconds?: number
   runPrecheck?: HarnessVerificationRunner
+  onRunTerminal?: (run: HarnessRun) => Promise<void> | void
 }
 
 function errorMessage(error: unknown): string {
@@ -47,6 +56,7 @@ export class HarnessService {
   private readonly verificationTimeoutSeconds: number
   private readonly runPrecheck: HarnessVerificationRunner | undefined
   private readonly deferExecutionUntilMonitoring: boolean
+  private readonly onRunTerminal: HarnessServiceOptions['onRunTerminal']
 
   constructor(
     private readonly store: HarnessStore,
@@ -62,6 +72,7 @@ export class HarnessService {
       Math.floor(options.verificationTimeoutSeconds ?? DEFAULT_VERIFICATION_TIMEOUT_SECONDS)
     )
     this.runPrecheck = options.runPrecheck
+    this.onRunTerminal = options.onRunTerminal
     this.deferExecutionUntilMonitoring = options.deferExecutionUntilMonitoring === true
     if (options.autoMonitor !== false) {
       this.activateMonitoring()
@@ -100,6 +111,47 @@ export class HarnessService {
       throw new Error('A worktree, goal, and verification command are required.')
     }
 
+    const jawsRunId = input.jawsRunId?.trim() || null
+    const existingRun = jawsRunId
+      ? this.store.listHarnessRuns().find((run) => run.jawsRunId === jawsRunId)
+      : null
+    if (existingRun) {
+      return existingRun
+    }
+
+    const { source, baseSha } = await this.preflight(worktree)
+    const expectedBaseSha = input.expectedBaseSha?.trim()
+    if (expectedBaseSha && baseSha !== expectedBaseSha) {
+      throw new Error('The source HEAD changed after this plan was proposed.')
+    }
+    // Why: status is asynchronous, so another start may have persisted a run
+    // while this request was checking cleanliness.
+    assertNoActiveHarnessRun(this.store.listHarnessRuns(source.repoId), source.id)
+    const run = this.store.createHarnessRun({
+      repoId: source.repoId,
+      sourceWorktreeId: source.id,
+      sourceWorktreePath: source.git.path,
+      goal,
+      verificationCommand,
+      baseSha,
+      mode: input.mode,
+      ...(jawsRunId ? { jawsRunId } : {}),
+      ...(input.approvedPlan ? { approvedPlan: input.approvedPlan } : {}),
+      ...(input.approvedLinearMaterialization
+        ? { approvedLinearMaterialization: input.approvedLinearMaterialization }
+        : {})
+    })
+    if (this.monitoringActive || !this.deferExecutionUntilMonitoring) {
+      this.schedule(run.id)
+    }
+    return run
+  }
+
+  async preflight(worktreeSelector: string): Promise<HarnessSourcePreflight> {
+    const worktree = worktreeSelector.trim()
+    if (!worktree) {
+      throw new Error('A worktree is required.')
+    }
     const { worktree: source } = await this.runtime.call<WorktreeShowResult>('worktree.show', {
       worktree
     })
@@ -126,23 +178,9 @@ export class HarnessService {
     if (!baseSha) {
       throw new Error('Could not resolve the source HEAD.')
     }
-
-    // Why: status is asynchronous, so another start may have persisted a run
-    // while this request was checking cleanliness.
+    // Why: status lookup yields; recheck before callers synchronously persist a run or plan.
     assertNoActiveHarnessRun(this.store.listHarnessRuns(source.repoId), source.id)
-    const run = this.store.createHarnessRun({
-      repoId: source.repoId,
-      sourceWorktreeId: source.id,
-      sourceWorktreePath: source.git.path,
-      goal,
-      verificationCommand,
-      baseSha,
-      mode: input.mode
-    })
-    if (this.monitoringActive || !this.deferExecutionUntilMonitoring) {
-      this.schedule(run.id)
-    }
-    return run
+    return { source, baseSha }
   }
 
   list(repoId?: string): HarnessRun[] {
@@ -269,5 +307,9 @@ export class HarnessService {
       timeoutSeconds: this.verificationTimeoutSeconds,
       runPrecheck: this.runPrecheck
     })
+    const run = this.show(runId)
+    if (deriveHarnessRunStatus(run) === 'completed') {
+      await this.onRunTerminal?.(run)
+    }
   }
 }

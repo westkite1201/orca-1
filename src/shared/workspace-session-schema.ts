@@ -18,6 +18,7 @@ import type {
   WorkspaceSessionState
 } from './types'
 import { isValidTerminalTabId } from './terminal-tab-id'
+import { parseExecutionHostId, type ExecutionHostId } from './execution-host'
 import { isTuiAgent } from './tui-agent-config'
 import { normalizeBrowserHistoryEntries } from './workspace-session-browser-history'
 import { isWorkspaceKey } from './workspace-scope'
@@ -161,6 +162,7 @@ const persistedOpenFileSchema = z.object({
   language: z.string(),
   isPreview: z.boolean().optional(),
   runtimeEnvironmentId: z.string().nullable().optional(),
+  externalSshTargetId: z.string().trim().min(1).optional(),
   dirtyDraftContent: z.string().optional(),
   lastKnownDiskSignature: z.string().optional(),
   readOnly: z.boolean().optional(),
@@ -249,6 +251,12 @@ const browserHistoryEntriesSchema = z
 export const workspaceSessionStateSchema: z.ZodType<WorkspaceSessionState> = z.object({
   activeRepoId: z.string().nullable(),
   activeWorkspaceKey: workspaceKeySchema.nullable().optional(),
+  activeWorkspaceExecutionHostId: z
+    .custom<ExecutionHostId>(
+      (value) => typeof value === 'string' && Boolean(parseExecutionHostId(value))
+    )
+    .nullable()
+    .optional(),
   activeWorktreeId: z.string().nullable(),
   activeTabId: z.string().nullable(),
   tabsByWorktree: z.record(z.string(), z.array(terminalTabSchema)),
@@ -295,7 +303,22 @@ export const workspaceSessionStateSchema: z.ZodType<WorkspaceSessionState> = z.o
     )
     .optional(),
   defaultTerminalTabsAppliedByWorktreeId: z.record(z.string(), z.literal(true)).optional(),
-  sleepingAgentSessionsByPaneKey: sleepingAgentSessionsByPaneKeySchema
+  sleepingAgentSessionsByPaneKey: sleepingAgentSessionsByPaneKeySchema,
+  terminalPtyIncarnationsByPaneKey: z.record(z.string(), z.string().min(1).max(128)).optional(),
+  terminalTopologyRevisionByRepoId: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  terminalSurfaceTombstonesByPaneKey: z
+    .record(
+      z.string(),
+      z.object({
+        worktreeId: z.string(),
+        parentTabId: terminalTabIdSchema,
+        leafId: z.string(),
+        ptyId: z.string(),
+        incarnationId: z.string().min(1).max(128),
+        retiredAt: z.number().finite().nonnegative()
+      })
+    )
+    .optional()
 })
 
 export type ParsedWorkspaceSession =

@@ -16,7 +16,7 @@ export async function finalizeLegacyHarnessDispatchFailure(
   lastFailure: string | null
 ): Promise<void> {
   const { store, runtime, run, candidate } = context
-  const owner = `jaws-harness:${run.id}`
+  const owner = candidate.agentTerminalHandle
   if (task.created_by_terminal_handle !== owner) {
     store.updateHarnessCandidate(run.id, candidate.agent, {
       status: 'failed',
@@ -31,7 +31,9 @@ export async function finalizeLegacyHarnessDispatchFailure(
   await runtime.call('orchestration.taskUpdate', {
     id: task.id,
     status: 'failed',
-    result: failure
+    result: failure,
+    run: candidate.orchestrationRunId,
+    callerTerminalHandle: candidate.agentTerminalHandle
   })
   store.updateHarnessCandidate(run.id, candidate.agent, {
     status: 'failed',

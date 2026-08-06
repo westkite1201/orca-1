@@ -73,10 +73,10 @@ function createRuntime(scenario: RuntimeScenario = {}): {
     ? [
         {
           id: `task-${scenario.existingTask.agent}`,
+          run_id: `run-${scenario.existingTask.agent}`,
           spec: scenario.existingTask.spec,
           task_title: `Jaws Harness: ${scenario.existingTask.agent === 'codex' ? 'Codex' : 'Claude'}`,
-          created_by_terminal_handle: 'jaws-harness:run-1',
-          status: 'ready'
+          created_by_terminal_handle: `terminal-${scenario.existingTask.agent}`
         }
       ]
     : []
@@ -245,19 +245,22 @@ function createRuntime(scenario: RuntimeScenario = {}): {
           } satisfies RuntimeTerminalWait)
       }
     }
+    if (method === 'orchestration.runCreate') {
+      return { run: { id: `run-${String(params.from).split('-').at(-1)}` } }
+    }
     if (method === 'orchestration.taskCreate') {
       const agent = String(params.taskTitle).includes('Codex') ? 'codex' : 'claude'
       tasks.push({
         id: `task-${agent}`,
+        run_id: params.run,
         spec: params.spec,
         task_title: params.taskTitle,
-        created_by_terminal_handle: params.callerTerminalHandle,
-        status: 'ready'
+        created_by_terminal_handle: params.callerTerminalHandle
       })
       return { task: { id: `task-${agent}` } }
     }
     if (method === 'orchestration.taskList') {
-      return { tasks }
+      return { tasks: tasks.filter((task) => task.run_id === params.run) }
     }
     if (method === 'orchestration.dispatch') {
       const agent = String(params.to).endsWith('codex') ? 'codex' : 'claude'
@@ -373,9 +376,7 @@ describe('HarnessService', () => {
     expect(creates.every((params) => params.branchNameOverride === params.name)).toBe(true)
     expect(creates.every((params) => params.activate === false)).toBe(true)
     expect(creates.every((params) => !('startupPrompt' in params))).toBe(true)
-    expect(new Set(creates.map((params) => params.startupAgent))).toEqual(
-      new Set(['codex', 'claude'])
-    )
+    expect(creates.map((params) => params.startupAgent).sort()).toEqual(['claude', 'codex'])
 
     const tasks = callsFor(call, 'orchestration.taskCreate')
     const expectedSpec =
@@ -389,9 +390,7 @@ describe('HarnessService', () => {
     const dispatches = callsFor(call, 'orchestration.dispatch')
     expect(dispatches).toHaveLength(2)
     expect(dispatches.every((params) => params.inject === true)).toBe(true)
-    expect(new Set(dispatches.map((params) => params.from))).toEqual(
-      new Set([`jaws-harness:${started.id}`])
-    )
+    expect(dispatches.map((p) => p.from).sort()).toEqual(['terminal-claude', 'terminal-codex'])
   })
 
   it.each([

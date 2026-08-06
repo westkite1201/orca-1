@@ -1,7 +1,5 @@
 import productProfile from '../../../../shared/product-profile.json'
 
-export type RepoKind = 'git' | 'folder'
-
 export type GitAvailability = 'checking' | 'available' | 'unavailable' | 'unknown'
 
 function pathSeparatorFor(pathValue: string): '/' | '\\' {

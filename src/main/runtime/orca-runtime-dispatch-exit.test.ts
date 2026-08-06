@@ -52,16 +52,22 @@ describe('OrcaRuntimeService dispatch cleanup on terminal exit', () => {
     expect(db.getTask(task.id)?.status).toBe('ready')
   })
 
-  it('does not escalate a Harness-owned exit to an unrelated coordinator', () => {
+  it('keeps a Harness-owned exit scoped to its Run', () => {
     const runtime = new OrcaRuntimeService()
     db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)
 
     const leafId = '22222222-2222-4222-8222-222222222222'
     const paneKey = makePaneKey('tab-harness-worker', leafId)
+    const run = db.createRun({
+      objective: 'Jaws Harness: Codex',
+      coordinatorHandle: 'terminal-codex',
+      coordinatorPaneKey: paneKey
+    })
     const task = db.createTask({
       spec: 'Harness work',
-      createdByTerminalHandle: 'jaws-harness:harness-run'
+      createdByTerminalHandle: 'terminal-codex',
+      runId: run.id
     })
     const dispatch = db.createDispatchContext(task.id, 'term_before_restart', paneKey)
     db.createCoordinatorRun({ spec: 'unrelated work', coordinatorHandle: 'generic-coordinator' })
@@ -93,10 +99,13 @@ describe('OrcaRuntimeService dispatch cleanup on terminal exit', () => {
 
     expect(db.getDispatchContextById(dispatch.id)?.status).toBe('failed')
     expect(db.getTask(task.id)).toMatchObject({
-      status: 'failed',
-      result: 'Agent exited with code 9'
+      status: 'ready',
+      result: null
     })
     expect(db.getUnreadMessages('generic-coordinator')).toEqual([])
+    expect(db.getUnreadMessages('terminal-codex')).toEqual([
+      expect.objectContaining({ run_id: run.id, type: 'escalation' })
+    ])
   })
 
   it('wakes the Harness coordinator when a delegated child exits', () => {
@@ -104,15 +113,22 @@ describe('OrcaRuntimeService dispatch cleanup on terminal exit', () => {
     db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)
 
+    const run = db.createRun({
+      objective: 'Jaws Orchestrator',
+      coordinatorHandle: 'term_coord_h0',
+      coordinatorPaneKey: 'tab-coord:leaf-coord'
+    })
     const root = db.createTask({
       spec: 'Coordinate work',
-      createdByTerminalHandle: 'jaws-harness:harness-run'
+      createdByTerminalHandle: 'term_coord_h0',
+      runId: run.id
     })
     db.createDispatchContext(root.id, 'term_coord_live_h1', 'tab-coord:leaf-coord')
     const child = db.createTask({
       spec: 'Delegated work',
       parentId: root.id,
-      createdByTerminalHandle: 'term_coord_h0'
+      createdByTerminalHandle: 'term_coord_h0',
+      runId: run.id
     })
     const leafId = '33333333-3333-4333-8333-333333333333'
     const paneKey = makePaneKey('tab-child', leafId)

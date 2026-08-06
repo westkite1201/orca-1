@@ -15,6 +15,7 @@ function workerDone(
 ): MessageRow {
   return {
     id: 'message-parent',
+    run_id: 'run-1',
     from_handle: 'terminal-codex',
     to_handle: 'jaws-harness:run-1',
     subject: 'Integrated',
@@ -34,12 +35,11 @@ function workerDone(
 function childTask(): TaskRow {
   return {
     id: 'task-child',
+    run_id: 'run-1',
     parent_id: PARENT_TASK_ID,
     created_by_terminal_handle: 'terminal-codex',
     task_title: 'Child implementation',
     display_name: null,
-    execution_kind: 'worktree',
-    agent_slot: 'codex',
     spec: 'Implement the child lane.',
     status: 'dispatched',
     deps: '[]',
@@ -69,6 +69,7 @@ describe('orchestrator completion barrier', () => {
       branch: 'jaws-orchestrator',
       agentTerminalHandle: 'terminal-codex',
       agentTerminalPaneKey: 'pane-codex',
+      orchestrationRunId: 'orchestration-run',
       taskId: PARENT_TASK_ID,
       dispatchId: PARENT_DISPATCH_ID
     })
@@ -76,9 +77,10 @@ describe('orchestrator completion barrier', () => {
     let childStatus: TaskRow['status'] = 'dispatched'
     const call = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'orchestration.check') {
-        return params?.terminal === 'terminal-codex'
-          ? { messages: [workerDone('task-child', 'dispatch-child', 2)], count: 1 }
-          : { messages: [workerDone()], count: 1 }
+        return {
+          messages: [workerDone(), workerDone('task-child', 'dispatch-child', 2)],
+          count: 2
+        }
       }
       if (method === 'orchestration.dispatchShow') {
         if (params?.task === 'task-child') {
@@ -113,7 +115,11 @@ describe('orchestrator completion barrier', () => {
       status: 'running',
       error: expect.stringContaining('child lanes were still active')
     })
-    expect(call).toHaveBeenCalledWith('orchestration.taskList', { parent: PARENT_TASK_ID })
+    expect(call).toHaveBeenCalledWith('orchestration.taskList', {
+      parent: PARENT_TASK_ID,
+      run: 'orchestration-run',
+      callerTerminalHandle: 'terminal-codex'
+    })
     expect(runVerification).not.toHaveBeenCalled()
 
     childStatus = 'completed'

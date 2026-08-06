@@ -75,6 +75,7 @@ function workerDone(
 ): MessageRow {
   return {
     id,
+    run_id: 'run-1',
     from_handle: `terminal-${agent}`,
     to_handle: 'jaws-harness:run-1',
     subject: `${agent} done`,
@@ -225,7 +226,8 @@ describe('Harness completion verification', () => {
     expect(claude.status).toBe('running')
     expect(runPrecheck).not.toHaveBeenCalled()
     expect(callsFor(call, 'orchestration.check')[0]?.[1]).toEqual({
-      terminal: 'jaws-harness:run-1',
+      terminal: 'terminal-codex',
+      run: 'run-1',
       all: true,
       types: 'worker_done'
     })

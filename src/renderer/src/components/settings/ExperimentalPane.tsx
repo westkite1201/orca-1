@@ -8,6 +8,7 @@ import { HiddenExperimentalGroup } from './HiddenExperimentalGroup'
 import { NumberField, SettingsSwitch } from './SettingsFormControls'
 import { translate } from '@/i18n/i18n'
 import { NativeChatExperimentalSetting } from './NativeChatExperimentalSetting'
+import { AgentDashboardExperimentalSetting } from './AgentDashboardExperimentalSetting'
 import { EphemeralVmsExperimentalSetting } from './EphemeralVmsExperimentalSetting'
 import {
   MAX_AGENT_HIBERNATION_IDLE_MS,
@@ -34,6 +35,9 @@ export function ExperimentalPane({
 }: ExperimentalPaneProps): React.JSX.Element {
   const searchQuery = useAppStore((s) => s.settingsSearchQuery)
   const showPet = matchesSettingsSearch(searchQuery, [getExperimentalSearchEntry().pet])
+  const showAgentDashboard = matchesSettingsSearch(searchQuery, [
+    getExperimentalSearchEntry().agentDashboard
+  ])
   const showNativeChat = matchesSettingsSearch(searchQuery, [
     getExperimentalSearchEntry().nativeChat
   ])
@@ -98,6 +102,10 @@ export function ExperimentalPane({
             </button>
           </div>
         </SearchableSetting>
+      ) : null}
+
+      {showAgentDashboard ? (
+        <AgentDashboardExperimentalSetting settings={settings} updateSettings={updateSettings} />
       ) : null}
 
       {showNativeChat ? (

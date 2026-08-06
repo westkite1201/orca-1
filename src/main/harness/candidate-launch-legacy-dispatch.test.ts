@@ -26,7 +26,7 @@ describe('dispatchHarnessCandidate legacy dispatch recovery', () => {
           },
           task: {
             id: candidate.taskId,
-            created_by_terminal_handle: `jaws-harness:${run.id}`,
+            created_by_terminal_handle: candidate.agentTerminalHandle,
             status: 'ready'
           }
         }
@@ -54,7 +54,9 @@ describe('dispatchHarnessCandidate legacy dispatch recovery', () => {
     expect(call).toHaveBeenCalledWith('orchestration.taskUpdate', {
       id: candidate.taskId,
       status: 'failed',
-      result: 'terminal exited'
+      result: 'terminal exited',
+      run: candidate.orchestrationRunId,
+      callerTerminalHandle: candidate.agentTerminalHandle
     })
     expect(call.mock.calls.map(([method]) => method)).toEqual([
       'orchestration.dispatchShow',

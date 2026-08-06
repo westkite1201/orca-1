@@ -12,6 +12,7 @@ const {
   getProjectSlugMock,
   getPRForBranchOutcomeMock,
   getRepoSlugMock,
+  getGitHubPRLookupRateLimitBlockMock,
   getEnterpriseGitHubRepoSlugMock
 } = vi.hoisted(() => ({
   createGitHubPullRequestMock: vi.fn(),
@@ -25,12 +26,16 @@ const {
   getProjectSlugMock: vi.fn(),
   getPRForBranchOutcomeMock: vi.fn(),
   getRepoSlugMock: vi.fn(),
+  getGitHubPRLookupRateLimitBlockMock: vi.fn(async () => null),
   getEnterpriseGitHubRepoSlugMock: vi.fn()
 }))
 
 vi.mock('../gitlab/client', () => ({
   getProjectSlug: getProjectSlugMock,
   getMergeRequestForBranch: getMergeRequestForBranchMock,
+  // Why: forge-provider resolves branch reviews via the OrThrow variant so
+  // lookup failures surface as unavailable instead of "no MR found".
+  getMergeRequestForBranchOrThrow: getMergeRequestForBranchMock,
   getMergeRequest: vi.fn()
 }))
 
@@ -41,7 +46,8 @@ vi.mock('../gitlab/merge-request-creation', () => ({
 vi.mock('../github/client', () => ({
   createGitHubPullRequest: createGitHubPullRequestMock,
   getRepoSlug: getRepoSlugMock,
-  getPRForBranchOutcome: getPRForBranchOutcomeMock
+  getPRForBranchOutcome: getPRForBranchOutcomeMock,
+  getGitHubPRLookupRateLimitBlock: getGitHubPRLookupRateLimitBlockMock
 }))
 
 vi.mock('../github/github-enterprise-repository', () => ({
@@ -81,6 +87,14 @@ import {
   getForgeProviderForRepository
 } from './forge-provider'
 
+import { _resetOriginGitHubApiRepositoryCache } from '../github/github-api-repository'
+
+// The origin-repository cache is module-level state; reset it so slugs
+// resolved by one test cannot leak into the next.
+beforeEach(() => {
+  _resetOriginGitHubApiRepositoryCache()
+})
+
 describe('forge provider interface', () => {
   beforeEach(() => {
     createGitHubPullRequestMock.mockReset()
@@ -95,6 +109,8 @@ describe('forge provider interface', () => {
     getPRForBranchOutcomeMock.mockReset()
     getRepoSlugMock.mockReset()
     getEnterpriseGitHubRepoSlugMock.mockReset()
+    getGitHubPRLookupRateLimitBlockMock.mockReset()
+    getGitHubPRLookupRateLimitBlockMock.mockResolvedValue(null)
   })
 
   it('preserves the existing hosted provider detection order', async () => {
@@ -113,8 +129,9 @@ describe('forge provider interface', () => {
     // slug parsing returns null. Detection must claim it via the enterprise
     // resolver instead of falling through to Gitea's demand for ORCA_GITEA_TOKEN.
     getProjectSlugMock.mockResolvedValue(null)
-    getRepoSlugMock.mockResolvedValue(null)
-    getEnterpriseGitHubRepoSlugMock.mockResolvedValue({
+    // Why: getRepoSlug resolves hosted identities itself now — a GHES remote
+    // comes back host-qualified instead of null + separate enterprise fallback.
+    getRepoSlugMock.mockResolvedValue({
       owner: 'team',
       repo: 'orca',
       host: 'github.acme-corp.com'
@@ -367,5 +384,49 @@ describe('forge provider interface', () => {
         branch: 'feature/x'
       })
     ).rejects.toThrow(/network/)
+  })
+
+  it('refuses a GitHub branch lookup while the rate-limit budget is exhausted (#11532)', async () => {
+    getGitHubPRLookupRateLimitBlockMock.mockResolvedValueOnce({
+      resetAt: 1_800_000_000
+    } as never)
+
+    await expect(
+      getForgeProviderById('github').getReviewForBranch({
+        repoPath: '/repo',
+        connectionId: null,
+        branch: 'feature/x'
+      })
+      // Throwing (not null) keeps a low budget from reading as "no pull request".
+    ).rejects.toThrow(/rate_limited/)
+    expect(getPRForBranchOutcomeMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses a GitHub lookup by number while the rate-limit budget is exhausted (#11532)', async () => {
+    getGitHubPRLookupRateLimitBlockMock.mockResolvedValueOnce({
+      resetAt: 1_800_000_000
+    } as never)
+
+    await expect(
+      getForgeProviderById('github').getReviewByNumber({
+        repoPath: '/repo',
+        connectionId: null,
+        number: 42
+      })
+    ).rejects.toThrow(/rate_limited/)
+    expect(getPRForBranchOutcomeMock).not.toHaveBeenCalled()
+  })
+
+  it('does not gate non-GitHub providers on the GitHub rate limit', async () => {
+    getGitHubPRLookupRateLimitBlockMock.mockResolvedValue({ resetAt: 1_800_000_000 } as never)
+    getMergeRequestForBranchMock.mockResolvedValue(null)
+
+    await expect(
+      getForgeProviderById('gitlab').getReviewForBranch({
+        repoPath: '/repo',
+        connectionId: null,
+        branch: 'feature/x'
+      })
+    ).resolves.toBeNull()
   })
 })

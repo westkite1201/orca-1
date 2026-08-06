@@ -62,12 +62,26 @@ export async function advanceHarnessCompletion(args: {
     let messages: MessageRow[] = []
     let messagesLoaded = false
     try {
-      const result = await runtime.call<WorkerDoneCheckResult>('orchestration.check', {
-        terminal: `jaws-harness:${run.id}`,
-        all: true,
-        types: 'worker_done'
-      })
-      messages = result.messages
+      if (
+        running.some((candidate) => !candidate.agentTerminalHandle || !candidate.orchestrationRunId)
+      ) {
+        throw new Error('A running candidate is missing its orchestration identity.')
+      }
+      messages = (
+        await Promise.all(
+          running.map(
+            async (candidate) =>
+              (
+                await runtime.call<WorkerDoneCheckResult>('orchestration.check', {
+                  terminal: candidate.agentTerminalHandle!,
+                  run: candidate.orchestrationRunId!,
+                  all: true,
+                  types: 'worker_done'
+                })
+              ).messages
+          )
+        )
+      ).flat()
       messagesLoaded = true
       for (const candidate of running) {
         if (candidate.error?.startsWith(COMPLETION_CHECK_ERROR_PREFIX)) {

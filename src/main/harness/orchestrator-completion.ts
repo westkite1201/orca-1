@@ -21,7 +21,9 @@ async function listChildLanes(
 ): Promise<TaskRow[]> {
   return (
     await runtime.call<TaskListResult>('orchestration.taskList', {
-      parent: candidate.taskId
+      parent: candidate.taskId,
+      run: candidate.orchestrationRunId,
+      callerTerminalHandle: candidate.agentTerminalHandle
     })
   ).tasks
 }
@@ -76,7 +78,7 @@ async function handleActiveChildLaneDrain(args: {
         dispatchId: lane.dispatch_id,
         taskId: lane.id,
         parentTaskId: args.candidate.taskId!,
-        ownerHandle: `jaws-harness:${args.run.id}`,
+        ownerHandle: args.candidate.agentTerminalHandle!,
         error: cleanupError
       })
       if (!stopped) {
@@ -174,12 +176,24 @@ export async function settleOrchestratorWorkerCompletion(args: {
     })
     return false
   }
+  if (!candidate.orchestrationRunId || !candidate.agentTerminalHandle) {
+    store.updateHarnessCandidate(run.id, candidate.agent, {
+      status: 'failed',
+      workerResult,
+      childLaneDrainStartedAt: null,
+      workerCompletedAt: workerResult.receivedAt,
+      error: 'Coordinator orchestration identity is missing.'
+    })
+    return false
+  }
 
   try {
     const evidenceError = await findOrchestratorCompletionEvidenceError({
       runtime,
       lanes,
-      topWorkerMessage
+      topWorkerMessage,
+      orchestrationRunId: candidate.orchestrationRunId,
+      coordinatorHandle: candidate.agentTerminalHandle
     })
     if (evidenceError) {
       store.updateHarnessCandidate(run.id, candidate.agent, {

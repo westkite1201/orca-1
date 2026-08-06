@@ -6,12 +6,11 @@ import { findOrchestratorChildLaneBlocker } from './orchestrator-child-lane-barr
 function childTask(status: TaskStatus, id = `child-${status}`): TaskRow {
   return {
     id,
+    run_id: 'run-1',
     parent_id: 'task-codex',
     created_by_terminal_handle: 'terminal-codex',
     task_title: id,
     display_name: null,
-    execution_kind: 'worktree',
-    agent_slot: 'codex',
     spec: 'Do work.',
     status,
     deps: '[]',

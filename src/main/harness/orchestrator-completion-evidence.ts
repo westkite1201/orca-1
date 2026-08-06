@@ -35,31 +35,21 @@ export async function findOrchestratorCompletionEvidenceError(args: {
   runtime: HarnessRuntimeCaller
   lanes: readonly TaskRow[]
   topWorkerMessage: MessageRow
+  orchestrationRunId: string
+  coordinatorHandle: string
 }): Promise<string | null> {
-  const { runtime, lanes, topWorkerMessage } = args
+  const { runtime, lanes, topWorkerMessage, orchestrationRunId, coordinatorHandle } = args
   if (lanes.length === 0) {
     return null
   }
-  const inboxHandles = [...new Set(lanes.map((lane) => lane.created_by_terminal_handle))]
-  if (inboxHandles.some((handle) => !handle)) {
-    return 'A child lane is missing its coordinator inbox identity.'
-  }
-  // Why: live terminal handles are reminted after restart; the creator stored
-  // on each child task is the stable inbox its worker preamble replies to.
   const childMessages = (
-    await Promise.all(
-      inboxHandles.map(
-        async (handle) =>
-          (
-            await runtime.call<MessageListResult>('orchestration.check', {
-              terminal: handle!,
-              all: true,
-              types: 'worker_done'
-            })
-          ).messages
-      )
-    )
-  ).flat()
+    await runtime.call<MessageListResult>('orchestration.check', {
+      terminal: coordinatorHandle,
+      run: orchestrationRunId,
+      all: true,
+      types: 'worker_done'
+    })
+  ).messages
 
   for (const lane of lanes) {
     const lifecycle = await runtime.call<DispatchShowResult>('orchestration.dispatchShow', {

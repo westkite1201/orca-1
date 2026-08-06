@@ -6,6 +6,7 @@ import { findOrchestratorCompletionEvidenceError } from './orchestrator-completi
 function message(id: string, taskId: string, dispatchId: string, sequence: number): MessageRow {
   return {
     id,
+    run_id: 'run-1',
     from_handle: 'worker',
     to_handle: 'coordinator',
     subject: 'Done',
@@ -25,12 +26,11 @@ function message(id: string, taskId: string, dispatchId: string, sequence: numbe
 function lane(): TaskRow {
   return {
     id: 'task-child',
+    run_id: 'run-1',
     parent_id: 'task-codex',
     created_by_terminal_handle: 'terminal-codex',
     task_title: 'Child lane',
     display_name: null,
-    execution_kind: 'worktree',
-    agent_slot: 'codex',
     spec: 'Implement child.',
     status: 'completed',
     deps: '[]',
@@ -64,7 +64,9 @@ describe('orchestrator completion evidence', () => {
       findOrchestratorCompletionEvidenceError({
         runtime,
         lanes: [child],
-        topWorkerMessage: topMessage
+        topWorkerMessage: topMessage,
+        orchestrationRunId: 'run-1',
+        coordinatorHandle: 'terminal-codex'
       })
     ).resolves.toBeNull()
 
@@ -73,11 +75,14 @@ describe('orchestrator completion evidence', () => {
       findOrchestratorCompletionEvidenceError({
         runtime,
         lanes: [child],
-        topWorkerMessage: topMessage
+        topWorkerMessage: topMessage,
+        orchestrationRunId: 'run-1',
+        coordinatorHandle: 'terminal-codex'
       })
     ).resolves.toContain('Coordinator finished before child lane completion')
     expect(call).toHaveBeenCalledWith('orchestration.check', {
       terminal: 'terminal-codex',
+      run: 'run-1',
       all: true,
       types: 'worker_done'
     })

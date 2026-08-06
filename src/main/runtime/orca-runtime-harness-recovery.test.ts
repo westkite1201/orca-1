@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   HarnessAgent,
@@ -8,12 +8,6 @@ import type {
   HarnessRunCreateInput
 } from '../../shared/harness-types'
 import { OrcaRuntimeService } from './orca-runtime'
-import {
-  getLocalPtyProvider,
-  registerSshPtyProvider,
-  setLocalPtyProvider,
-  unregisterSshPtyProvider
-} from '../ipc/pty'
 
 const ACTIVE_RUN = {
   id: 'run-1',
@@ -43,6 +37,7 @@ function pendingCandidate(runId: string, agent: HarnessAgent, now: number): Harn
     verificationTerminalHandle: null,
     verificationTerminalPaneKey: null,
     verificationTerminalOwnership: null,
+    orchestrationRunId: null,
     taskId: null,
     dispatchId: null,
     workerResult: null,
@@ -60,15 +55,7 @@ function pendingCandidate(runId: string, agent: HarnessAgent, now: number): Harn
 }
 
 describe('OrcaRuntimeService Harness startup recovery', () => {
-  let originalLocalPtyProvider: ReturnType<typeof getLocalPtyProvider>
-
-  beforeEach(() => {
-    originalLocalPtyProvider = getLocalPtyProvider()
-  })
-
   afterEach(() => {
-    setLocalPtyProvider(originalLocalPtyProvider)
-    unregisterSshPtyProvider('ssh-verification')
     vi.restoreAllMocks()
   })
 
@@ -82,14 +69,7 @@ describe('OrcaRuntimeService Harness startup recovery', () => {
       addedAt: 1,
       kind: 'git'
     }
-    const runtime = new OrcaRuntimeService({ getRepo: () => repo } as never)
-    vi.spyOn(
-      runtime as unknown as {
-        resolveWorktreeSelector: (selector: string) => Promise<unknown>
-      },
-      'resolveWorktreeSelector'
-    ).mockResolvedValue({ id: worktreeId, repoId: repo.id, path: repo.path })
-    setLocalPtyProvider({
+    const localProvider = {
       listProcesses: vi.fn(async () => [
         {
           id: 'local-pty-1',
@@ -98,8 +78,16 @@ describe('OrcaRuntimeService Harness startup recovery', () => {
           terminalHandle: 'verify-h1'
         }
       ])
-    } as never)
-
+    } as never
+    const runtime = new OrcaRuntimeService({ getRepo: () => repo } as never, undefined, {
+      getLocalProvider: () => localProvider
+    })
+    vi.spyOn(
+      runtime as unknown as {
+        resolveWorktreeSelector: (selector: string) => Promise<unknown>
+      },
+      'resolveWorktreeSelector'
+    ).mockResolvedValue({ id: worktreeId, repoId: repo.id, path: repo.path })
     await expect(
       runtime.findFreshHarnessVerificationTerminal({
         handle: 'verify-h1',
@@ -119,7 +107,20 @@ describe('OrcaRuntimeService Harness startup recovery', () => {
       kind: 'git',
       connectionId: 'ssh-verification'
     }
-    const runtime = new OrcaRuntimeService({ getRepo: () => repo } as never)
+    const sshProvider = {
+      listProcesses: vi.fn(async () => [
+        {
+          id: 'remote-pty-1',
+          cwd: repo.path,
+          title: 'sh',
+          terminalHandle: 'verify-h1'
+        }
+      ])
+    } as never
+    const runtime = new OrcaRuntimeService({ getRepo: () => repo } as never, undefined, {
+      getSshProvider: (connectionId) =>
+        connectionId === 'ssh-verification' ? sshProvider : undefined
+    })
     vi.spyOn(
       runtime as unknown as {
         resolveWorktreeSelector: (selector: string) => Promise<unknown>
@@ -140,17 +141,6 @@ describe('OrcaRuntimeService Harness startup recovery', () => {
         isMainWorktree: true
       }
     })
-    registerSshPtyProvider('ssh-verification', {
-      listProcesses: vi.fn(async () => [
-        {
-          id: 'remote-pty-1',
-          cwd: repo.path,
-          title: 'sh',
-          terminalHandle: 'verify-h1'
-        }
-      ])
-    } as never)
-
     await expect(
       runtime.findFreshHarnessVerificationTerminal({
         handle: 'verify-h1',

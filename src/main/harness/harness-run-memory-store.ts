@@ -25,6 +25,7 @@ function pendingCandidate<TAgent extends HarnessAgent>(
     verificationTerminalHandle: null,
     verificationTerminalPaneKey: null,
     verificationTerminalOwnership: null,
+    orchestrationRunId: null,
     taskId: null,
     dispatchId: null,
     workerResult: null,

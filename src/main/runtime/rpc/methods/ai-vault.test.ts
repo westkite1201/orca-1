@@ -13,7 +13,11 @@ vi.mock('../../../ai-vault/session-scanner', () => ({
   scanAiVaultSessions
 }))
 
-import { AI_VAULT_METHODS, AiVaultListSessionsParams } from './ai-vault'
+import {
+  AI_VAULT_METHODS,
+  AiVaultListSessionsParams,
+  AiVaultPrepareSessionResumeParams
+} from './ai-vault'
 import {
   configureAiVaultSessionSources,
   listAiVaultSessions,
@@ -81,6 +85,11 @@ describe('aiVault.listSessions params schema', () => {
     expect(parsed.success).toBe(false)
   })
 
+  it('accepts Unlimited without applying the numeric cap', () => {
+    const parsed = AiVaultListSessionsParams.safeParse({ limit: 5000, unlimited: true })
+    expect(parsed.success).toBe(true)
+  })
+
   it('clamps scopePaths past the cap instead of rejecting', () => {
     // Why: uncapped producers (web client, pre-cap desktop parents) may exceed
     // the bound; scope paths only widen discovery, so truncation is safe.
@@ -103,6 +112,41 @@ describe('aiVault.listSessions params schema', () => {
     expect(AiVaultListSessionsParams.safeParse({ executionHostId: 'ssh:dev-box' }).success).toBe(
       false
     )
+  })
+})
+
+describe('aiVault.prepareSessionResume', () => {
+  it('validates bounded paths and executes against the receiving host identity', async () => {
+    expect(
+      AiVaultPrepareSessionResumeParams.safeParse({
+        agent: 'codex',
+        filePath: '/managed/sessions/rollout-a.jsonl',
+        codexHome: '/managed'
+      }).success
+    ).toBe(true)
+    const prepareAiVaultSessionResume = vi.fn().mockResolvedValue({ useRealCodexHome: true })
+    const runtime = {
+      getRuntimeId: () => 'test-runtime',
+      prepareAiVaultSessionResume
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: AI_VAULT_METHODS })
+
+    const response = await dispatcher.dispatch(
+      makeRequest('aiVault.prepareSessionResume', {
+        agent: 'codex',
+        filePath: '/managed/sessions/rollout-a.jsonl',
+        codexHome: '/managed',
+        executionHostId: 'ssh:spoofed'
+      })
+    )
+
+    expect(response).toMatchObject({ ok: true, result: { useRealCodexHome: true } })
+    expect(prepareAiVaultSessionResume).toHaveBeenCalledWith({
+      agent: 'codex',
+      filePath: '/managed/sessions/rollout-a.jsonl',
+      codexHome: '/managed',
+      executionHostId: 'local'
+    })
   })
 })
 
@@ -140,6 +184,33 @@ describe('aiVault.listSessions handler + shared cache', () => {
     // Second call via the RPC method with the same cache key.
     await dispatcher.dispatch(makeRequest('aiVault.listSessions', { limit: 500 }))
     expect(scanAiVaultSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('serves lower depths from a larger completed scan', async () => {
+    await listAiVaultSessions({ limit: 1000 })
+    await listAiVaultSessions({ limit: 250 })
+    await listAiVaultSessions({ limit: 500 })
+
+    expect(scanAiVaultSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares a cache entry across equivalent scope path ordering', async () => {
+    await listAiVaultSessions({ limit: 500, scopePaths: ['/repo/a', '/repo/b'] })
+    await listAiVaultSessions({ limit: 500, scopePaths: ['/repo/b', '/repo/a'] })
+
+    expect(scanAiVaultSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards Unlimited without a numeric limit', async () => {
+    const dispatcher = makeDispatcher()
+    const response = await dispatcher.dispatch(
+      makeRequest('aiVault.listSessions', { limit: 5000, unlimited: true })
+    )
+
+    expect(response).toMatchObject({ ok: true })
+    expect(scanAiVaultSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: undefined, unlimited: true })
+    )
   })
 
   it('keeps a newer different-key scan dedupable after an older scan resolves', async () => {

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '../../store'
-import type { TuiAgent } from '../../../../shared/types'
-import type { NativeChatSession } from '../../../../shared/native-chat-types'
+import { useNativeChatLaunchDraftSignal } from './use-native-chat-launch-draft-adoption'
 import { useNativeChatLiveSession } from './use-native-chat-live-session'
 import { selectNativeChatViewState } from './native-chat-view-state'
 import { NativeChatMessageList } from './NativeChatMessageList'
@@ -47,32 +46,18 @@ import {
   emptyNativeChatContextMenuActions,
   useNativeChatContextMenu
 } from './use-native-chat-context-menu'
-import type { NativeChatContextMenuActions } from './use-native-chat-context-menu'
 import { resolveNativeChatFileLinkContext } from './native-chat-file-link'
 import { selectNativeChatRuntimeEnvironmentId } from './native-chat-runtime-owner'
 import { useNativeChatPasteBridge } from './use-native-chat-paste-bridge'
 import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
+import type { NativeChatResolvedViewProps, NativeChatViewProps } from './native-chat-view-types'
+import { JawsChatSurface } from './JawsChatSurface'
 
-export type NativeChatViewProps = {
-  /** The terminal tab hosting the agent. paneKey is `${tabId}:${leafId}`. */
-  terminalTabId: string
-  /** Specific split leaf this chat surface replaces. */
-  paneKey?: string
-  /** PTY bound to `paneKey`, used for composer and interactive-card sends. */
-  targetPtyId?: string | null
-  /** Launch-time agent hint from the TerminalTab, when Orca started one. */
-  launchAgent?: TuiAgent | null
-  /** Trusted title/foreground fallback for manually-started agents. */
-  resolvedAgent?: TuiAgent | null
-  /** Return this pane to the hosted terminal surface. */
-  onSwitchToTerminal?: () => void
-  /** Current xterm screen reader used to recover agent-reported session state. */
-  readTerminalScreen?: () => string | null
-  contextMenuActions?: Omit<NativeChatContextMenuActions, 'onPaste'>
-}
+export type { NativeChatViewProps } from './native-chat-view-types'
 
 /** Resolves an agent terminal into its native conversation and composer UI. */
 export default function NativeChatView({
+  worktreeId,
   terminalTabId,
   paneKey: preferredPaneKey,
   targetPtyId = null,
@@ -105,6 +90,7 @@ export default function NativeChatView({
     >
       {(resolution) => (
         <NativeChatResolvedView
+          worktreeId={worktreeId}
           paneKey={resolution.paneKey}
           agent={resolution.agent}
           sessionId={resolution.sessionId}
@@ -121,6 +107,7 @@ export default function NativeChatView({
 }
 
 function NativeChatResolvedView({
+  worktreeId,
   paneKey,
   agent,
   sessionId,
@@ -130,17 +117,7 @@ function NativeChatResolvedView({
   onSwitchToTerminal,
   readTerminalScreen,
   contextMenuActions
-}: {
-  paneKey: string
-  agent: NativeChatSession['agent']
-  sessionId: string | null
-  transcriptPath: string | null
-  targetPtyId: string | null
-  terminalTabId: string
-  onSwitchToTerminal?: () => void
-  readTerminalScreen?: () => string | null
-  contextMenuActions?: Omit<NativeChatContextMenuActions, 'onPaste'>
-}): React.JSX.Element {
+}: NativeChatResolvedViewProps): React.JSX.Element {
   // Primitive owner selection (no useShallow): routes the pane's read/subscribe to
   // the remote runtime host for a runtime-owned pane; null keeps the local path.
   const runtimeEnvironmentId = useAppStore((s) =>
@@ -156,6 +133,15 @@ function NativeChatResolvedView({
   const launchPrompt = useAppStore((s) => s.nativeChatLaunchPromptByTabId[terminalTabId] ?? null)
   const clearNativeChatLaunchPrompt = useAppStore((s) => s.clearNativeChatLaunchPrompt)
   const paneLaunchPrompt = launchPrompt?.agent === agent ? launchPrompt : null
+  // Launch context prefilled into the TUI input as an unsent draft; the
+  // composer adopts it so the GUI view shows the same context as the TUI.
+  // Shape matches NativeChatComposer's two launch-draft props, so it spreads.
+  const launchDraftSignal = useNativeChatLaunchDraftSignal({
+    terminalTabId,
+    agent,
+    messages: session.messages,
+    transcriptLoading: session.readPhase === 'loading'
+  })
   // The live-session merge reconciles hooks with replayable transcript turn
   // boundaries; all working consumers must use that one lifecycle decision.
   const liveWorking = session.status === 'working'
@@ -430,6 +416,7 @@ function NativeChatResolvedView({
           />
         )}
       </div>
+      <JawsChatSurface worktreeId={worktreeId} />
       {/* Live interactive prompt (question / approval) is the bottom input region
           (mobile parity). A question card supplies its own answer input, so it
           fully replaces the composer while active — no stray "Send a message". */}
@@ -446,7 +433,9 @@ function NativeChatResolvedView({
       {questionActive ? null : (
         <NativeChatComposer
           ref={composerRef}
+          worktreeId={worktreeId}
           terminalTabId={terminalTabId}
+          paneKey={paneKey}
           targetPtyId={targetPtyId}
           agent={agent}
           canSend={canSend}
@@ -457,6 +446,7 @@ function NativeChatResolvedView({
           onSlashCommand={onSlashCommand}
           onSwitchToTerminal={onSwitchToTerminal}
           readTerminalScreen={readTerminalScreen}
+          {...launchDraftSignal}
         />
       )}
       {contextMenu.menu}

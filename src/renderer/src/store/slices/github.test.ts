@@ -966,6 +966,22 @@ describe('createGitHubSlice.fetchPRChecks', () => {
     })
   })
 
+  it('isolates PR detail caches by Enterprise host', () => {
+    const githubRepo = { owner: 'Acme', repo: 'Widgets', host: 'github.com' }
+    const enterpriseRepo = {
+      owner: 'Acme',
+      repo: 'Widgets',
+      host: 'github.acme-corp.com'
+    }
+
+    expect(prChecksCacheSuffix(12, enterpriseRepo, 'head')).not.toBe(
+      prChecksCacheSuffix(12, githubRepo, 'head')
+    )
+    expect(prCommentsCacheSuffix(12, enterpriseRepo)).not.toBe(
+      prCommentsCacheSuffix(12, githubRepo)
+    )
+  })
+
   it('bounds checks cache entries across many repo and head combinations', async () => {
     vi.useFakeTimers()
 
@@ -1867,9 +1883,39 @@ describe('createGitHubSlice.fetchPRForBranch', () => {
     await expect(request).resolves.toMatchObject({ title: 'Local request result' })
     expect(store.getState().hostedReviewCache[localHostedReviewCacheKey]).toMatchObject({
       data: expect.objectContaining({ provider: 'github', title: 'Local request result' }),
-      linkedReviewHintKey: 'github:12'
+      linkedReviewHintKey: 'github:12',
+      branchLookupGitHubPRNumber: 12
     })
     expect(store.getState().hostedReviewCache[runtimeHostedReviewCacheKey]).toBeUndefined()
+  })
+
+  it('does not mark an exact linked PR refresh as branch-discovered', async () => {
+    const store = createTestStore()
+    const repoPath = '/repo'
+    const repoId = 'repo-1'
+    const branch = 'feature/exact-linked-provenance'
+    const hostedReviewCacheKey = getHostedReviewCacheKey(repoPath, branch, null, repoId)
+    store.setState({
+      repos: [{ id: repoId, path: repoPath, name: 'repo', kind: 'git' }]
+    } as unknown as Partial<AppState>)
+    mockApi.gh.refreshPRNow.mockResolvedValueOnce({
+      kind: 'found',
+      pr: makePR({ number: 12 }),
+      fetchedAt: 2
+    })
+
+    await store.getState().fetchPRForBranch(repoPath, branch, {
+      force: true,
+      repoId,
+      linkedPRNumber: 12
+    })
+
+    const cacheEntry = store.getState().hostedReviewCache[hostedReviewCacheKey]
+    expect(cacheEntry).toMatchObject({
+      data: expect.objectContaining({ provider: 'github', number: 12 }),
+      linkedReviewHintKey: 'github:12'
+    })
+    expect(cacheEntry).not.toHaveProperty('branchLookupGitHubPRNumber')
   })
 
   it('does not let an older direct PR refresh overwrite a newer hosted-review cache entry', async () => {
@@ -6610,8 +6656,106 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
     })
     expect(result).toEqual({
       items: [{ ...item, repoId: 'caller-repo-id' }],
-      failedCount: 0
+      failedCount: 0,
+      errorTypes: []
     })
+  })
+
+  it('surfaces issue-side envelope errors as errorTypes on next-page fetches', async () => {
+    runtimeEnvironmentCall.mockResolvedValueOnce({
+      id: 'rpc-work-items-page-422',
+      ok: true,
+      result: {
+        items: [],
+        sources: {
+          issues: { owner: 'up', repo: 'r' },
+          prs: null,
+          originCandidate: { owner: 'up', repo: 'r' },
+          upstreamCandidate: null
+        },
+        errors: {
+          issues: { type: 'validation_error', message: 'only the first 1000 search results' }
+        }
+      },
+      _meta: { runtimeId: 'remote-runtime' }
+    })
+    const store = createTestStore()
+    store.setState({
+      settings: { activeRuntimeEnvironmentId: 'env-1' },
+      repos: [{ id: 'runtime-repo-id', path: '/server/repo', name: 'repo', kind: 'git' }]
+    } as unknown as Partial<AppState>)
+
+    const result = await store
+      .getState()
+      .fetchWorkItemsNextPage([{ repoId: 'caller-repo-id', path: '/server/repo' }], 24, 100, '', 34)
+
+    // The window 422 travels on the envelope error channel, not failedCount —
+    // resolveEmptyPageOutcome keys on this exact string (#11485).
+    expect(result).toEqual({ items: [], failedCount: 0, errorTypes: ['validation_error'] })
+  })
+
+  it('demotes non-window validation errors so they cannot drive the unreachable clamp', async () => {
+    runtimeEnvironmentCall.mockResolvedValueOnce({
+      id: 'rpc-work-items-page-422-other',
+      ok: true,
+      result: {
+        items: [],
+        sources: {
+          issues: { owner: 'up', repo: 'r' },
+          prs: null,
+          originCandidate: { owner: 'up', repo: 'r' },
+          upstreamCandidate: null
+        },
+        errors: {
+          issues: { type: 'validation_error', message: 'Validation Failed: query is malformed' }
+        }
+      },
+      _meta: { runtimeId: 'remote-runtime' }
+    })
+    const store = createTestStore()
+    store.setState({
+      settings: { activeRuntimeEnvironmentId: 'env-1' },
+      repos: [{ id: 'runtime-repo-id', path: '/server/repo', name: 'repo', kind: 'git' }]
+    } as unknown as Partial<AppState>)
+
+    const result = await store
+      .getState()
+      .fetchWorkItemsNextPage([{ repoId: 'caller-repo-id', path: '/server/repo' }], 24, 100, '', 2)
+
+    expect(result).toEqual({ items: [], failedCount: 0, errorTypes: ['unknown'] })
+  })
+
+  it('surfaces PR-side envelope errors demoted so they read as failures, never window 422s', async () => {
+    runtimeEnvironmentCall.mockResolvedValueOnce({
+      id: 'rpc-work-items-page-prs-error',
+      ok: true,
+      result: {
+        items: [],
+        sources: {
+          issues: null,
+          prs: { owner: 'up', repo: 'r' },
+          originCandidate: { owner: 'up', repo: 'r' },
+          upstreamCandidate: null
+        },
+        errors: {
+          prs: { type: 'validation_error', message: 'Failed to load pull requests: bad flag' }
+        }
+      },
+      _meta: { runtimeId: 'remote-runtime' }
+    })
+    const store = createTestStore()
+    store.setState({
+      settings: { activeRuntimeEnvironmentId: 'env-1' },
+      repos: [{ id: 'runtime-repo-id', path: '/server/repo', name: 'repo', kind: 'git' }]
+    } as unknown as Partial<AppState>)
+
+    const result = await store
+      .getState()
+      .fetchWorkItemsNextPage([{ repoId: 'caller-repo-id', path: '/server/repo' }], 24, 100, '', 2)
+
+    // A swallowed PR-side failure must not read as end-of-data (#11485), and a
+    // PR-side validation error must never join the issue-only window signal.
+    expect(result).toEqual({ items: [], failedCount: 0, errorTypes: ['unknown'] })
   })
 
   it('routes work-item counts through the active runtime environment', async () => {
@@ -6681,6 +6825,43 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
     expect(result).toEqual({ totalCount: 101, totalPages: 3 })
   })
 
+  it('caps advertised pages at the GitHub search result window', async () => {
+    const store = createTestStore()
+    mockApi.gh.countWorkItems.mockResolvedValueOnce(1170).mockResolvedValueOnce(1)
+
+    const result = await store.getState().countWorkItemsAcrossRepos(
+      [
+        { repoId: 'large-repo', path: '/local/large' },
+        { repoId: 'small-repo', path: '/local/small' }
+      ],
+      'is:issue',
+      30
+    )
+
+    // 1170 results → 39 naive pages, but the Search API 422s once a page
+    // starts past its 1000-result window; ceil(1000 / 30) = 34 stay reachable.
+    expect(result).toEqual({ totalCount: 1171, totalPages: 34 })
+  })
+
+  it('pins the search-window cap at dividing and non-dividing per-repo limits', async () => {
+    const store = createTestStore()
+    // 36 is the shipped single-repo limit: page 28 starts at result 973 and is
+    // served; page 29 starts past 1000 and 422s.
+    mockApi.gh.countWorkItems.mockResolvedValueOnce(2000)
+    await expect(
+      store
+        .getState()
+        .countWorkItemsAcrossRepos([{ repoId: 'repo-id', path: '/local/repo' }], 'is:issue', 36)
+    ).resolves.toEqual({ totalCount: 2000, totalPages: 28 })
+    // 25 divides 1000 evenly: the full window stays reachable (40 pages).
+    mockApi.gh.countWorkItems.mockResolvedValueOnce(2000)
+    await expect(
+      store
+        .getState()
+        .countWorkItemsAcrossRepos([{ repoId: 'repo-id', path: '/local/repo' }], 'is:issue', 25)
+    ).resolves.toEqual({ totalCount: 2000, totalPages: 40 })
+  })
+
   it('rejects oversized work-item queries before cache keys or provider calls', async () => {
     const store = createTestStore()
     const secret = 'github-work-items-secret'
@@ -6709,7 +6890,7 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
           oversizedQuery,
           1
         )
-    ).resolves.toEqual({ items: [], failedCount: 0 })
+    ).resolves.toEqual({ items: [], failedCount: 0, errorTypes: [] })
     await expect(
       store
         .getState()
@@ -6882,6 +7063,62 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
     ).toBe('project-local')
   })
 
+  it('keeps same-named github.com and GHES project cache entries separate', async () => {
+    const store = createTestStore()
+    const makeTable = (host: string, id: string) => ({
+      project: {
+        id,
+        host,
+        owner: 'acme',
+        ownerType: 'organization' as const,
+        number: 1,
+        title: id,
+        url: `https://${host}/orgs/acme/projects/1`
+      },
+      selectedView: {
+        id: 'view-1',
+        number: 1,
+        name: 'Table',
+        layout: 'TABLE_LAYOUT' as const,
+        filter: '',
+        fields: [],
+        groupByFields: [],
+        sortByFields: []
+      },
+      rows: [],
+      totalCount: 0,
+      parentFieldDropped: false
+    })
+    mockApi.gh.getProjectViewTable
+      .mockResolvedValueOnce({ ok: true, data: makeTable('github.com', 'dotcom-project') })
+      .mockResolvedValueOnce({ ok: true, data: makeTable('ghe.example', 'enterprise-project') })
+
+    for (const host of ['github.com', 'ghe.example']) {
+      await store.getState().fetchProjectViewTable({
+        owner: 'acme',
+        ownerType: 'organization',
+        projectNumber: 1,
+        viewId: 'view-1',
+        host
+      })
+    }
+
+    expect(mockApi.gh.getProjectViewTable).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ host: 'ghe.example' })
+    )
+    expect(
+      store.getState().projectViewCache[
+        projectViewCacheKey('organization', 'acme', 1, 'view-1', undefined, 'local', 'ghe.example')
+      ]?.data?.project.id
+    ).toBe('enterprise-project')
+    expect(
+      store.getState().projectViewCache[
+        projectViewCacheKey('organization', 'acme', 1, 'view-1', undefined, 'local', 'github.com')
+      ]?.data?.project.id
+    ).toBe('dotcom-project')
+  })
+
   it('routes project field mutations through the source encoded in the cache key', async () => {
     const store = createTestStore()
     const cacheKey = projectViewCacheKey(
@@ -6890,7 +7127,8 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
       1,
       'view-1',
       undefined,
-      'runtime:env-project'
+      'runtime:env-project',
+      'ghe.example:8443'
     )
     store.setState({
       settings: { activeRuntimeEnvironmentId: 'env-focused' },
@@ -6900,6 +7138,7 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
           data: {
             project: {
               id: 'project-1',
+              host: 'ghe.example:8443',
               owner: 'acme',
               ownerType: 'organization',
               number: 1,
@@ -6959,6 +7198,7 @@ describe('createGitHubSlice.fetchWorkItems source/error envelope', () => {
       method: 'github.project.updateItemField',
       params: {
         projectId: 'project-1',
+        host: 'ghe.example:8443',
         itemId: 'row-1',
         fieldId: 'field-1',
         value: { kind: 'text', text: 'next' }
@@ -7124,6 +7364,12 @@ describe('IssueSourceIndicator suppression', () => {
     expect(
       sameGitHubOwnerRepo({ owner: 'StablyAI', repo: 'Orca' }, { owner: 'stablyai', repo: 'orca' })
     ).toBe(true)
+    expect(
+      sameGitHubOwnerRepo(
+        { owner: 'stablyai', repo: 'orca', host: 'github.com' },
+        { owner: 'stablyai', repo: 'orca', host: 'ghe.example.test' }
+      )
+    ).toBe(false)
     expect(sameGitHubOwnerRepo({ owner: 'a', repo: 'r' }, { owner: 'b', repo: 'r' })).toBe(false)
 
     // null on either side → element renders as null (empty render)
@@ -7159,6 +7405,12 @@ describe('IssueSourceIndicator suppression', () => {
     expect(itemMarkup).toContain('up/r')
     expect(itemMarkup).toContain('Issue from')
     expect(itemMarkup).not.toContain('Issues from')
+
+    const enterpriseEl = React.createElement(IssueSourceIndicator, {
+      issues: { owner: 'up', repo: 'r', host: 'ghe.example.test' },
+      prs: { owner: 'fork', repo: 'r', host: 'ghe.example.test' }
+    })
+    expect(renderToStaticMarkup(enterpriseEl)).toContain('ghe.example.test/up/r')
   })
 })
 

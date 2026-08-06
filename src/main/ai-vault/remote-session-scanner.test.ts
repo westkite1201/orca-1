@@ -153,7 +153,9 @@ describe('scanRemoteAiVaultSessions', () => {
       provider,
       executionHostId: 'ssh:dev-box',
       remoteHome: '/home/ada',
-      hostPlatform: getRemoteHostPlatform('linux-x64')
+      hostPlatform: getRemoteHostPlatform('linux-x64'),
+      limit: 1,
+      unlimited: true
     })
 
     expect(result.issues).toEqual([])
@@ -177,6 +179,40 @@ describe('scanRemoteAiVaultSessions', () => {
       codexHome: '/home/ada/.local/share/orca/codex-runtime-home/home',
       resumeCommand:
         "cd '/home/ada/runtime-repo' && CODEX_HOME='/home/ada/.local/share/orca/codex-runtime-home/home' codex resume 'runtime-session'"
+    })
+  })
+
+  it('collapses a bridged rollout present in both remote Codex homes to one row', async () => {
+    const provider = new MemoryRemoteProvider()
+    const rolloutName = 'rollout-2026-07-04T10-00-00-019f0000-1111-7222-8333-444444444444.jsonl'
+    const transcript = codexTranscript({
+      sessionId: '019f0000-1111-7222-8333-444444444444',
+      title: 'Bridged both-homes session',
+      cwd: '/home/ada/repo',
+      timestamp: '2026-07-04T10:00:00.000Z'
+    })
+    // Same rollout name in both homes — the in-distro bridge/backfill hardlink.
+    provider.addFile(`/home/ada/.codex/sessions/2026/07/04/${rolloutName}`, transcript, 3_000)
+    provider.addFile(
+      `/home/ada/.local/share/orca/codex-runtime-home/home/sessions/2026/07/04/${rolloutName}`,
+      transcript,
+      3_000
+    )
+
+    const result = await scanRemoteAiVaultSessions({
+      provider,
+      executionHostId: 'ssh:build-box',
+      remoteHome: '/home/ada',
+      hostPlatform: getRemoteHostPlatform('linux-x64')
+    })
+
+    expect(result.issues).toEqual([])
+    expect(result.sessions).toHaveLength(1)
+    // Remote lanes have not flipped to the real home: the managed runtime-home
+    // row stays canonical so resume keeps Orca-refreshed auth, as today.
+    expect(result.sessions[0]).toMatchObject({
+      sessionId: '019f0000-1111-7222-8333-444444444444',
+      codexHome: '/home/ada/.local/share/orca/codex-runtime-home/home'
     })
   })
 
@@ -370,11 +406,13 @@ describe('scanRemoteAiVaultSessions', () => {
       expect.arrayContaining([
         expect.objectContaining({
           agent: 'antigravity',
+          kind: 'host',
           path: brainDir,
           message: expect.stringContaining('EACCES')
         }),
         expect.objectContaining({
           agent: 'claude',
+          kind: 'host',
           path: claudeProjectDir,
           message: expect.stringContaining('ECONNRESET')
         })
@@ -670,6 +708,93 @@ describe('scanRemoteAiVaultSessions', () => {
     expect(result.sessions.map((session) => session.sessionId)).toEqual([
       'other-session',
       'scoped-session'
+    ])
+  })
+
+  it('keeps looking past newer out-of-scope candidates during scoped backfill', async () => {
+    const provider = new MemoryRemoteProvider()
+    for (const [sessionId, mtimeMs, hour] of [
+      ['other-newest', 50, '05'],
+      ['other-newer', 40, '04']
+    ] as const) {
+      provider.addFile(
+        `/home/ada/.codex/sessions/${sessionId}.jsonl`,
+        codexTranscript({
+          sessionId,
+          title: sessionId,
+          cwd: '/home/ada/other',
+          timestamp: `2026-07-04T${hour}:00:00.000Z`
+        }),
+        mtimeMs
+      )
+    }
+    provider.addFile(
+      '/home/ada/.codex/sessions/scoped.jsonl',
+      codexTranscript({
+        sessionId: 'scoped-session',
+        title: 'Scoped workspace',
+        cwd: '/home/ada/repo',
+        timestamp: '2026-07-04T01:00:00.000Z'
+      }),
+      10
+    )
+
+    const result = await scanRemoteAiVaultSessions({
+      provider,
+      executionHostId: 'ssh:dev-box',
+      remoteHome: '/home/ada',
+      hostPlatform: getRemoteHostPlatform('linux-x64'),
+      limit: 1,
+      scopePaths: ['/home/ada/repo']
+    })
+
+    expect(result.issues).toEqual([])
+    expect(result.sessions.map((session) => session.sessionId)).toEqual([
+      'other-newest',
+      'scoped-session'
+    ])
+  })
+
+  it('caps scoped backfill at the requested limit', async () => {
+    const provider = new MemoryRemoteProvider()
+    provider.addFile(
+      '/home/ada/.codex/sessions/other.jsonl',
+      codexTranscript({
+        sessionId: 'other-session',
+        title: 'Other workspace',
+        cwd: '/home/ada/other',
+        timestamp: '2026-07-04T05:00:00.000Z'
+      }),
+      50
+    )
+    for (const [sessionId, mtimeMs] of [
+      ['newer-scoped', 30],
+      ['older-scoped', 20]
+    ] as const) {
+      provider.addFile(
+        `/home/ada/.codex/sessions/${sessionId}.jsonl`,
+        codexTranscript({
+          sessionId,
+          title: sessionId,
+          cwd: '/home/ada/repo',
+          timestamp: `2026-07-04T0${mtimeMs / 10}:00:00.000Z`
+        }),
+        mtimeMs
+      )
+    }
+
+    const result = await scanRemoteAiVaultSessions({
+      provider,
+      executionHostId: 'ssh:dev-box',
+      remoteHome: '/home/ada',
+      hostPlatform: getRemoteHostPlatform('linux-x64'),
+      limit: 1,
+      scopePaths: ['/home/ada/repo']
+    })
+
+    expect(result.sessions.map((session) => session.sessionId)).toEqual([
+      'other-session',
+      'newer-scoped'
     ])
   })
 })

@@ -31,6 +31,7 @@ export function VaultSessionRow({
   session,
   liveState,
   resumeStartup,
+  realHomeResumeStartup,
   worktreeInfo,
   vaultScope,
   detailsExpanded,
@@ -40,6 +41,7 @@ export function VaultSessionRow({
   showJumpToWorktree,
   onJumpToWorktree,
   onResume,
+  onContinueInNewSession,
   resumeLabel,
   resumeActions,
   onResumeInWorktree,
@@ -54,6 +56,7 @@ export function VaultSessionRow({
   session: AiVaultSession
   liveState: AgentStatusState | null
   resumeStartup: AiVaultResumeStartup
+  realHomeResumeStartup: AiVaultResumeStartup
   worktreeInfo: AiVaultSessionWorktreeInfo | null
   vaultScope: AiVaultScope
   detailsExpanded: boolean
@@ -63,6 +66,7 @@ export function VaultSessionRow({
   showJumpToWorktree: boolean
   onJumpToWorktree?: () => void
   onResume: () => void
+  onContinueInNewSession?: () => void
   resumeLabel: string
   resumeActions: AiVaultSessionResumeActions
   onResumeInWorktree: () => void
@@ -83,11 +87,6 @@ export function VaultSessionRow({
   const startResumeDrag = useCallback(
     (event: React.DragEvent<HTMLElement>): void => {
       event.stopPropagation()
-      const target = event.target
-      if (target instanceof Element && target.closest('[data-ai-vault-session-actions]')) {
-        event.preventDefault()
-        return
-      }
       if (resumeDisabled) {
         event.preventDefault()
         return
@@ -99,12 +98,18 @@ export function VaultSessionRow({
         command: resumeStartup.command,
         sessionFilePath: session.filePath,
         sessionExecutionHostId: session.executionHostId,
+        codexHome: session.codexHome,
+        // Why: always sent (null when absent) so drop targets can tell "no cwd"
+        // from "payload predates the repin field".
+        sessionCwd: session.cwd ?? null,
         ...(resumeStartup.env ? { env: resumeStartup.env } : {}),
-        ...(resumeStartup.launchConfig ? { launchConfig: resumeStartup.launchConfig } : {})
+        ...(resumeStartup.envToDelete ? { envToDelete: resumeStartup.envToDelete } : {}),
+        ...(resumeStartup.launchConfig ? { launchConfig: resumeStartup.launchConfig } : {}),
+        realHomeStartup: realHomeResumeStartup
       })
       window.dispatchEvent(new Event(AI_VAULT_SESSION_DRAG_START_EVENT))
     },
-    [resumeDisabled, session, resumeStartup]
+    [realHomeResumeStartup, resumeDisabled, session, resumeStartup]
   )
 
   return (
@@ -112,27 +117,35 @@ export function VaultSessionRow({
       <ContextMenuTrigger asChild className="block w-full min-w-0">
         <div
           className={cn(
-            'group/session-row flex w-full min-w-0 flex-col border-b border-sidebar-border px-3 py-2 text-left transition-colors hover:bg-sidebar-accent/55',
-            resumeDisabled ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing',
+            'group/session-row flex w-full min-w-0 cursor-pointer flex-col border-b border-sidebar-border px-3 py-2 text-left transition-colors hover:bg-sidebar-accent/55',
             !detailsExpanded && 'min-h-[98px]'
           )}
-          // Why: users naturally drag the session row itself; matching that
-          // gesture avoids hidden affordances and text-selection false starts.
-          draggable={!resumeDisabled}
           onClick={() => {
             onToggleDetails()
-          }}
-          onDragStart={startResumeDrag}
-          onDragEnd={() => {
-            window.dispatchEvent(new Event(AI_VAULT_SESSION_DRAG_END_EVENT))
           }}
         >
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1">
             <div
               className={cn(
                 'min-w-0 text-[13px] font-medium leading-5 text-foreground',
+                // Why: only the title is the resume drag handle — expanded
+                // details/preview need text selection and a normal pointer.
+                !resumeDisabled && 'cursor-grab active:cursor-grabbing',
                 detailsExpanded ? 'line-clamp-2 [overflow-wrap:anywhere]' : 'line-clamp-1'
               )}
+              draggable={!resumeDisabled}
+              title={
+                resumeDisabled
+                  ? undefined
+                  : translate(
+                      'auto.components.right.sidebar.AiVaultSessionRow.dragToResume',
+                      'Drag to resume in a new tab'
+                    )
+              }
+              onDragStart={startResumeDrag}
+              onDragEnd={() => {
+                window.dispatchEvent(new Event(AI_VAULT_SESSION_DRAG_END_EVENT))
+              }}
             >
               {session.title}
             </div>
@@ -149,6 +162,7 @@ export function VaultSessionRow({
               showJumpToWorktree={showJumpToWorktree}
               onJumpToWorktree={onJumpToWorktree}
               onResume={onResume}
+              onContinueInNewSession={onContinueInNewSession}
               onCopyResume={onCopyResume}
               onCopyId={onCopyId}
               onCopyPath={onCopyPath}
@@ -197,6 +211,7 @@ export function VaultSessionRow({
               resumeActions={resumeActions}
               onResumeInWorktree={onResumeInWorktree}
               onResumeInNewTab={onResumeInNewTab}
+              onContinueInNewSession={onContinueInNewSession}
               onOpenLog={onOpenLog}
             />
           ) : null}
@@ -211,6 +226,7 @@ export function VaultSessionRow({
           showJumpToWorktree={showJumpToWorktree}
           onJumpToWorktree={onJumpToWorktree}
           onResume={onResume}
+          onContinueInNewSession={onContinueInNewSession}
           onCopyResume={onCopyResume}
           onCopyId={onCopyId}
           onCopyPath={onCopyPath}

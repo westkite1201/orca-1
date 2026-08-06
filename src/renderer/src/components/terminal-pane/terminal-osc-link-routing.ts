@@ -1,13 +1,14 @@
 import { resolveTerminalFileLinkText } from '@/lib/terminal-links'
 import { isWindowsAbsolutePathLike } from '../../../../shared/cross-platform-path'
 import type { LinkHandlerDeps } from './terminal-link-handlers'
-import { resolveTerminalFileUrlTarget } from './terminal-file-url-target'
+import { resolveTerminalFileUrlTarget } from '../../../../shared/terminal-file-url-target'
 import { openDetectedFilePath } from './terminal-file-open-routing'
 import { isTerminalLinkActivation } from './terminal-link-activation'
 import {
   openTerminalHttpLink,
   type TerminalLinkRoutingPreferenceRequester
 } from './terminal-url-link-hit-testing'
+import type { HttpLinkSourceOwner } from '@/lib/http-link-routing'
 
 type TerminalLinkEvent = Pick<MouseEvent, 'metaKey' | 'ctrlKey'> &
   Partial<Pick<MouseEvent, 'button' | 'shiftKey' | 'preventDefault' | 'stopPropagation'>>
@@ -29,6 +30,7 @@ export function handleOscLink(
   event: TerminalLinkEvent | undefined,
   deps: Pick<LinkHandlerDeps, 'worktreeId' | 'worktreePath'> &
     Partial<Pick<LinkHandlerDeps, 'runtimeEnvironmentId' | 'startupCwd' | 'terminalHomePath'>> & {
+      sourceOwner?: HttpLinkSourceOwner
       requestOpenLinksInAppPreference?: TerminalLinkRoutingPreferenceRequester
     }
 ): boolean {
@@ -81,7 +83,12 @@ export function handleOscLink(
   if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
     openTerminalHttpLink(parsed.toString(), {
       worktreeId: deps.worktreeId,
-      forceSystemBrowser: Boolean(event?.shiftKey),
+      sourceOwner:
+        deps.sourceOwner ??
+        (deps.runtimeEnvironmentId
+          ? { kind: 'runtime', runtimeEnvironmentId: deps.runtimeEnvironmentId }
+          : { kind: 'local' }),
+      modifierHeld: Boolean(event?.shiftKey),
       requestOpenLinksInAppPreference: deps.requestOpenLinksInAppPreference
     })
     return true
@@ -91,7 +98,7 @@ export function handleOscLink(
     // Why: file:// URIs should open inside Orca, not via the OS default editor
     // (shell.openPath). We extract the path from the URI and route it through
     // the same openDetectedFilePath logic used for detected file-path links.
-    // Remote file hosts stay rejected; Windows local network shares are the
+    // Remote file hosts stay rejected; Windows LAN shares are the
     // exception because their standard URI form is file://server/share/path.
     const allowUncHost =
       navigator.userAgent.includes('Windows') &&

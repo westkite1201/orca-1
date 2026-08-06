@@ -19,6 +19,7 @@ function createHarnessCandidate<TAgent extends HarnessAgent>(
     verificationTerminalHandle: null,
     verificationTerminalPaneKey: null,
     verificationTerminalOwnership: null,
+    orchestrationRunId: 'run-1',
     taskId: `task-${agent}`,
     dispatchId: `dispatch-${agent}`,
     workerResult: null,

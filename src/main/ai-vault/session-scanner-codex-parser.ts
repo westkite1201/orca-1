@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import type { AiVaultSession } from '../../shared/ai-vault-types'
 import { readCodexSessionIndexTitle } from './session-scanner-codex-title-index'
 import type { ExecutionHostId } from '../../shared/execution-host'
+import { normalizePromptField } from '../../shared/agent-status-field-normalization'
 import {
   addPreviewContent,
   cloneSessionAccumulator,
@@ -30,6 +31,7 @@ import {
   parseJsonObject,
   subtractCodexUsage
 } from './session-scanner-values'
+import { remoteSessionContentLines } from './remote-session-content-lines'
 
 export async function parseCodexSessionFile(
   file: FileWithMtime,
@@ -60,10 +62,11 @@ export async function parseCodexSessionContent(args: {
   executionHostId?: ExecutionHostId
   executionHostPlatform?: NodeJS.Platform | null
   readIndexedTitle?: (sessionId: string) => Promise<string | null>
+  signal?: AbortSignal
 }): Promise<AiVaultSession | null> {
   return parseCodexSessionLines({
     file: args.file,
-    lines: args.content.split(/\r?\n/),
+    lines: remoteSessionContentLines(args.content, args.signal),
     platform: args.platform ?? process.platform,
     codexHome: args.codexHome ?? null,
     executionHostId: args.executionHostId,
@@ -179,6 +182,10 @@ function consumeCodexRecordLine(state: CodexSessionParseState, line: string): vo
 
   if (payload.type === 'user_message') {
     accumulator.messageCount++
+    const prompt = normalizePromptField(payload.message)
+    if (prompt) {
+      accumulator.lastUserPrompt = prompt
+    }
     if (!accumulator.title) {
       accumulator.title = extractContentText(payload.message)
       state.titleSource = accumulator.title ? 'user' : state.titleSource

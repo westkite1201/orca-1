@@ -11,7 +11,11 @@ const scriptPath = import.meta.filename
 const projectDir = resolve(import.meta.dirname, '../..')
 const runtime = readRuntimeArg()
 
-const NATIVE_MODULES = ['node-pty']
+const NATIVE_MODULES = [
+  'node-pty',
+  ...(process.platform === 'win32' ? ['windows-native-registry'] : [])
+]
+const NODE_PTY_CONPTY_RUNTIME_FILES = ['conpty.dll', 'OpenConsole.exe']
 const CHILD_CHECK_FLAG = '--check-only'
 
 if (process.argv.includes(CHILD_CHECK_FLAG)) {
@@ -51,26 +55,16 @@ function readRuntimeArg() {
 function ensureNodeRuntime() {
   const initial = runNodeCheck()
   const patchedNodePtyRebuildReason = getPatchedNodePtyRebuildReason()
-  // A stale build/Release can coexist with a loader that still falls back to a
-  // prebuild, so a failed patched node-pty check must also force source rebuild.
-  const needsPatchedNodePtyRebuild =
-    patchedNodePtyRebuildReason !== null ||
-    (requiresPatchedNodePtySourceBuild() &&
-      initial.failures.some((failure) => failure.moduleName === 'node-pty'))
-  if (initial.ok && !needsPatchedNodePtyRebuild) {
+  if (initial.ok && !patchedNodePtyRebuildReason) {
     return
   }
 
-  if (needsPatchedNodePtyRebuild) {
-    if (patchedNodePtyRebuildReason) {
-      console.warn(`[native-runtime] ${patchedNodePtyRebuildReason}`)
-    }
+  if (patchedNodePtyRebuildReason) {
+    console.warn(`[native-runtime] ${patchedNodePtyRebuildReason}`)
     if (!initial.ok) {
       printCheckError(initial)
     }
-    // Why: node-pty otherwise accepts its unpatched platform prebuild and
-    // never reaches node-gyp, even though Orca needs its patched source build.
-    runPnpm(['rebuild', 'node-pty'], { npm_config_build_from_source: 'true' })
+    runPnpm(['rebuild', 'node-pty'])
     verifyNodeRuntimeAfterRebuild()
     return
   }
@@ -250,6 +244,12 @@ function collectNativeModuleFailures() {
 }
 
 function loadNativeModule(moduleName) {
+  if (moduleName === 'windows-native-registry') {
+    const registry = require(moduleName)
+    // Why: the package defers loading its .node addon until the first registry call.
+    registry.getRegistryKey(registry.HK.CU, 'Environment')
+    return
+  }
   if (moduleName === 'node-pty') {
     loadNodePtyNativeModule()
     return
@@ -266,10 +266,24 @@ function loadNodePtyNativeModule() {
   // Why: node-pty's Windows JS wrapper defers conpty.node/pty.node until a
   // terminal is created, so require('node-pty') alone can miss ABI mismatches.
   const native = loadNativeModule(nativeName)
-  if (requiresPatchedNodePtySourceBuild() && !isNodePtyReleaseBuildDir(native.dir)) {
+  assertNodePtyWindowsConptyRuntime(native?.dir)
+  if (requiresPatchedNodePtySourceBuild() && !isNodePtyReleaseBuildDir(native?.dir)) {
     throw new Error(
       `node-pty resolved to ${native.dir}; expected build/Release so Orca's node-pty patch is active`
     )
+  }
+}
+
+function assertNodePtyWindowsConptyRuntime(nativeDir) {
+  if (process.platform !== 'win32' || !isNodePtyReleaseBuildDir(nativeDir)) {
+    return
+  }
+  const runtimeDir = resolve(projectDir, 'node_modules', 'node-pty', 'build', 'Release', 'conpty')
+  const missingFile = NODE_PTY_CONPTY_RUNTIME_FILES.find(
+    (filename) => !existsSync(resolve(runtimeDir, filename))
+  )
+  if (missingFile) {
+    throw new Error(`node-pty ConPTY runtime file is missing: ${resolve(runtimeDir, missingFile)}`)
   }
 }
 
@@ -325,11 +339,10 @@ function getWindowsBuildNumber() {
   return match && match.length === 4 ? Number.parseInt(match[3], 10) : 0
 }
 
-function runPnpm(args, extraEnv = {}) {
+function runPnpm(args) {
   const command = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const result = spawnSync(command, args, {
     cwd: projectDir,
-    env: { ...process.env, ...extraEnv },
     stdio: 'inherit',
     shell: process.platform === 'win32'
   })

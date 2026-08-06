@@ -8,7 +8,9 @@ import {
   getCreatePrIntentCommitFailureNoticeMessage,
   getCreatePrIntentStagePaths,
   resolveCreatePrIntentReviewBase,
-  resolveCreatePrIntentRemoteStep
+  resolveCreatePrIntentRemoteStep,
+  shouldAttemptCreateHostedReviewForIntent,
+  shouldGenerateHostedReviewDetailsForIntent
 } from './source-control-create-pr-intent-flow'
 import type { GitStatusEntry } from '../../../../shared/types'
 
@@ -21,6 +23,7 @@ describe('source-control Create PR intent flow helpers', () => {
         worktreeId: 'wt-1',
         worktreePath: '/repo',
         branch: 'feature',
+        provider: 'github',
         baseRef: 'origin/main'
       })
 
@@ -44,7 +47,8 @@ describe('source-control Create PR intent flow helpers', () => {
       repoId: 'repo-1',
       worktreeId: 'wt-1',
       worktreePath: '/repo',
-      branch: 'feature/pr'
+      branch: 'feature/pr',
+      provider: 'github'
     })
 
     expect(createPrIntentGitStatusMatchesToken(token, { branch: 'refs/heads/feature/pr' })).toBe(
@@ -63,7 +67,8 @@ describe('source-control Create PR intent flow helpers', () => {
       repoId: 'repo-1',
       worktreeId: 'wt-1',
       worktreePath: wt1Path,
-      branch: 'feature/pr'
+      branch: 'feature/pr',
+      provider: 'github'
     })
 
     expect(
@@ -92,6 +97,7 @@ describe('source-control Create PR intent flow helpers', () => {
       worktreeId: 'wt-1',
       worktreePath,
       branch: 'feature/pr',
+      provider: 'github',
       baseRef: 'refs/remotes/origin/main'
     })
 
@@ -189,7 +195,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'no_upstream',
-          nextAction: 'publish'
+          nextAction: 'publish',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('publish')
@@ -203,7 +210,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_push',
-          nextAction: 'push'
+          nextAction: 'push',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('push')
@@ -223,13 +231,16 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_sync',
-          nextAction: 'sync'
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('force_push')
   })
 
-  it('blocks ordinary diverged branches and unpublished branches without commits', () => {
+  it('fast-forwards behind-only branches, blocks diverged and unpublished-without-commits branches', () => {
+    // Genuinely diverged (local + non-equivalent remote commits): auto-merging
+    // would reconcile without consent, so the intent flow keeps the explicit stop.
     expect(
       resolveCreatePrIntentRemoteStep({
         upstreamStatus: { hasUpstream: true, ahead: 1, behind: 1 },
@@ -239,10 +250,27 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_sync',
-          nextAction: 'sync'
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('blocked')
+
+    // Behind with no local commits: pure --ff-only (never plain merge sync).
+    expect(
+      resolveCreatePrIntentRemoteStep({
+        upstreamStatus: { hasUpstream: true, ahead: 0, behind: 3 },
+        hasCurrentBranch: true,
+        hostedReviewCreation: {
+          provider: 'github',
+          review: null,
+          canCreate: false,
+          blockedReason: 'needs_sync',
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
+        }
+      })
+    ).toBe('fast_forward')
 
     expect(
       resolveCreatePrIntentRemoteStep({
@@ -254,10 +282,46 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'no_upstream',
-          nextAction: 'publish'
+          nextAction: 'publish',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('blocked')
+  })
+
+  it('uses main preflight as the final lookup authority after preparation', () => {
+    const unavailable = {
+      provider: 'github' as const,
+      review: null,
+      canCreate: false,
+      blockedReason: null,
+      nextAction: null,
+      reviewLookupOutcome: 'unavailable' as const,
+      head: 'feature-branch'
+    }
+    expect(shouldAttemptCreateHostedReviewForIntent(unavailable)).toBe(true)
+    // Loading placeholders share the unavailable/null-reason shape but carry no branch.
+    expect(shouldAttemptCreateHostedReviewForIntent({ ...unavailable, head: undefined })).toBe(
+      false
+    )
+    expect(shouldGenerateHostedReviewDetailsForIntent(unavailable)).toBe(false)
+    expect(
+      shouldGenerateHostedReviewDetailsForIntent({
+        ...unavailable,
+        canCreate: true,
+        reviewLookupOutcome: 'not_found'
+      })
+    ).toBe(true)
+    expect(
+      shouldAttemptCreateHostedReviewForIntent({
+        provider: 'github',
+        review: null,
+        canCreate: false,
+        blockedReason: 'needs_push',
+        nextAction: 'push',
+        reviewLookupOutcome: 'unavailable'
+      })
+    ).toBe(false)
   })
 
   it('surfaces the commit failure summary in the Create PR intent notice', () => {
