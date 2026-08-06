@@ -11,6 +11,8 @@ export type SlashCommandSuggestion = {
   name: string
   /** Optional one-line description for the suggestion row. */
   description?: string
+  /** Complete the token instead of dispatching it when Enter accepts the row. */
+  acceptsArguments?: boolean
 }
 
 // Best-effort, curated per-agent catalogs. The CLIs ship no machine-readable

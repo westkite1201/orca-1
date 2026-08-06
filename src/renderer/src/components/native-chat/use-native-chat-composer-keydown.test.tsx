@@ -75,6 +75,16 @@ describe('useNativeChatComposerKeyDown', () => {
     expect(tab.callbacks.dispatchPickerCommand).not.toHaveBeenCalled()
   })
 
+  it('completes a command that requires arguments on Enter', () => {
+    const command = { ...COMMAND, name: 'jaws', acceptsArguments: true }
+    const { handler, callbacks } = setup(picker([command]))
+
+    handler(keyEvent('Enter') as never)
+
+    expect(callbacks.completePickerItem).toHaveBeenCalledWith(command)
+    expect(callbacks.dispatchPickerCommand).not.toHaveBeenCalled()
+  })
+
   it('falls through to composer send when the open picker has no options', () => {
     const { handler, callbacks } = setup(picker([]))
     handler(keyEvent('Enter') as never)

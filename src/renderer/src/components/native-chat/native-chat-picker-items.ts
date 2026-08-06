@@ -11,6 +11,7 @@ export type NativeChatPickerItem =
       id: string
       name: string
       description?: string
+      acceptsArguments?: boolean
       skillCollision: boolean
     }
   | {
@@ -53,6 +54,7 @@ export function buildNativeChatPickerItems(
         id: `command:${command.name}`,
         name: command.name,
         description: command.description ? sanitizePickerText(command.description, 240) : undefined,
+        ...(command.acceptsArguments ? { acceptsArguments: true } : {}),
         skillCollision: prefix === '/' && skillNames.has(command.name)
       },
       stableOrder: index

@@ -66,7 +66,7 @@ export function useNativeChatComposerKeyDown({
         if ((event.key === 'Enter' || event.key === 'Tab') && items.length > 0) {
           event.preventDefault()
           const item = items[activeSuggestion] ?? items[0]
-          if (event.key === 'Enter' && item.kind === 'command') {
+          if (event.key === 'Enter' && item.kind === 'command' && item.acceptsArguments !== true) {
             dispatchPickerCommand(item)
           } else {
             completePickerItem(item)

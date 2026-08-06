@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   sendNativeChatMessageVerified: vi.fn(),
   trackPendingSend: vi.fn(),
   setDraft: vi.fn(),
+  draft: 'hello',
   draftScopeKeys: [] as string[],
   clearNativeChatLaunchDraft: vi.fn(),
   markNativeChatLaunchDraftAdopted: vi.fn()
@@ -83,7 +84,7 @@ vi.mock('@/lib/native-chat-telemetry', () => ({
 vi.mock('./use-native-chat-draft', () => ({
   useNativeChatDraft: (scopeKey: string) => {
     mocks.draftScopeKeys.push(scopeKey)
-    return { draft: 'hello', setDraft: mocks.setDraft }
+    return { draft: mocks.draft, setDraft: mocks.setDraft }
   }
 }))
 vi.mock('./native-chat-draft-cache', () => ({
@@ -139,6 +140,7 @@ describe('NativeChatComposer', () => {
     clearNativeChatSessionOptionCacheForTests()
     mocks.fieldProps = null
     mocks.modelSwitchOutcome = 'applied'
+    mocks.draft = 'hello'
     mocks.draftScopeKeys.length = 0
     mocks.confirmationObserver = null
     mocks.createClaudeModelSwitchConfirmationObserver.mockImplementation(() => {
@@ -205,6 +207,34 @@ describe('NativeChatComposer', () => {
 
     expect(onOptimisticSend).toHaveBeenCalledWith('hello', [])
     expect(mocks.trackPendingSend).toHaveBeenCalledWith(mocks.sendHandle, 'pending-1')
+  })
+
+  it('turns /jaws into a plan-only agent request for the exact worktree', () => {
+    mocks.draft = '/jaws Build billing recovery'
+    const onOptimisticSend = vi.fn(() => 'pending-jaws')
+    render(
+      <NativeChatComposer
+        worktreeId={'repo-1::C:\\repo'}
+        terminalTabId="tab-1"
+        paneKey="tab-1:leaf-1"
+        targetPtyId="pty-1"
+        agent="codex"
+        onOptimisticSend={onOptimisticSend}
+      />
+    )
+
+    act(() => mocks.fieldProps?.onSend?.())
+
+    expect(mocks.sendNativeChatMessage).toHaveBeenCalledWith(
+      {},
+      'pty-1',
+      expect.stringContaining(
+        'JAWS_PLAN_REQUEST_V1 {"goal":"Build billing recovery","worktreeSelector":"id:repo-1::C:\\\\repo"}'
+      ),
+      undefined
+    )
+    expect(onOptimisticSend).toHaveBeenCalledWith('/jaws Build billing recovery', [])
+    expect(mocks.trackPendingSend).toHaveBeenCalledWith(mocks.sendHandle, 'pending-jaws')
   })
 
   it('retires the launch-draft seed once a send clears the TUI input line', () => {

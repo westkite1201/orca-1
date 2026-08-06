@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { useAppStore } from '../../store'
 import { sendRuntimePtyInput } from '@/runtime/runtime-terminal-inspection'
 import { getSettingsForAgentTabRuntimeOwner } from '@/lib/agent-paste-draft'
@@ -9,7 +9,7 @@ import {
 } from './native-chat-runtime-send'
 import type { NativeChatSendHandle } from './native-chat-runtime-send'
 import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
-import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
+import * as jawsChat from '../../../../shared/jaws-chat-request'
 import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
 import {
   applyMentionSuggestion,
@@ -64,6 +64,7 @@ const ESC = '\x1b'
 export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeChatComposerProps>(
   function NativeChatComposer(
     {
+      worktreeId,
       terminalTabId,
       paneKey,
       targetPtyId,
@@ -127,7 +128,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       setCaret(readNativeChatDraftCache(draftScopeKey).length)
     }
 
-    const agentCommands = useMemo(() => getVerifiedNativeChatCommands(agent), [agent])
+    const agentCommands = jawsChat.jawsChatCommands(agent, !!worktreeId)
     const picker = useNativeChatPickerState({
       agent,
       terminalTabId,
@@ -250,7 +251,8 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       if (!target) {
         return
       }
-      const classification = classifySend(text)
+      const sentText = jawsChat.expandJawsChatCommand(text, worktreeId)
+      const classification = classifySend(sentText)
       // A parked launch draft must be cleared line-by-line before the body.
       const { sendOptions } = resolveNativeChatLaunchDraftSend({
         launchDraft,
@@ -263,17 +265,17 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       // command/unknown send, otherwise `clearImageAttachments()` below drops
       // them silently when the text starts with the agent's slash/skill prefix.
       if (classification !== 'chat' && imagePaths.length === 0) {
-        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
+        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, sentText, sendOptions)
       } else if (imagePaths.length > 0) {
         pendingHandle = sendNativeChatMessageWithImageAttachments(
           target.settings,
           target.ptyId,
-          text,
+          sentText,
           imagePaths,
           sendOptions
         )
       } else if (text.trim().length > 0) {
-        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
+        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, sentText, sendOptions)
       } else {
         submitNativeChatPrompt(target.settings, target.ptyId)
       }
@@ -320,6 +322,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       launchDraftResolved,
       readTerminalScreen,
       resolveTarget,
+      worktreeId,
       onOptimisticSend,
       onSlashCommand,
       sessionOptionsSurface,

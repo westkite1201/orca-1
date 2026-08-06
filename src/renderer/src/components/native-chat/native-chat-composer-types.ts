@@ -2,6 +2,8 @@ import type { AgentType } from '../../../../shared/agent-status-types'
 import type { NativeChatLaunchDraft } from '@/lib/native-chat-launch-prompt'
 
 export type NativeChatComposerProps = {
+  /** Exact Orca worktree targeted by app-owned chat commands. */
+  worktreeId?: string
   /** Tab hosting the agent; used to resolve the live ptyId + runtime settings. */
   terminalTabId: string
   /** Stable split-leaf identity; unlike a PTY id, this survives reconnects. */

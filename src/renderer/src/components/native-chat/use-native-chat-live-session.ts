@@ -17,7 +17,7 @@ import {
 } from './native-chat-incremental-assembler'
 import { mergeNativeChatLiveSession } from './native-chat-live-status'
 import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
-import { surfaceSkillInvocationUserTurns } from '../../../../shared/native-chat-command-envelope'
+import { surfaceNativeChatCommandUserTurns } from '../../../../shared/native-chat-command-envelope'
 import {
   hasMoreNativeChatHistory,
   NATIVE_CHAT_INITIAL_LIMIT,
@@ -341,7 +341,7 @@ export function useNativeChatLiveSession(
   // Why: skill invocations are user turns but Claude records them as noise-filtered command envelopes, so surface them as the literal token here.
   const surfacedMessages = useMemo(
     () =>
-      surfaceSkillInvocationUserTurns(
+      surfaceNativeChatCommandUserTurns(
         assembledMessages,
         new Set(getVerifiedNativeChatCommands(agent).map((command) => command.name))
       ),

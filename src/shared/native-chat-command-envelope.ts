@@ -6,6 +6,7 @@
 // conversation. Surface non-catalog envelopes back as plain user text.
 
 import { isTextBlock, type NativeChatMessage } from './native-chat-types'
+import { surfaceJawsChatRequestUserTurns } from './jaws-chat-request'
 
 const COMMAND_NAME = /<command-name>([\s\S]*?)<\/command-name>/
 const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/
@@ -60,4 +61,13 @@ export function surfaceSkillInvocationUserTurns(
     }
   })
   return changed ? out : (messages as NativeChatMessage[])
+}
+
+export function surfaceNativeChatCommandUserTurns(
+  messages: readonly NativeChatMessage[],
+  catalogCommandNames: ReadonlySet<string>
+): NativeChatMessage[] {
+  return surfaceJawsChatRequestUserTurns(
+    surfaceSkillInvocationUserTurns(messages, catalogCommandNames)
+  )
 }

@@ -50,10 +50,7 @@ import { resolveNativeChatFileLinkContext } from './native-chat-file-link'
 import { selectNativeChatRuntimeEnvironmentId } from './native-chat-runtime-owner'
 import { useNativeChatPasteBridge } from './use-native-chat-paste-bridge'
 import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
-import type {
-  NativeChatResolvedViewProps,
-  NativeChatViewProps
-} from './native-chat-view-types'
+import type { NativeChatResolvedViewProps, NativeChatViewProps } from './native-chat-view-types'
 import { JawsChatSurface } from './JawsChatSurface'
 
 export type { NativeChatViewProps } from './native-chat-view-types'
@@ -436,6 +433,7 @@ function NativeChatResolvedView({
       {questionActive ? null : (
         <NativeChatComposer
           ref={composerRef}
+          worktreeId={worktreeId}
           terminalTabId={terminalTabId}
           paneKey={paneKey}
           targetPtyId={targetPtyId}
