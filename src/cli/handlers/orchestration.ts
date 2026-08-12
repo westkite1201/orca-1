@@ -860,6 +860,20 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     printResult(result, json, (r) => `Updated ${r.task.id} -> ${r.task.status}`)
   },
 
+  'orchestration task-verify': async ({ flags, client, cwd, json }) => {
+    const from = await resolveCoordinatorTerminalHandle(flags, cwd, client)
+    const result = await client.call<{ task: { id: string; status: string } }>(
+      'orchestration.taskVerify',
+      {
+        id: getRequiredStringFlag(flags, 'id'),
+        evidence: getRequiredStringFlag(flags, 'evidence'),
+        from,
+        senderPaneKey: process.env.ORCA_PANE_KEY || undefined
+      }
+    )
+    printResult(result, json, (r) => `Verified ${r.task.id} -> ${r.task.status}`)
+  },
+
   'orchestration worker-start': async ({ flags, client, cwd, json }) => {
     const result = await callMutation<{
       runId: string

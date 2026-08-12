@@ -40,7 +40,7 @@ export function createHarnessRuntimeCaller(runtime: OrcaRuntimeService): Harness
           method,
           params
         },
-        options
+        { ...options, internalCaller: 'harness' }
       )
       if (!response.ok) {
         throw new Error(`${response.error.code}: ${response.error.message}`)

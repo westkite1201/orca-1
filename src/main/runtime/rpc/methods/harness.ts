@@ -12,7 +12,8 @@ const HarnessStart = z.object({
   worktree: requiredTrimmedString('Missing worktree selector'),
   goal: requiredTrimmedString('Missing goal'),
   verificationCommand: requiredTrimmedString('Missing verification command'),
-  mode: z.enum(['comparison', 'orchestrator']).optional()
+  mode: z.enum(['comparison', 'orchestrator']).optional(),
+  executionPlan: z.unknown().optional()
 })
 
 const HarnessList = z.object({ repo: OptionalString })

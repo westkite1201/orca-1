@@ -63,6 +63,9 @@ export type LegacyCoordinatorAuthorityProof = Readonly<{
 
 export type RpcContext = {
   runtime: OrcaRuntimeService
+  // Why: plan-owned Harness mutations share RPC handlers but must remain
+  // unreachable to authenticated CLI and mobile callers.
+  internalCaller?: 'harness'
   // Why: lets long-poll handlers release immediately on client disconnect instead of running down timeoutMs. See design doc §3.1.
   signal?: AbortSignal
   // Why: per-WebSocket key so the server reaps a closing socket's subscriptions without touching sibling sockets sharing the deviceToken.

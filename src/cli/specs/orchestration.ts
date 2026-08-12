@@ -157,6 +157,13 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'id', 'status', 'result', 'run', 'from', 'retry-request'],
     notes: ['Valid --status values: pending, ready, dispatched, completed, failed, blocked.']
   },
+  {
+    path: ['orchestration', 'task-verify'],
+    summary: 'Verify a reported Harness task',
+    usage:
+      'orca orchestration task-verify --id <task_id> --evidence <text> [--from <handle>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'evidence', 'from']
+  },
   ...ORCHESTRATION_WORKER_COMMAND_SPECS,
   {
     path: ['orchestration', 'dispatch'],

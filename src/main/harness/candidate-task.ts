@@ -46,8 +46,25 @@ function buildApprovedHarnessTaskSpec(
   return `Execute this approved plan from the current integration worktree without changing its task set:\n\nGoal: ${plan.goal}\nStart SHA: ${baseSha}\nMaximum concurrent mutating lanes: ${plan.maxConcurrency}\nFinal verification command: ${plan.verificationCommand}${linearRoot}\n\nApproved tasks:\n${tasks}\n\nYou own supervised execution, integration, and the final report. First read the repository instructions and trace the real code path. Then:\n\n1. Treat the approved tasks and dependencies above as authoritative. Create exactly one child Task per approved task, titled \`[Jaws:<key>] <title>\`, with dependency keys translated to Task IDs. Do not add, remove, merge, split, or re-plan tasks. If the plan cannot be executed safely, stop and report the blocker.\n2. You are the live coordinator: do not invoke or delegate \`orca orchestration run\`. Use task-create, \`worker-start\`, check --wait, and explicit dependencies. Set every child Task's parent to your assigned top-level task ID from the dispatch preamble, and inspect only that lane set with \`orca orchestration task-list --parent <top-level-task-id>\`.\n3. Start a worker only when fewer than ${plan.maxConcurrency} mutating lanes are active. Use another Codex terminal in this integration worktree for read-only investigation; it must not edit files.\n4. For every ready task, first integrate all dependency commits and verify this integration checkout is clean. Resolve its exact base with \`git rev-parse HEAD\`, then run \`orca orchestration worker-start --task <task-id> --worktree new-child --name <task-key> --agent codex --setup run --base-branch <exact-sha>${linearWorkerFlags} --json\`. Never pass the word HEAD as the base ref.${plan.linear ? ' Use only that task’s approved Linear identifier and workspace shown above.' : ''}\n5. Supervise every Dispatch until worker_done or escalation. Require workers to commit their changes and report the commit SHA. Do not report successful worker_done while an approved child Task is pending, ready, dispatched, failed, or blocked. If a failed or blocked Task cannot be recovered, report your own worker_done with a Failed: subject and the reason.\n6. Integrate successful worker commits into this integration worktree in dependency order and resolve conflicts deliberately. A completed dependency is not enough: its commit must be integrated before a downstream worktree starts. Do not run or delegate the final verification command; after your worker_done, the owning runtime runs it exactly once.\n7. Report the final changed files, narrower checks already run, failed or blocked Tasks, and anything that still needs human approval.\n\nDo not push, modify the user's source worktree, land to its branch, or delete worktrees. Never bypass repository safety instructions or verification to make the run appear successful.`
 }
 
+function approvedPlanInstructions(run: HarnessRun): string {
+  const plan = run.executionPlan
+  if (!plan) {
+    return ''
+  }
+  const lanes = plan.items
+    .map(
+      (item) =>
+        `- ${item.key}: ${item.execution}; deps=[${item.dependencies.join(', ') || 'none'}]; scope=${item.fileScopes.join(', ') || 'global/unknown'}`
+    )
+    .join('\n')
+  return `\n\nThe runtime owns this approved execution plan (revision ${plan.revision}, hash ${plan.planHash}, max concurrency ${plan.maxConcurrency}). Do not invent child tasks or create worktrees. Supervise only the runtime-created lanes below, independently inspect their evidence, integrate and verify them in dependency order, and report blockers without bypassing the plan:\n${lanes}`
+}
+
 export function buildHarnessTaskSpec(run: HarnessRun): string {
   if (run.mode === 'orchestrator') {
+    if (run.executionPlan) {
+      return `Coordinate this goal from the current integration worktree:\n\n${run.goal}\n\nStart SHA: ${run.baseSha}\nFinal verification command: ${run.verificationCommand}\n\nThe runtime owns task and worktree creation. Supervise only its approved lanes. A worker report is not completion: inspect its evidence independently, integrate mutating commits in dependency order, then run \`orca orchestration task-verify --id <task-id> --evidence "<direct observation>"\`. Report blockers, and do not create child tasks or worktrees yourself.${approvedPlanInstructions(run)}`
+    }
     if (run.approvedPlan) {
       return buildApprovedHarnessTaskSpec(
         run.approvedPlan,

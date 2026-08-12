@@ -41,7 +41,10 @@ export class RpcDispatcher {
     this.legacyOrchestration = new OrchestrationLegacyCompatibility(runtime)
   }
 
-  async dispatch(request: RpcRequest, options?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  async dispatch(
+    request: RpcRequest,
+    options?: { signal?: AbortSignal; internalCaller?: 'harness' }
+  ): Promise<RpcResponse> {
     const meta = this.meta()
     const method = this.registry.get(request.method)
     if (!method) {
@@ -94,6 +97,7 @@ export class RpcDispatcher {
         return method.handler(effectiveParams, {
           runtime: this.runtime,
           signal: options?.signal,
+          internalCaller: options?.internalCaller,
           requestId: request.id,
           orchestrationCapability: request.orchestrationCapability,
           authenticatedCallerFingerprint:
