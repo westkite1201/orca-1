@@ -1,12 +1,15 @@
 import type {
   HarnessAgent,
+  HarnessAllocationUpdateInput,
   HarnessCandidate,
   HarnessCandidatePatch,
   HarnessRun,
   HarnessRunCreateInput
 } from '../../shared/harness-types'
 import type { Repo } from '../../shared/types'
+import { createHarnessAllocationState } from '../../shared/harness-allocation-types'
 import type { HarnessStore } from './service'
+import { normalizeHarnessExecutionPlan } from './allocation-validation'
 
 function pendingCandidate<TAgent extends HarnessAgent>(
   runId: string,
@@ -56,10 +59,19 @@ export function createHarnessRunMemoryStore(repo: Repo): {
     createHarnessRun: (input: HarnessRunCreateInput) => {
       const now = Date.now()
       const id = `run-${++sequence}`
+      const executionPlan = input.executionPlan
+        ? normalizeHarnessExecutionPlan(input.executionPlan)
+        : undefined
+      if (executionPlan && input.mode !== 'orchestrator') {
+        throw new Error('Harness execution plans require orchestrator mode.')
+      }
       const run: HarnessRun = {
         id,
         ...input,
         mode: input.mode ?? 'comparison',
+        ...(executionPlan
+          ? { executionPlan, allocation: createHarnessAllocationState(executionPlan) }
+          : {}),
         candidates:
           input.mode === 'orchestrator'
             ? [pendingCandidate(id, 'codex', now)]
@@ -92,6 +104,35 @@ export function createHarnessRunMemoryStore(repo: Repo): {
         candidate.agent === agent ? updated : candidate
       )
       const next = { ...run, candidates, updatedAt: now }
+      runs.set(runId, next)
+      return next
+    },
+    updateHarnessAllocation: (runId: string, patch: HarnessAllocationUpdateInput) => {
+      const run = runs.get(runId)
+      if (!run || !run.allocation) {
+        throw new Error('missing allocation')
+      }
+      if (run.fatalError !== null) {
+        throw new Error('run already failed')
+      }
+      const next = {
+        ...run,
+        allocation: {
+          ...run.allocation,
+          ...(patch.integrationWorktreeId !== undefined
+            ? { integrationWorktreeId: patch.integrationWorktreeId }
+            : {}),
+          ...(patch.integrationHeadSha !== undefined
+            ? { integrationHeadSha: patch.integrationHeadSha }
+            : {}),
+          items: patch.item
+            ? run.allocation.items.map((item) =>
+                item.itemKey === patch.item?.itemKey ? { ...item, ...patch.item } : item
+              )
+            : run.allocation.items
+        },
+        updatedAt: Date.now()
+      }
       runs.set(runId, next)
       return next
     },

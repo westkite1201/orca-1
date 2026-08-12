@@ -1,19 +1,22 @@
 import type { Store } from '../persistence'
 import {
   deriveHarnessRunStatus,
+  type HarnessAllocationUpdateInput,
   type HarnessRun,
   type HarnessStartInput
 } from '../../shared/harness-types'
-import type { GitStatusResult } from '../../shared/git-status-types'
-import type { RuntimeWorktreeRecord } from '../../shared/runtime-types'
-import { isGitRepoKind } from '../../shared/repo-kind'
 import { assertNoActiveHarnessRun } from './active-run-guard'
+import { normalizeHarnessExecutionPlan } from './allocation-validation'
 import { executeHarnessCandidates } from './candidate-execution'
 import { HARNESS_DISPATCH_CONFIRMATION_PENDING } from './candidate-launch'
 import { harnessRecoveryStartedAt } from './candidate-recovery'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 import { advanceHarnessCompletion, type HarnessVerificationRunner } from './verification'
 import { VERIFICATION_INTERRUPTED_ERROR } from './candidate-verification-persistence'
+import { materializeHarnessPlan } from './worktree-lane-materialization'
+import { preflightHarnessSource, type HarnessSourcePreflight } from './harness-source-preflight'
+
+export type { HarnessSourcePreflight } from './harness-source-preflight'
 
 export type HarnessStore = Pick<
   Store,
@@ -23,12 +26,12 @@ export type HarnessStore = Pick<
   | 'createHarnessRun'
   | 'updateHarnessCandidate'
   | 'failHarnessRun'
->
-
-type WorktreeShowResult = { worktree: RuntimeWorktreeRecord }
-export type HarnessSourcePreflight = {
-  source: RuntimeWorktreeRecord
-  baseSha: string
+> & {
+  updateHarnessAllocation?: (
+    runId: string,
+    patch: HarnessAllocationUpdateInput,
+    options?: { durability?: 'best-effort' | 'required' }
+  ) => HarnessRun
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000
@@ -110,6 +113,13 @@ export class HarnessService {
     if (!worktree || !goal || !verificationCommand) {
       throw new Error('A worktree, goal, and verification command are required.')
     }
+    const executionPlan =
+      input.executionPlan === undefined
+        ? undefined
+        : normalizeHarnessExecutionPlan(input.executionPlan)
+    if (executionPlan && input.mode !== 'orchestrator') {
+      throw new Error('Harness execution plans require orchestrator mode.')
+    }
 
     const jawsRunId = input.jawsRunId?.trim() || null
     const existingRun = jawsRunId
@@ -139,7 +149,8 @@ export class HarnessService {
       ...(input.approvedPlan ? { approvedPlan: input.approvedPlan } : {}),
       ...(input.approvedLinearMaterialization
         ? { approvedLinearMaterialization: input.approvedLinearMaterialization }
-        : {})
+        : {}),
+      ...(executionPlan ? { executionPlan } : {})
     })
     if (this.monitoringActive || !this.deferExecutionUntilMonitoring) {
       this.schedule(run.id)
@@ -148,39 +159,7 @@ export class HarnessService {
   }
 
   async preflight(worktreeSelector: string): Promise<HarnessSourcePreflight> {
-    const worktree = worktreeSelector.trim()
-    if (!worktree) {
-      throw new Error('A worktree is required.')
-    }
-    const { worktree: source } = await this.runtime.call<WorktreeShowResult>('worktree.show', {
-      worktree
-    })
-    assertNoActiveHarnessRun(this.store.listHarnessRuns(source.repoId), source.id)
-    const repo = this.store.getRepo(source.repoId)
-    if (!repo || !isGitRepoKind(repo)) {
-      throw new Error('A Git repository is required.')
-    }
-    const status = await this.runtime.call<GitStatusResult>('git.status', {
-      worktree: `id:${source.id}`
-    })
-    if (status.didHitLimit) {
-      throw new Error(
-        'The source worktree status was truncated, so cleanliness could not be verified.'
-      )
-    }
-    if (status.entries.length > 0) {
-      throw new Error('The source worktree must be clean.')
-    }
-    if (status.conflictOperation !== 'unknown') {
-      throw new Error(`Cannot start while a ${status.conflictOperation} operation is in progress.`)
-    }
-    const baseSha = status.head?.trim()
-    if (!baseSha) {
-      throw new Error('Could not resolve the source HEAD.')
-    }
-    // Why: status lookup yields; recheck before callers synchronously persist a run or plan.
-    assertNoActiveHarnessRun(this.store.listHarnessRuns(source.repoId), source.id)
-    return { source, baseSha }
+    return preflightHarnessSource(this.store, this.runtime, worktreeSelector)
   }
 
   list(repoId?: string): HarnessRun[] {
@@ -295,6 +274,10 @@ export class HarnessService {
       runId
     })
     if (hostReady) {
+      const run = this.store.getHarnessRun(runId)
+      if (run?.executionPlan) {
+        await materializeHarnessPlan({ runtime: this.runtime, store: this.store, run })
+      }
       await this.advanceCompletion(runId)
     }
   }

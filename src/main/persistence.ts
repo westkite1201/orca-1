@@ -172,6 +172,11 @@ import {
   type HarnessRunCreateInput
 } from '../shared/harness-types'
 import {
+  createHarnessAllocationState,
+  type HarnessAllocationPatchV1
+} from '../shared/harness-allocation-types'
+import { normalizeHarnessExecutionPlan } from './harness/allocation-validation'
+import {
   isConfirmedJawsLinearMaterialization,
   jawsLinearMaterializationSchema,
   jawsPlanSchema,
@@ -5506,6 +5511,9 @@ export class Store {
     const approvedLinearMaterialization = input.approvedLinearMaterialization
       ? jawsLinearMaterializationSchema.parse(input.approvedLinearMaterialization)
       : undefined
+    const executionPlan = input.executionPlan
+      ? normalizeHarnessExecutionPlan(input.executionPlan)
+      : undefined
     if (
       !repoId ||
       !sourceWorktreeId ||
@@ -5518,6 +5526,9 @@ export class Store {
     }
     if (approvedPlan && mode !== 'orchestrator') {
       throw new Error('Approved plans require orchestrator mode.')
+    }
+    if (executionPlan && mode !== 'orchestrator') {
+      throw new Error('Harness execution plans require orchestrator mode.')
     }
     if (
       approvedPlan?.linear &&
@@ -5570,6 +5581,12 @@ export class Store {
       goal,
       verificationCommand,
       baseSha,
+      ...(executionPlan
+        ? {
+            executionPlan,
+            allocation: createHarnessAllocationState(executionPlan)
+          }
+        : {}),
       mode,
       ...(input.jawsRunId ? { jawsRunId: input.jawsRunId.trim() } : {}),
       ...(approvedPlan ? { approvedPlan: structuredClone(approvedPlan) } : {}),
@@ -5684,6 +5701,61 @@ export class Store {
         // exists only in memory after an atomic write failure.
         this.state.harnessRuns = harnessRunsBefore
         this.state.jawsRuns = jawsRunsBefore
+        throw error
+      }
+    } else {
+      this.flush()
+    }
+    return nextRun
+  }
+
+  updateHarnessAllocation(
+    runId: string,
+    patch: HarnessAllocationPatchV1,
+    options: { durability?: 'best-effort' | 'required' } = {}
+  ): HarnessRun {
+    const harnessRunsBefore = [...(this.state.harnessRuns ?? [])]
+    const runIndex = (this.state.harnessRuns ?? []).findIndex((run) => run.id === runId)
+    if (runIndex === -1) {
+      throw new Error('Harness run not found.')
+    }
+    const currentRun = this.state.harnessRuns[runIndex]
+    if (!currentRun.allocation) {
+      throw new Error('Harness run has no allocation state.')
+    }
+    if (currentRun.fatalError !== null) {
+      throw new Error('Harness run has already failed.')
+    }
+    const currentItem = patch.item
+      ? currentRun.allocation.items.find((item) => item.itemKey === patch.item?.itemKey)
+      : undefined
+    if (patch.item && !currentItem) {
+      throw new Error('Harness allocation item not found.')
+    }
+    const now = Date.now()
+    const allocation = {
+      ...currentRun.allocation,
+      ...(patch.integrationWorktreeId !== undefined
+        ? { integrationWorktreeId: patch.integrationWorktreeId }
+        : {}),
+      ...(patch.integrationHeadSha !== undefined
+        ? { integrationHeadSha: patch.integrationHeadSha }
+        : {}),
+      items: patch.item
+        ? currentRun.allocation.items.map((item) =>
+            item.itemKey === patch.item?.itemKey ? { ...item, ...patch.item } : item
+          )
+        : currentRun.allocation.items
+    }
+    const nextRun: HarnessRun = { ...currentRun, allocation, updatedAt: now }
+    this.state.harnessRuns[runIndex] = nextRun
+    if (options.durability === 'required') {
+      try {
+        this.flushOrThrow()
+      } catch (error) {
+        // Why: allocation intents precede worktree/terminal side effects, so a
+        // failed durable write must not leave runtime effects without a receipt.
+        this.state.harnessRuns = harnessRunsBefore
         throw error
       }
     } else {

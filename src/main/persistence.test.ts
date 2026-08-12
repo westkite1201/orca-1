@@ -41,6 +41,7 @@ import { SshConnectionStore } from './ssh/ssh-connection-store'
 import { setSourceControlActionDefault } from '../shared/source-control-ai-actions'
 import { LEGACY_DEFAULT_SSH_RELAY_GRACE_PERIOD_SECONDS } from '../shared/ssh-types'
 import { closeTerminalTabInWorkspaceSession } from '../shared/workspace-session-terminal-tab-close'
+import type { HarnessExecutionPlanV1 } from '../shared/harness-allocation-types'
 
 // Shared mutable state so the electron mock can reference a per-test directory
 const testState = { dir: '' }
@@ -2016,6 +2017,76 @@ describe('Store', () => {
     })
     expect(run.candidates).toHaveLength(1)
     expect((await createStore()).getHarnessRun(run.id)).toEqual(run)
+  })
+
+  it('persists an approved execution plan with initial allocation receipts', async () => {
+    const store = await createStore()
+    const executionPlan: HarnessExecutionPlanV1 = {
+      version: 1,
+      revision: 1,
+      planHash: 'plan-hash-1',
+      maxConcurrency: 2,
+      items: [
+        {
+          key: 'inspect',
+          title: 'Inspect the repository',
+          objective: 'Find the relevant implementation.',
+          execution: 'read-only',
+          dependencies: [],
+          fileScopes: [],
+          acceptanceCriteria: ['The relevant files are identified.'],
+          verificationCommands: ['git status']
+        },
+        {
+          key: 'implement',
+          title: 'Implement the change',
+          objective: 'Apply the requested change.',
+          execution: 'worktree',
+          dependencies: ['inspect'],
+          fileScopes: ['src/main'],
+          acceptanceCriteria: ['The requested change is implemented.'],
+          verificationCommands: ['pnpm test']
+        }
+      ]
+    }
+    const run = store.createHarnessRun({
+      mode: 'orchestrator',
+      repoId: 'repo-1',
+      sourceWorktreeId: 'repo-1::/repo',
+      sourceWorktreePath: '/repo',
+      goal: 'Implement the issue',
+      verificationCommand: 'pnpm test',
+      baseSha: 'a'.repeat(40),
+      executionPlan
+    })
+
+    expect(run.executionPlan).toEqual(executionPlan)
+    expect(run.allocation?.items.map((item) => [item.itemKey, item.integration])).toEqual([
+      ['inspect', 'not-required'],
+      ['implement', 'pending']
+    ])
+    const creating = store.updateHarnessAllocation(
+      run.id,
+      {
+        integrationWorktreeId: 'integration-1',
+        integrationHeadSha: 'b'.repeat(40),
+        item: {
+          itemKey: 'inspect',
+          materialization: 'creating',
+          attempt: 1,
+          baseSha: 'b'.repeat(40)
+        }
+      },
+      { durability: 'required' }
+    )
+    expect(creating.allocation).toMatchObject({
+      integrationWorktreeId: 'integration-1',
+      integrationHeadSha: 'b'.repeat(40),
+      items: expect.arrayContaining([
+        expect.objectContaining({ itemKey: 'inspect', materialization: 'creating', attempt: 1 })
+      ])
+    })
+    expect((await createStore()).getHarnessRun(run.id)).toEqual(creating)
   })
 
   it('timestamps a failed single-candidate orchestrator run as terminal', async () => {

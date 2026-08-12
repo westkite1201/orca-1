@@ -23,6 +23,7 @@ export type LifecycleReconciliationResult =
   // stay unread and still need delivery.
   | { action: 'suppressed' }
   | LifecycleRejectionResult
+  | { action: 'reported'; taskId: string; dispatchId: string }
   | { action: 'completed'; taskId: string; dispatchId: string }
   | { action: 'failed'; taskId: string; dispatchId: string }
   | { action: 'heartbeat_recorded'; dispatchId: string }
@@ -293,6 +294,10 @@ function reconcileWorkerDoneMessage(
   if (outcome === 'failed') {
     onLog(`Task ${taskId} failed by worker report`)
     return { action: 'failed', taskId, dispatchId }
+  }
+  if (db.getTask(taskId)?.status === 'reported') {
+    onLog(`Task ${taskId} reported; awaiting coordinator verification`)
+    return { action: 'reported', taskId, dispatchId }
   }
   onLog(`Task ${taskId} completed by worker report`)
   return { action: 'completed', taskId, dispatchId }

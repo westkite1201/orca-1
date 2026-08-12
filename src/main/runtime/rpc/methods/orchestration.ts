@@ -13,7 +13,9 @@ import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
+import { hasSamePaneIdentity } from '../../../../shared/stable-pane-id'
 import { abbreviateOrchestrationTasks } from '../../../../shared/orchestration-task-summary'
+import type { HarnessRun } from '../../../../shared/harness-types'
 import {
   ORCHESTRATION_LEGACY_RUN_ID,
   orchestrationSkillRecoveryData
@@ -26,7 +28,7 @@ import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { OrcaRuntimeService } from '../../orca-runtime'
-import type { RunRow } from '../../orchestration/types'
+import type { RunRow, TaskRow } from '../../orchestration/types'
 import { encodeFederatedControlMessage } from '../../orchestration/federation-control-message'
 import { ORCHESTRATION_FEDERATION_CONTROL_MAIL_PROTOCOL_VERSION } from '../../../../shared/protocol-version'
 
@@ -34,6 +36,7 @@ const TASK_STATUSES: TaskStatus[] = [
   'pending',
   'ready',
   'dispatched',
+  'reported',
   'completed',
   'failed',
   'blocked'
@@ -41,6 +44,85 @@ const TASK_STATUSES: TaskStatus[] = [
 
 function getLifecycleGroupRecipientError(type: 'worker_done' | 'heartbeat'): string {
   return `${type} messages belong to one exact Dispatch and cannot target a group address.`
+}
+
+function harnessRunForRootTask(runtime: OrcaRuntimeService, rootTaskId: string): HarnessRun | null {
+  if (typeof runtime.getHarnessService !== 'function') {
+    return null
+  }
+  try {
+    return (
+      runtime
+        .getHarnessService()
+        .list()
+        .find((run) => run.candidates.some((candidate) => candidate.taskId === rootTaskId)) ?? null
+    )
+  } catch (error) {
+    if (error instanceof Error && error.message === 'runtime_unavailable') {
+      return null
+    }
+    throw error
+  }
+}
+
+function harnessRunForChildTask(runtime: OrcaRuntimeService, task: TaskRow): HarnessRun | null {
+  return task.parent_id ? harnessRunForRootTask(runtime, task.parent_id) : null
+}
+
+async function assertApprovedHarnessLaneTarget(
+  runtime: OrcaRuntimeService,
+  task: TaskRow,
+  targetHandle: string
+): Promise<void> {
+  const run = harnessRunForChildTask(runtime, task)
+  if (!run?.executionPlan || !run.allocation) {
+    return
+  }
+  const allocation = run.allocation.items.find((item) => item.taskId === task.id)
+  const planItem = run.executionPlan.items.find((item) => item.key === allocation?.itemKey)
+  if (!allocation || !planItem || allocation.materialization !== 'created') {
+    throw new Error('Orchestrator lane has no completed approved allocation receipt.')
+  }
+  const targetPaneKey = runtime.getTerminalPaneKey(targetHandle)
+  if (
+    !allocation.terminalPaneKey ||
+    !targetPaneKey ||
+    !hasSamePaneIdentity(allocation.terminalPaneKey, targetPaneKey)
+  ) {
+    throw new Error('Orchestrator lane target does not match its allocated terminal.')
+  }
+  const targetTerminal = await runtime.showTerminal(targetHandle)
+  const integrationWorktreeId = run.candidates.find(
+    (candidate) => candidate.taskId === task.parent_id
+  )?.worktreeId
+  if (!integrationWorktreeId) {
+    throw new Error('Orchestrator integration worktree is unavailable.')
+  }
+  if (planItem.execution === 'read-only') {
+    if (targetTerminal.worktreeId !== integrationWorktreeId || allocation.worktreeId !== null) {
+      throw new Error('Read-only Orchestrator lanes must use the integration worktree.')
+    }
+    return
+  }
+  const worktree = await runtime.showManagedWorktree(`id:${targetTerminal.worktreeId}`)
+  if (
+    allocation.worktreeId !== worktree.id ||
+    worktree.repoId !== run.repoId ||
+    worktree.parentWorktreeId !== integrationWorktreeId ||
+    worktree.lineage?.taskId !== task.id ||
+    worktree.createdWithAgent !== 'codex'
+  ) {
+    throw new Error('Mutating Orchestrator lane does not match its approved worktree receipt.')
+  }
+  const status = await runtime.getRuntimeGitStatus(`id:${worktree.id}`)
+  if (
+    status.didHitLimit ||
+    status.entries.length > 0 ||
+    status.conflictOperation !== 'unknown' ||
+    status.head?.trim() !== allocation.baseSha
+  ) {
+    throw new Error('Mutating Orchestrator lane is not a clean approved-base worktree.')
+  }
 }
 
 function parseRemoteWorkerPayload(payload: string | undefined): Record<string, unknown> {
@@ -163,7 +245,9 @@ const TaskCreateParams = z.object({
 })
 
 const TaskListParams = z.object({
-  status: z.enum(['pending', 'ready', 'dispatched', 'completed', 'failed', 'blocked']).optional(),
+  status: z
+    .enum(['pending', 'ready', 'dispatched', 'reported', 'completed', 'failed', 'blocked'])
+    .optional(),
   ready: OptionalBoolean,
   parent: OptionalString,
   // Why: server-side truncation keeps --brief cheap over SSH/relay instead of shipping full specs the CLI throws away.
@@ -190,6 +274,13 @@ const TaskUpdateParams = z.object({
   result: OptionalString,
   run: OptionalString,
   callerTerminalHandle: OptionalString
+})
+
+const TaskVerifyParams = z.object({
+  id: requiredString('Missing --id'),
+  evidence: requiredString('Missing --evidence'),
+  from: requiredString('Missing --from'),
+  senderPaneKey: OptionalString
 })
 
 const DispatchParams = z.object({
@@ -1087,7 +1178,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.taskCreate',
     params: TaskCreateParams,
-    handler: (params, { orchestrationCompatibilityEvidence, runtime, legacyCoordinatorRunId }) => {
+    handler: (
+      params,
+      { orchestrationCompatibilityEvidence, runtime, legacyCoordinatorRunId, internalCaller }
+    ) => {
       const db = runtime.getOrchestrationDb()
       let deps: string[] | undefined
       if (params.deps) {
@@ -1101,6 +1195,23 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           throw new Error('Invalid --deps: must be a JSON array of task IDs')
         }
       }
+      const parent = params.parent ? db.getTask(params.parent) : undefined
+      const planRun = parent ? harnessRunForRootTask(runtime, parent.parent_id ?? parent.id) : null
+      if (planRun?.executionPlan) {
+        if (internalCaller !== 'harness') {
+          // Why: approved-plan children are allocation receipts; letting the
+          // coordinator add one bypasses the reviewed DAG and scope contract.
+          throw new Error('Approved Harness plans allow only runtime-created child tasks.')
+        }
+        if (parent?.parent_id) {
+          throw new Error('Approved Harness lanes must be direct children of the root task.')
+        }
+        for (const dependencyId of deps ?? []) {
+          if (db.getTask(dependencyId)?.parent_id !== parent?.id) {
+            throw new Error('Approved Harness dependencies must be lanes in the same run.')
+          }
+        }
+      }
       const task = db.createTask({
         spec: params.spec,
         taskTitle: params.taskTitle,
@@ -1108,6 +1219,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         deps,
         parentId: params.parent,
         createdByTerminalHandle: params.callerTerminalHandle,
+        verificationRequired: Boolean(planRun?.executionPlan),
         runId: resolveRunScope(runtime, {
           runId: params.run,
           callerTerminalHandle: params.callerTerminalHandle,
@@ -1117,6 +1229,32 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }).id
       })
       return { task }
+    }
+  }),
+
+  defineMethod({
+    name: 'orchestration.taskVerify',
+    params: TaskVerifyParams,
+    handler: (params, { runtime }) => {
+      const db = runtime.getOrchestrationDb()
+      const task = db.getTask(params.id)
+      const run = task ? harnessRunForChildTask(runtime, task) : null
+      const coordinator = run?.candidates.find((candidate) => candidate.taskId === task?.parent_id)
+      if (!task || !run?.executionPlan || !coordinator) {
+        throw new Error('Only approved Harness child tasks use coordinator verification.')
+      }
+      if (
+        params.from !== coordinator.agentTerminalHandle ||
+        !params.senderPaneKey ||
+        !coordinator.agentTerminalPaneKey ||
+        !hasSamePaneIdentity(params.senderPaneKey, coordinator.agentTerminalPaneKey)
+      ) {
+        throw new Error('Only the assigned Harness coordinator can verify this task.')
+      }
+      if (!run.allocation?.items.some((item) => item.taskId === task.id)) {
+        throw new Error('Harness task has no approved allocation receipt.')
+      }
+      return { task: db.verifyReportedTask(task.id, params.evidence, params.from) }
     }
   }),
 
@@ -1242,6 +1380,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (task.status !== 'ready') {
         throw new Error(`Task ${params.task} is ${task.status}; only ready tasks can be dispatched`)
       }
+
+      await assertApprovedHarnessLaneTarget(runtime, task, to)
 
       // Why: injecting the preamble into a bare shell dumps it as shell commands (gibberish), so require a detected agent first.
       if (params.inject) {

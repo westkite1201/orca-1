@@ -268,8 +268,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership.
-const SCHEMA_VERSION = 23
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 coordinator-verified Harness reports.
+const SCHEMA_VERSION = 24
 
 function hardenOrchestrationDatabaseFiles(dbPath: string | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -519,11 +519,12 @@ export class OrchestrationDb {
         created_by_terminal_handle TEXT,
         task_title    TEXT,
         display_name  TEXT,
+        verification_required INTEGER NOT NULL DEFAULT 0,
         spec          TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'pending'
           CHECK(status IN (
             'pending', 'ready', 'dispatched',
-            'completed', 'failed', 'blocked'
+            'reported', 'completed', 'failed', 'blocked'
           )),
         deps          TEXT NOT NULL DEFAULT '[]',
         result        TEXT,
@@ -949,6 +950,53 @@ export class OrchestrationDb {
       if (current < 23) {
         this.backfillWorkerTerminalResources()
       }
+      if (current < 24) {
+        if (!this.hasColumn('tasks', 'verification_required')) {
+          this.db.exec(
+            'ALTER TABLE tasks ADD COLUMN verification_required INTEGER NOT NULL DEFAULT 0'
+          )
+        }
+        if (!this.tasksStatusCheckAllowsReported()) {
+          // Why: SQLite cannot widen a CHECK in place; rebuild atomically so
+          // worker claims cannot release an approved dependency before review.
+          this.db.exec(`
+            CREATE TABLE tasks_new (
+              id            TEXT PRIMARY KEY,
+              run_id        TEXT NOT NULL DEFAULT '${LEGACY_RUN_ID}',
+              parent_id     TEXT,
+              created_by_terminal_handle TEXT,
+              task_title    TEXT,
+              display_name  TEXT,
+              verification_required INTEGER NOT NULL DEFAULT 0,
+              spec          TEXT NOT NULL,
+              status        TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN (
+                  'pending', 'ready', 'dispatched',
+                  'reported', 'completed', 'failed', 'blocked'
+                )),
+              deps          TEXT NOT NULL DEFAULT '[]',
+              result        TEXT,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+              completed_at  TEXT
+            );
+            INSERT INTO tasks_new (
+              id, run_id, parent_id, created_by_terminal_handle, task_title,
+              display_name, verification_required, spec, status, deps, result,
+              created_at, completed_at
+            )
+            SELECT
+              id, run_id, parent_id, created_by_terminal_handle, task_title,
+              display_name, verification_required, spec, status, deps, result,
+              created_at, completed_at
+            FROM tasks;
+            DROP TABLE tasks;
+            ALTER TABLE tasks_new RENAME TO tasks;
+            CREATE INDEX idx_tasks_status ON tasks(status);
+            CREATE INDEX idx_tasks_parent ON tasks(parent_id);
+            CREATE INDEX idx_tasks_run_status ON tasks(run_id, status);
+          `)
+        }
+      }
       this.createUndeliveredInboxIndexIfPossible()
 
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`)
@@ -1355,6 +1403,13 @@ export class OrchestrationDb {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
       .get() as { sql: string } | undefined
     return !!row && row.sql.includes("'question'")
+  }
+
+  private tasksStatusCheckAllowsReported(): boolean {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+      .get() as { sql: string } | undefined
+    return Boolean(row?.sql.includes("'reported'"))
   }
 
   // ── Durable mutation receipts ──
@@ -3744,6 +3799,7 @@ export class OrchestrationDb {
     parentId?: string
     createdByTerminalHandle?: string
     runId?: string
+    verificationRequired?: boolean
   }): TaskRow {
     const runId = task.runId ?? LEGACY_RUN_ID
     this.requireRun(runId)
@@ -3770,7 +3826,7 @@ export class OrchestrationDb {
     })
     this.db
       .prepare(
-        'INSERT INTO tasks (id, run_id, parent_id, created_by_terminal_handle, task_title, display_name, spec, status, deps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO tasks (id, run_id, parent_id, created_by_terminal_handle, task_title, display_name, verification_required, spec, status, deps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         id,
@@ -3779,6 +3835,7 @@ export class OrchestrationDb {
         task.createdByTerminalHandle ?? null,
         display.taskTitle || null,
         display.displayName || null,
+        task.verificationRequired ? 1 : 0,
         task.spec,
         status,
         depsJson
@@ -3873,6 +3930,49 @@ export class OrchestrationDb {
     }
 
     return this.getTask(id)
+  }
+
+  verifyReportedTask(id: string, evidence: string, verifiedBy: string): TaskRow {
+    const normalizedEvidence = evidence.trim()
+    if (!normalizedEvidence) {
+      throw new Error('Verification evidence must not be empty.')
+    }
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(id)
+      if (!task) {
+        throw new Error(`Task not found: ${id}`)
+      }
+      if (task.status !== 'reported') {
+        throw new Error(`Task ${id} is ${task.status}; only reported tasks can be verified.`)
+      }
+      let result: Record<string, unknown> = {}
+      try {
+        const parsed: unknown = task.result ? JSON.parse(task.result) : {}
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          result = parsed as Record<string, unknown>
+        }
+      } catch {
+        result = { workerResult: task.result }
+      }
+      const verifiedAt = new Date().toISOString()
+      this.db.prepare('UPDATE tasks SET status = ?, result = ?, completed_at = ? WHERE id = ?').run(
+        'completed',
+        JSON.stringify({
+          ...result,
+          verification: { verifiedBy, evidence: normalizedEvidence, verifiedAt }
+        }),
+        verifiedAt,
+        id
+      )
+      this.promoteReadyTasks(id)
+      const verified = this.getTask(id) as TaskRow
+      this.db.exec('COMMIT')
+      return verified
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   // Why: runs in the status-update transaction, so a completed task never leaves its ready children unpromoted.
@@ -6383,7 +6483,12 @@ export class OrchestrationDb {
     }
 
     const expectedDispatchStatus = params.outcome === 'succeeded' ? 'completed' : 'failed'
-    const expectedTaskStatus = params.outcome === 'succeeded' ? 'completed' : 'failed'
+    const expectedTaskStatus =
+      params.outcome === 'succeeded'
+        ? task.verification_required === 1
+          ? 'reported'
+          : 'completed'
+        : 'failed'
     if (dispatch.status === expectedDispatchStatus && task.status === expectedTaskStatus) {
       return { action: 'settled', outcome: params.outcome, duplicate: true }
     }
@@ -6437,7 +6542,7 @@ export class OrchestrationDb {
       )
       .run(params.outcome === 'succeeded' ? 'succeeded' : 'failed', params.dispatchId)
     this.closeQuestionsForDispatch(params.dispatchId)
-    if (params.outcome === 'succeeded') {
+    if (expectedTaskStatus === 'completed') {
       this.promoteReadyTasks(params.taskId)
     }
     this.db.exec('RELEASE settle_worker_report')

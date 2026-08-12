@@ -1,5 +1,10 @@
 import type { GitBranchChangeStatus } from './git-status-types'
 import type { JawsLinearMaterialization, JawsPlan } from './jaws-types'
+import type {
+  HarnessAllocationPatchV1,
+  HarnessAllocationStateV1,
+  HarnessExecutionPlanV1
+} from './harness-allocation-types'
 
 export type HarnessAgent = 'codex' | 'claude'
 
@@ -96,6 +101,8 @@ export type HarnessRun = {
   jawsRunId?: string
   approvedPlan?: JawsPlan
   approvedLinearMaterialization?: JawsLinearMaterialization
+  executionPlan?: HarnessExecutionPlanV1
+  allocation?: HarnessAllocationStateV1
   candidates: HarnessCandidate[]
   fatalError: string | null
   createdAt: number
@@ -111,7 +118,10 @@ export type HarnessRunCreateInput = Pick<
   jawsRunId?: string
   approvedPlan?: JawsPlan
   approvedLinearMaterialization?: JawsLinearMaterialization
+  executionPlan?: HarnessExecutionPlanV1
 }
+
+export type HarnessAllocationUpdateInput = HarnessAllocationPatchV1
 
 export type HarnessStartInput = {
   /** Runtime worktree selector, such as `id:<worktree-id>`. */
@@ -123,6 +133,9 @@ export type HarnessStartInput = {
   jawsRunId?: string
   approvedPlan?: JawsPlan
   approvedLinearMaterialization?: JawsLinearMaterialization
+  // Why: RPC payloads are untrusted until the Harness service normalizes the
+  // plan against its bounded DAG and path-scope contract.
+  executionPlan?: unknown
 }
 
 export type HarnessCandidatePatch = Partial<
