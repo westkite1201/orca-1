@@ -51,6 +51,7 @@ describe('Harness allocation state', () => {
           reportedCommitSha: null,
           integration: 'not-required',
           integratedHeadSha: null,
+          integrationEvidence: null,
           error: null
         },
         {
@@ -64,6 +65,7 @@ describe('Harness allocation state', () => {
           reportedCommitSha: null,
           integration: 'pending',
           integratedHeadSha: null,
+          integrationEvidence: null,
           error: null
         }
       ]

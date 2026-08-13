@@ -34,6 +34,18 @@ export type HarnessAllocationIntegrationV1 =
   | 'conflict'
   | 'failed'
 
+export type HarnessLaneIntegrationEvidenceV1 = {
+  version: typeof HARNESS_EXECUTION_PLAN_VERSION
+  workerBaseSha: string | null
+  workerHeadSha: string | null
+  integrationBaseSha: string
+  integrationHeadSha: string
+  changedFiles: string[]
+  scopeDrift: string[]
+  checks: { command: string; exitCode: number; durationMs: number }[]
+  verifiedAt: number
+}
+
 export type HarnessAllocationItemV1 = {
   itemKey: string
   taskId: string | null
@@ -45,6 +57,7 @@ export type HarnessAllocationItemV1 = {
   reportedCommitSha: string | null
   integration: HarnessAllocationIntegrationV1
   integratedHeadSha: string | null
+  integrationEvidence: HarnessLaneIntegrationEvidenceV1 | null
   error: string | null
 }
 
@@ -88,6 +101,7 @@ export function createHarnessAllocationState(
       reportedCommitSha: null,
       integration: item.execution === 'read-only' ? 'not-required' : 'pending',
       integratedHeadSha: null,
+      integrationEvidence: null,
       error: null
     }))
   }

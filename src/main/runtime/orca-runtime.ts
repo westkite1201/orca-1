@@ -4659,6 +4659,7 @@ export class OrcaRuntimeService {
     worktree: string
     command: string
     timeoutSeconds: number
+    trackCandidate?: boolean
   }): Promise<AutomationPrecheckResult> {
     const worktree = await this.resolveWorktreeSelector(args.worktree)
     const store = this.requireStore()
@@ -4699,6 +4700,10 @@ export class OrcaRuntimeService {
         stop: async (handle) => await this.stopTerminalAndWait(handle)
       },
       onHandleAllocated: ({ handle, paneKey }) => {
+        // Why: narrow lane checks share this runner but not final-candidate recovery state.
+        if (args.trackCandidate === false) {
+          return
+        }
         store.updateHarnessCandidate!(
           args.runId,
           args.agent,
@@ -4711,6 +4716,9 @@ export class OrcaRuntimeService {
         )
       },
       onStopped: () => {
+        if (args.trackCandidate === false) {
+          return
+        }
         store.updateHarnessCandidate!(
           args.runId,
           args.agent,

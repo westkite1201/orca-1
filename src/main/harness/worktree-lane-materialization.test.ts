@@ -90,6 +90,29 @@ function createRun(): HarnessRun {
 }
 
 describe('Harness lane materialization', () => {
+  it('does not advance the durable integration boundary before task verification', async () => {
+    const run = createRun()
+    run.allocation!.integrationWorktreeId = 'integration-1'
+    run.allocation!.integrationHeadSha = BASE_SHA
+    const store = {
+      getHarnessRun: () => run,
+      updateHarnessAllocation: vi.fn()
+    }
+    const runtime = {
+      call: vi.fn(async (method: string) => {
+        if (method === 'git.status') {
+          return { entries: [], conflictOperation: 'unknown', head: 'unverified-head' }
+        }
+        throw new Error(`unexpected RPC ${method}`)
+      })
+    } as unknown as HarnessRuntimeCaller
+
+    await materializeHarnessPlan({ runtime, store, run })
+
+    expect(store.updateHarnessAllocation).not.toHaveBeenCalled()
+    expect(run.allocation!.integrationHeadSha).toBe(BASE_SHA)
+  })
+
   it('creates approved tasks, allocates lanes, and dispatches each once', async () => {
     let run = createRun()
     const tasks: TaskRow[] = []

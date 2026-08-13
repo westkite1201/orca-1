@@ -26,6 +26,7 @@ export type HarnessRuntimeCaller = {
     worktree: string
     command: string
     timeoutSeconds: number
+    trackCandidate?: boolean
   }): Promise<AutomationPrecheckResult>
 }
 

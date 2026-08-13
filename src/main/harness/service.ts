@@ -15,6 +15,8 @@ import { advanceHarnessCompletion, type HarnessVerificationRunner } from './veri
 import { VERIFICATION_INTERRUPTED_ERROR } from './candidate-verification-persistence'
 import { materializeHarnessPlan } from './worktree-lane-materialization'
 import { preflightHarnessSource, type HarnessSourcePreflight } from './harness-source-preflight'
+import { verifyHarnessReportedLane } from './lane-integration-evidence'
+import type { TaskRow } from '../runtime/orchestration/types'
 
 export type { HarnessSourcePreflight } from './harness-source-preflight'
 
@@ -204,6 +206,23 @@ export class HarnessService {
     this.schedule(runId, 'monitor')
     await this.waitForExecution(runId)
     return this.show(runId)
+  }
+
+  async verifyReportedLane(task: TaskRow, coordinatorEvidence: string): Promise<string> {
+    const run = this.store
+      .listHarnessRuns()
+      .find((entry) => entry.allocation?.items.some((item) => item.taskId === task.id))
+    if (!run) {
+      throw new Error('Harness task has no approved allocation run.')
+    }
+    return await verifyHarnessReportedLane({
+      runtime: this.runtime,
+      store: this.store,
+      run,
+      task,
+      coordinatorEvidence,
+      timeoutSeconds: this.verificationTimeoutSeconds
+    })
   }
 
   async waitForExecution(runId: string): Promise<void> {

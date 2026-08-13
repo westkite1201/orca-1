@@ -1235,7 +1235,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.taskVerify',
     params: TaskVerifyParams,
-    handler: (params, { runtime }) => {
+    handler: async (params, { runtime }) => {
       const db = runtime.getOrchestrationDb()
       const task = db.getTask(params.id)
       const run = task ? harnessRunForChildTask(runtime, task) : null
@@ -1254,7 +1254,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (!run.allocation?.items.some((item) => item.taskId === task.id)) {
         throw new Error('Harness task has no approved allocation receipt.')
       }
-      return { task: db.verifyReportedTask(task.id, params.evidence, params.from) }
+      const evidence = await runtime.getHarnessService().verifyReportedLane(task, params.evidence)
+      return { task: db.verifyReportedTask(task.id, evidence, params.from) }
     }
   }),
 
@@ -1316,6 +1317,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           'task_not_found',
           `Task ${params.id} was not found in Run ${run.id}.`
         )
+      }
+      if (params.status === 'completed' && existing.verification_required === 1) {
+        throw new Error('Approved Harness tasks require task-verify before completion.')
       }
       const task = db.updateTaskStatus(params.id, params.status, params.result)
       if (!task) {
