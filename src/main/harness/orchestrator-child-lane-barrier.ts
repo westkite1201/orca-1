@@ -44,5 +44,21 @@ export function findOrchestratorChildLaneBlocker(args: {
       message: `Child lanes failed or were blocked: ${summarizeLaneNames(unsuccessful)}.`
     }
   }
+  const unintegrated = run.executionPlan?.items.filter((item) => {
+    if (item.execution !== 'worktree') {
+      return false
+    }
+    const receipt = run.allocation?.items.find((entry) => entry.itemKey === item.key)
+    return receipt?.integration !== 'integrated' || !receipt.integrationEvidence
+  })
+  if (unintegrated && unintegrated.length > 0) {
+    return {
+      kind: 'unsuccessful',
+      message: `Child lanes lack verified integration evidence: ${unintegrated
+        .slice(0, MAX_REPORTED_LANES)
+        .map((item) => item.title)
+        .join(', ')}.`
+    }
+  }
   return null
 }

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { TaskRow, TaskStatus } from '../runtime/orchestration/types'
 import { createHarnessRunFixture } from './verification-test-fixtures'
 import { findOrchestratorChildLaneBlocker } from './orchestrator-child-lane-barrier'
+import {
+  createHarnessAllocationState,
+  type HarnessExecutionPlanV1
+} from '../../shared/harness-allocation-types'
 
 function childTask(status: TaskStatus, id = `child-${status}`): TaskRow {
   return {
@@ -49,6 +53,44 @@ describe('orchestrator child lane barrier', () => {
     expect(
       findOrchestratorChildLaneBlocker({ run, candidate: run.candidates[0], tasks: [] })
     ).toBeNull()
+  })
+
+  it('requires durable integration evidence for approved mutating lanes', () => {
+    const run = createHarnessRunFixture()
+    const plan: HarnessExecutionPlanV1 = {
+      version: 1,
+      revision: 1,
+      planHash: 'plan',
+      maxConcurrency: 1,
+      items: [
+        {
+          key: 'patch',
+          title: 'Patch',
+          objective: 'Patch code.',
+          execution: 'worktree',
+          dependencies: [],
+          fileScopes: ['src'],
+          acceptanceCriteria: ['Done.'],
+          verificationCommands: ['pnpm test']
+        }
+      ]
+    }
+    run.mode = 'orchestrator'
+    run.candidates = [run.candidates[0]]
+    run.executionPlan = plan
+    run.allocation = createHarnessAllocationState(plan)
+    run.allocation.items[0].taskId = 'child-completed'
+
+    expect(
+      findOrchestratorChildLaneBlocker({
+        run,
+        candidate: run.candidates[0],
+        tasks: [childTask('completed')]
+      })
+    ).toMatchObject({
+      kind: 'unsuccessful',
+      message: expect.stringContaining('lack verified integration evidence')
+    })
   })
 
   it('caps lane names in blocker details', () => {

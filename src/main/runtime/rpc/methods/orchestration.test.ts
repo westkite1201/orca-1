@@ -1886,6 +1886,17 @@ describe('orchestration RPC methods', () => {
       expect(db.getActiveDispatchForTerminal('term_a')).toBeUndefined()
     })
 
+    it('does not bypass verification for an approved Harness child', async () => {
+      setup()
+      const root = db.createTask({ spec: 'root' })
+      const child = db.createTask({ spec: 'child', parentId: root.id, verificationRequired: true })
+
+      await expect(
+        call('orchestration.taskUpdate', { id: child.id, status: 'completed' })
+      ).rejects.toThrow('require task-verify')
+      expect(db.getTask(child.id)?.status).toBe('ready')
+    })
+
     it('throws on nonexistent task', async () => {
       setup()
       await expect(

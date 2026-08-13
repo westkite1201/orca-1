@@ -36,6 +36,9 @@ function taskSpec(item: HarnessExecutionItemV1): string {
     ...item.acceptanceCriteria.map((criterion) => `- ${criterion}`),
     'Verification commands:',
     ...item.verificationCommands.map((command) => `- ${command}`),
+    item.execution === 'worktree'
+      ? 'Commit the final changes and report the full commit SHA plus files-modified in worker_done.'
+      : 'Do not modify the repository; report worker_done without a commit or files-modified.',
     'Do not create another task or worktree. Report evidence to the assigned coordinator.'
   ].join('\n')
 }
@@ -117,10 +120,10 @@ async function ensurePlanTasks(args: {
 async function verifyIntegrationSnapshot(
   runtime: HarnessRuntimeCaller,
   worktreeId: string
-): Promise<string> {
+): Promise<string | null> {
   const status = await runtime.call<GitStatusResult>('git.status', { worktree: `id:${worktreeId}` })
   if (status.didHitLimit || status.entries.length > 0 || status.conflictOperation !== 'unknown') {
-    throw new Error('Integration worktree must be clean before lane materialization.')
+    return null
   }
   const head = status.head?.trim()
   if (!head) {
@@ -149,12 +152,29 @@ export async function materializeHarnessPlan(args: {
   }
   const compilation = compileHarnessAllocationPlan(run.executionPlan)
   const integrationHeadSha = await verifyIntegrationSnapshot(args.runtime, root.worktreeId)
+  if (!integrationHeadSha) {
+    return
+  }
+  const persisted = args.store.getHarnessRun(run.id) ?? run
+  if (
+    persisted.allocation?.integrationWorktreeId &&
+    persisted.allocation.integrationWorktreeId !== root.worktreeId
+  ) {
+    throw new Error('Harness integration worktree identity changed.')
+  }
+  if (
+    persisted.allocation?.integrationHeadSha &&
+    persisted.allocation.integrationHeadSha !== integrationHeadSha
+  ) {
+    // Why: only task verification may advance the durable integration boundary.
+    return
+  }
   updateAllocation(
     args.store,
     run.id,
     {
       integrationWorktreeId: root.worktreeId,
-      integrationHeadSha
+      ...(persisted.allocation?.integrationHeadSha ? {} : { integrationHeadSha })
     },
     'required'
   )

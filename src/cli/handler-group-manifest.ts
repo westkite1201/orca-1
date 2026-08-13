@@ -104,6 +104,7 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'orchestration task-create',
       'orchestration task-list',
       'orchestration task-update',
+      'orchestration task-verify',
       'orchestration worker-start',
       'orchestration worker-show',
       'orchestration worker-read',
