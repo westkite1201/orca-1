@@ -11,7 +11,7 @@ import {
   isRepoHeaderActionTarget,
   type ProjectHeaderDragSession
 } from './project-header-drag-contract'
-import type { Repo } from '../../../../shared/types'
+import type { Repo } from '../../../../shared/repo-types'
 
 export function createProjectHeaderDragSession(args: {
   event: PointerEvent<HTMLElement>

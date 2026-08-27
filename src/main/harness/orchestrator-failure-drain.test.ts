@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MessageRow, TaskRow } from '../runtime/orchestration/types'
-import type { Repo } from '../../shared/types'
+import type { Repo } from '../../shared/repo-types'
 import { createHarnessRunMemoryStore } from './harness-run-memory-store'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 import { ORCHESTRATOR_CHILD_DRAIN_TIMEOUT_MS } from './orchestrator-completion'
@@ -35,8 +35,12 @@ function child(status: TaskRow['status']): TaskRow & {
     run_id: 'run-1',
     parent_id: 'task-top',
     created_by_terminal_handle: 'terminal-codex',
+    created_by_pane_key: null,
+    created_by_process_incarnation: null,
+    created_by_run_generation: null,
     task_title: 'Child',
     display_name: null,
+    verification_required: 0,
     spec: 'Child work.',
     status,
     deps: '[]',

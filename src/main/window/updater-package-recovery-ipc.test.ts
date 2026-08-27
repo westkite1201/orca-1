@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import type { Store } from '../persistence'
 import type * as IpcUiModule from '../ipc/ui'
+import productProfile from '../../shared/product-profile.json'
 
 const {
   handleMock,
@@ -113,81 +114,86 @@ function expectBothChannelsRejected(sender: Partial<WebContents>): void {
   expect(showLinuxPackageMock).not.toHaveBeenCalled()
 }
 
-describe('updater linux package recovery IPC handlers', () => {
-  beforeAll(async () => {
-    // An unmocked copy, so the trusted-id state it reads is the one these tests set.
-    actualUi = await vi.importActual<typeof IpcUiModule>('../ipc/ui')
-  })
-
-  beforeEach(() => {
-    handleMock.mockReset()
-    removeHandlerMock.mockReset()
-    isTrustedUIRendererMock
-      .mockReset()
-      .mockImplementation((sender) => actualUi.isTrustedUIRenderer(sender as WebContents))
-    actualUi.setTrustedUIRendererWebContentsId(TRUSTED_ID)
-    getLinuxPackageInstallInstructionsMock
-      .mockReset()
-      .mockResolvedValue({ ok: true, command: "sudo apt install -- '<pkg>'", packageFileName: 'p' })
-    showLinuxPackageMock.mockReset().mockResolvedValue(undefined)
-    registerUpdaterHandlers({} as Store)
-  })
-
-  afterEach(() => {
-    vi.unstubAllEnvs()
-  })
-
-  it('removes and re-registers both recovery channels', () => {
-    for (const channel of RECOVERY_CHANNELS) {
-      expect(removeHandlerMock).toHaveBeenCalledWith(channel)
-      expect(handleMock.mock.calls.filter(([name]) => name === channel)).toHaveLength(1)
-    }
-  })
-
-  it('routes both channels through the trusted-renderer guard', () => {
-    isTrustedUIRendererMock.mockReturnValue(false)
-
-    expectBothChannelsRejected(webContents({}))
-
-    expect(isTrustedUIRendererMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('serves the current main UI renderer', async () => {
-    const event = senderEvent(webContents({}))
-
-    await expect(getHandler(RECOVERY_CHANNELS[0])(event)).resolves.toEqual({
-      ok: true,
-      command: "sudo apt install -- '<pkg>'",
-      packageFileName: 'p'
+describe.skipIf(!productProfile.updatesEnabled)(
+  'updater linux package recovery IPC handlers',
+  () => {
+    beforeAll(async () => {
+      // An unmocked copy, so the trusted-id state it reads is the one these tests set.
+      actualUi = await vi.importActual<typeof IpcUiModule>('../ipc/ui')
     })
-    await expect(getHandler(RECOVERY_CHANNELS[1])(event)).resolves.toBeUndefined()
-  })
 
-  // Each row is a distinct branch of the real isTrustedUIRenderer, not a relabelled mock return.
-  it.each([
-    ['a guest webview', webContents({ getType: () => 'webview' })],
-    ['a utility renderer', webContents({ getType: () => 'offscreen' })],
-    ['a destroyed sender', webContents({ isDestroyed: () => true })],
-    ['a dashboard popout or stale window', webContents({ id: TRUSTED_ID + 1 })]
-  ])('rejects both recovery channels for %s', (_label, sender) => {
-    expectBothChannelsRejected(sender)
-  })
+    beforeEach(() => {
+      handleMock.mockReset()
+      removeHandlerMock.mockReset()
+      isTrustedUIRendererMock
+        .mockReset()
+        .mockImplementation((sender) => actualUi.isTrustedUIRenderer(sender as WebContents))
+      actualUi.setTrustedUIRendererWebContentsId(TRUSTED_ID)
+      getLinuxPackageInstallInstructionsMock.mockReset().mockResolvedValue({
+        ok: true,
+        command: "sudo apt install -- '<pkg>'",
+        packageFileName: 'p'
+      })
+      showLinuxPackageMock.mockReset().mockResolvedValue(undefined)
+      registerUpdaterHandlers({} as Store)
+    })
 
-  it('rejects a foreign-origin renderer when only the dev URL fallback applies', () => {
-    actualUi.setTrustedUIRendererWebContentsId(null)
-    vi.stubEnv('ELECTRON_RENDERER_URL', 'http://localhost:5173')
+    afterEach(() => {
+      vi.unstubAllEnvs()
+    })
 
-    expectBothChannelsRejected(webContents({ getURL: () => 'http://evil.invalid/index.html' }))
-  })
+    it('removes and re-registers both recovery channels', () => {
+      for (const channel of RECOVERY_CHANNELS) {
+        expect(removeHandlerMock).toHaveBeenCalledWith(channel)
+        expect(handleMock.mock.calls.filter(([name]) => name === channel)).toHaveLength(1)
+      }
+    })
 
-  it('rechecks sender trust on every invocation', () => {
-    const event = senderEvent(webContents({}))
-    void getHandler(RECOVERY_CHANNELS[0])(event)
+    it('routes both channels through the trusted-renderer guard', () => {
+      isTrustedUIRendererMock.mockReturnValue(false)
 
-    // The main window was replaced between calls; the previously served sender is now stale.
-    actualUi.setTrustedUIRendererWebContentsId(TRUSTED_ID + 1)
+      expectBothChannelsRejected(webContents({}))
 
-    expect(() => getHandler(RECOVERY_CHANNELS[0])(event)).toThrow(UNAUTHORIZED)
-    expect(getLinuxPackageInstallInstructionsMock).toHaveBeenCalledTimes(1)
-  })
-})
+      expect(isTrustedUIRendererMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('serves the current main UI renderer', async () => {
+      const event = senderEvent(webContents({}))
+
+      await expect(getHandler(RECOVERY_CHANNELS[0])(event)).resolves.toEqual({
+        ok: true,
+        command: "sudo apt install -- '<pkg>'",
+        packageFileName: 'p'
+      })
+      await expect(getHandler(RECOVERY_CHANNELS[1])(event)).resolves.toBeUndefined()
+    })
+
+    // Each row is a distinct branch of the real isTrustedUIRenderer, not a relabelled mock return.
+    it.each([
+      ['a guest webview', webContents({ getType: () => 'webview' })],
+      ['a utility renderer', webContents({ getType: () => 'offscreen' })],
+      ['a destroyed sender', webContents({ isDestroyed: () => true })],
+      ['a dashboard popout or stale window', webContents({ id: TRUSTED_ID + 1 })]
+    ])('rejects both recovery channels for %s', (_label, sender) => {
+      expectBothChannelsRejected(sender)
+    })
+
+    it('rejects a foreign-origin renderer when only the dev URL fallback applies', () => {
+      actualUi.setTrustedUIRendererWebContentsId(null)
+      vi.stubEnv('ELECTRON_RENDERER_URL', 'http://localhost:5173')
+
+      expectBothChannelsRejected(webContents({ getURL: () => 'http://evil.invalid/index.html' }))
+    })
+
+    it('rechecks sender trust on every invocation', () => {
+      const event = senderEvent(webContents({}))
+      void getHandler(RECOVERY_CHANNELS[0])(event)
+
+      // The main window was replaced between calls; the previously served sender is now stale.
+      actualUi.setTrustedUIRendererWebContentsId(TRUSTED_ID + 1)
+
+      expect(() => getHandler(RECOVERY_CHANNELS[0])(event)).toThrow(UNAUTHORIZED)
+      expect(getLinuxPackageInstallInstructionsMock).toHaveBeenCalledTimes(1)
+    })
+  }
+)

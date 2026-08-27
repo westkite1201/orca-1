@@ -24,7 +24,13 @@ describe('HarnessRuntimeCaller child dispatch cleanup', () => {
     const leafId = '88888888-8888-4888-8888-888888888888'
     const persistedPaneKey = makePaneKey('tab-before-breakout', leafId)
     const currentPaneKey = makePaneKey('tab-after-breakout', leafId)
-    const dispatch = db.createDispatchContext(child.id, 'child-h1', persistedPaneKey)
+    const dispatch = db.createDispatchContext({
+      taskId: child.id,
+      assigneeHandle: 'child-h1',
+      assigneePaneKey: persistedPaneKey,
+      creator: { kind: 'system' },
+      maxDepth: 4
+    })
     const stopTerminalAndWait = vi.fn(async () => true)
     const runtime = {
       getOrchestrationDb: () => db!,
@@ -60,7 +66,12 @@ describe('HarnessRuntimeCaller child dispatch cleanup', () => {
       createdByTerminalHandle: 'jaws-harness:other-run'
     })
     const child = db.createTask({ spec: 'Implement', parentId: root.id })
-    const dispatch = db.createDispatchContext(child.id, 'child-h1')
+    const dispatch = db.createDispatchContext({
+      taskId: child.id,
+      assigneeHandle: 'child-h1',
+      creator: { kind: 'system' },
+      maxDepth: 4
+    })
     const stopTerminalAndWait = vi.fn(async () => true)
     const runtime = {
       getOrchestrationDb: () => db!,

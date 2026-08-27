@@ -31,7 +31,7 @@ export function findHarnessWorkerResult(
       if (
         record.taskId !== candidate.taskId ||
         record.dispatchId !== candidate.dispatchId ||
-        Object.prototype.hasOwnProperty.call(record, '_orcaLifecycleRejection')
+        Object.hasOwn(record, '_orcaLifecycleRejection')
       ) {
         continue
       }

@@ -2,11 +2,11 @@ import type {
   LinearCreateRequest,
   LinearCreateResult,
   LinearIssueContextResult
-} from '../../shared/linear-agent-access'
+} from '../../shared/linear/agent-access'
 import type {
   LinearIssueRelationWriteRequest,
   LinearIssueRelationWriteResult
-} from '../../shared/linear-issue-relation-write'
+} from '../../shared/linear/issue-relation-write'
 import type {
   JawsLinearIssueRef,
   JawsLinearMaterialization,

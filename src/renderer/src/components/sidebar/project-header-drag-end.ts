@@ -5,7 +5,7 @@ import type {
   UseRepoHeaderDragArgs
 } from './project-header-drag-contract'
 import { settleProjectHeaderDrop } from './project-header-drop-settle'
-import type { Repo } from '../../../../shared/types'
+import type { Repo } from '../../../../shared/repo-types'
 
 export function endProjectHeaderDrag(args: {
   commit: boolean

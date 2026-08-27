@@ -7,7 +7,8 @@ import {
   type HarnessRun,
   type HarnessVerificationSummary
 } from '../../shared/harness-types'
-import type { GitBranchCompareResult, Repo } from '../../shared/types'
+import type { GitBranchCompareResult } from '../../shared/git-diff-compare-types'
+import type { Repo } from '../../shared/repo-types'
 import type { runAutomationPrecheck } from '../automations/precheck-runner'
 import { buildHarnessDiffSummary } from './diff-summary'
 import type { HarnessRuntimeCaller } from './runtime-caller'

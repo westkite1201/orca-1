@@ -6,6 +6,16 @@ function pathSeparatorFor(pathValue: string): '/' | '\\' {
   return pathValue.includes('\\') ? '\\' : '/'
 }
 
+/** True only for the product's default projects folder under a usual OS home. A configured
+ *  directory elsewhere with the same suffix must
+ *  stay verbatim — the `~` shorthand would otherwise lie. */
+function isHomeProjectsFallback(pathValue: string): boolean {
+  const directory = productProfile.userDataDirectoryName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(
+    `^(?:/(?:Users|home)/[^/]+|[A-Za-z]:[\\\\/]Users[\\\\/][^\\\\/]+)[\\\\/]${directory}[\\\\/]projects$`
+  ).test(pathValue)
+}
+
 function trimTrailingSeparators(pathValue: string): string {
   const trimmed = pathValue.replace(/[\\/]+$/, '')
   if (trimmed === '' && pathValue.startsWith('/')) {
@@ -86,7 +96,13 @@ export function formatCreateProjectParentSummary({
   if (!trimmedParent) {
     return runtimeEnvironmentId || isRemoteHost ? missingServerLocationLabel : missingLocationLabel
   }
-  if (defaultParent && trimmedParent === defaultParent && !runtimeEnvironmentId && !isRemoteHost) {
+  if (
+    defaultParent &&
+    trimmedParent === defaultParent &&
+    !runtimeEnvironmentId &&
+    !isRemoteHost &&
+    isHomeProjectsFallback(trimmedParent)
+  ) {
     return `~/${productProfile.userDataDirectoryName}/projects`
   }
   return trimmedParent

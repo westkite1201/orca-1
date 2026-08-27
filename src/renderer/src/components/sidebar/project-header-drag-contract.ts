@@ -1,7 +1,7 @@
 import type { PointerEvent } from 'react'
 
 import type { ProjectHeaderDragBucketKey, ProjectHeaderDragRect } from './project-header-drop'
-import type { Repo } from '../../../../shared/types'
+import type { Repo } from '../../../../shared/repo-types'
 
 export const EMPTY_HEADER_PREVIEW_OFFSETS: ReadonlyMap<string, number> = new Map()
 

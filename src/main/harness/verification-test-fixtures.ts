@@ -1,6 +1,6 @@
 import type { AutomationPrecheckResult } from '../../shared/automations-types'
 import type { HarnessAgent, HarnessCandidate, HarnessRun } from '../../shared/harness-types'
-import type { GitBranchCompareResult } from '../../shared/types'
+import type { GitBranchCompareResult } from '../../shared/git-diff-compare-types'
 
 export const HARNESS_TEST_BASE_SHA = '0123456789abcdef'
 

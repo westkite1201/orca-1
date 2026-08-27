@@ -13,6 +13,8 @@ import {
   launchSleepingAgentSession,
   type ResumeSleepingAgentSessionsOptions
 } from './sleeping-agent-session-launch'
+import { findUnhydratedHostMirrorForPane } from './host-mirrored-pane-liveness'
+import { parkUntilHostSessionMirrorHydrates } from '@/runtime/host-session-mirror-hydration'
 
 export type { ResumeSleepingAgentSessionsOptions } from './sleeping-agent-session-launch'
 
@@ -130,16 +132,38 @@ function activeOrQueuedResumeClaimsProviderSession(
   return false
 }
 
+// Why: an interrupted turn is still resumable — `claude --resume` reopens the transcript at the
+// prompt — so discarding those records only stranded the session across wake and restart.
 function isInvalidWorktreeActivationRecord(record: SleepingAgentSessionRecord): boolean {
-  if (record.interrupted === true) {
-    return true
-  }
   if (!record.origin && record.state === 'done') {
     return true
   }
   return (
     record.state !== 'done' && record.capturedAt - record.updatedAt > AGENT_STATUS_STALE_AFTER_MS
   )
+}
+
+function parkWorktreeResumeSweepUntilHostMirrorHydrates(
+  worktreeId: string,
+  environmentId: string | null,
+  options: ResumeSleepingAgentSessionsOptions | undefined
+): void {
+  if (!environmentId) {
+    // No paired runtime owns the workspace, so no verdict is coming; the next
+    // activation re-runs this sweep once one does.
+    return
+  }
+  parkUntilHostSessionMirrorHydrates(environmentId, worktreeId, () => {
+    // Why: the mirror can settle long after the user moved on, so a replayed
+    // resume must not steal the surface they are looking at now.
+    const isActive = useAppStore.getState().activeWorktreeId === worktreeId
+    // Why `skipClaimKeys` is dropped: it is a park-time snapshot of in-place
+    // wakes, and a latch that has since failed must stay resumable here.
+    resumeSleepingAgentSessionsForWorktree(worktreeId, {
+      ...(options?.onSessionLaunched ? { onSessionLaunched: options.onSessionLaunched } : {}),
+      ...(isActive ? {} : { suppressNavigation: true })
+    })
+  })
 }
 
 export function resumeSleepingAgentSessionsForWorktree(
@@ -178,6 +202,18 @@ export function resumeSleepingAgentSessionsForWorktree(
     }
     if (isInvalidWorktreeActivationRecord(record)) {
       state.clearSleepingAgentSession(record.paneKey)
+      continue
+    }
+    const unhydratedMirror = findUnhydratedHostMirrorForPane(record, currentState)
+    if (unhydratedMirror) {
+      // Why: pane ownership is undecidable until the mirror answers, and every
+      // branch below — launch and clear alike — trusts that verdict. Take no
+      // action on the record; the replay re-runs this pass with real evidence.
+      parkWorktreeResumeSweepUntilHostMirrorHydrates(
+        worktreeId,
+        unhydratedMirror.environmentId,
+        options
+      )
       continue
     }
     const isPaneOwned = recordPaneIsOwnedByPreservedPane(record, currentState)

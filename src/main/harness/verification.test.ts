@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AutomationPrecheckResult } from '../../shared/automations-types'
 import type { HarnessAgent, HarnessCandidatePatch, HarnessRun } from '../../shared/harness-types'
-import type { Repo } from '../../shared/types'
+import type { Repo } from '../../shared/repo-types'
 import type { MessageRow } from '../runtime/orchestration/types'
 import { HarnessService, type HarnessStore } from './service'
 import type { HarnessRuntimeCaller } from './runtime-caller'
@@ -129,7 +129,7 @@ function createRuntime(
           return (
             payload.taskId === `task-${lifecycleAgent}` &&
             payload.dispatchId === `dispatch-${lifecycleAgent}` &&
-            !Object.prototype.hasOwnProperty.call(payload, '_orcaLifecycleRejection')
+            !Object.hasOwn(payload, '_orcaLifecycleRejection')
           )
         } catch {
           return false

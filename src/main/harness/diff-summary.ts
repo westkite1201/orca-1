@@ -1,6 +1,6 @@
 import type { GitStatusResult } from '../../shared/git-status-types'
 import type { HarnessChangedFile, HarnessDiffSummary } from '../../shared/harness-types'
-import type { GitBranchCompareResult } from '../../shared/types'
+import type { GitBranchCompareResult } from '../../shared/git-diff-compare-types'
 import { isSameHarnessBranch } from './candidate-recovery'
 
 type DiffSummaryInput = {

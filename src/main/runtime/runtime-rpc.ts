@@ -13,8 +13,9 @@ import {
   type RuntimeMetadataOwnershipWatch
 } from './runtime-metadata-ownership-watch'
 import { RpcDispatcher } from './rpc/dispatcher'
-import type { RpcRequest, RpcResponse } from './rpc/core'
+import type { RpcAnyMethod, RpcRequest, RpcResponse } from './rpc/core'
 import { errorResponse } from './rpc/errors'
+import { fingerprintAuthenticatedPairingCredential } from './rpc/orchestration-mutation-executor'
 import type { RpcMessageContext, RpcTransport } from './rpc/transport'
 import { UnixSocketTransport } from './rpc/unix-socket-transport'
 import { WebSocketTransport } from './rpc/ws-transport'
@@ -30,6 +31,7 @@ import {
 } from './rpc/mobile-socket-wiring'
 import type { PairingRelay } from '../../shared/mobile-relay-pairing-offer'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
+import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
 import {
   mobileRelayMintFailureFromUnknown,
   type MobileRelayMintFailure
@@ -47,10 +49,8 @@ import type {
 } from '../../shared/mobile-relay-credential-contract'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
 import { resolveAdvertisedPairingEndpoint } from './pairing-endpoint'
-import {
-  decodeTerminalStreamFrame,
-  type TerminalStreamFrame
-} from '../../shared/terminal-stream-protocol'
+import type { TerminalStreamFrame } from '../../shared/terminal-stream-protocol'
+import { RuntimeBinaryMessageRouter } from './runtime-binary-message-router'
 
 const DEFAULT_WS_PORT = 6768
 
@@ -77,6 +77,8 @@ type OrcaRuntimeRpcServerOptions = {
   longPollCap?: number
   // Why: test-only override for the ownership reclaim cadence.
   metadataOwnershipPollMs?: number
+  // Why: tests may inject inert protocol stages before production authorization registers them.
+  methods?: readonly RpcAnyMethod[]
 }
 
 export type PairingOfferUnavailableReason =
@@ -156,6 +158,10 @@ const LONG_POLL_CAP = 16
 // workers would otherwise hold every slot and starve the mobile/web/CLI/relay
 // clients sharing this runtime. Reserve half the budget for the other classes.
 const ASK_LONG_POLL_SHARE = 0.5
+// Why: eight host slots preserve four-host overlap for two independently paired desktops.
+const BROWSER_HOST_LONG_POLL_SHARE = 0.5
+// Why: asks and permanent hosts together retain the prior quarter-budget reservation for waits.
+const SPECIALIZED_LONG_POLL_SHARE = 0.75
 
 function createWebClientUrl(endpoint: string, pairingUrl: string): string {
   const url = new URL(endpoint)
@@ -183,6 +189,7 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'accounts.subscribe',
   'accounts.unsubscribe',
   'aiVault.listSessions',
+  'aiVault.resolveSessionTitles',
   'aiVault.prepareSessionResume',
   'browser.back',
   'browser.dialogAccept',
@@ -314,6 +321,7 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'host.wsl.isAvailable',
   'host.wsl.listDistros',
   'hostedReview.create',
+  'hostedReview.createStacked',
   'hostedReview.forBranch',
   'hostedReview.getCreationEligibility',
   'linear.getCustomView',
@@ -426,6 +434,7 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'worktree.activate',
   'worktree.create',
   'worktree.forceDeleteBranch',
+  'worktree.listRetiredNames',
   'worktree.prefetchCreateBase',
   'worktree.ps',
   'worktree.show',
@@ -437,10 +446,13 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
 ])
 
 // Why: 'ask' is metered separately from 'wait' — same keepalive/abort wiring, its own sub-cap.
-type LongPollClass = 'ask' | 'wait'
+export type RuntimeLongPollClass = 'ask' | 'browser-host' | 'wait'
 
 // Why: single classifier for long-poll requests (handlers that block on an external event), shared by counter/abort/keepalive. See §3.1.
-function longPollClassOf(request: RpcRequest): LongPollClass | null {
+export function classifyRuntimeLongPoll(request: RpcRequest): RuntimeLongPollClass | null {
+  if (request.method === 'browser.clientHost.attach') {
+    return 'browser-host'
+  }
   if (request.method === 'terminal.wait') {
     return 'wait'
   }
@@ -496,6 +508,9 @@ export class OrcaRuntimeRpcServer {
   private readonly longPollCap: number
   private readonly metadataOwnershipPollMs: number
   private readonly askLongPollCap: number
+  private readonly browserHostLongPollCap: number
+  private readonly browserHostLongPollCapPerDevice: number
+  private readonly specializedLongPollCap: number
   private readonly relayRevokeOutbox: RelayRevokeOutbox
   private deviceRegistry: DeviceRegistry | null = null
   private e2eeKeypair: E2EEKeypair | null = null
@@ -519,10 +534,7 @@ export class OrcaRuntimeRpcServer {
   private mobilePairingOfferGeneration = 0
   private onUnpairedDeviceAuthFailure: (() => void) | null = null
   private unpairedDeviceAuthThrottle: UnpairedDeviceAuthThrottle | null = null
-  private readonly binaryStreamHandlers = new Map<
-    string,
-    Map<number, (frame: TerminalStreamFrame) => void>
-  >()
+  private readonly binaryMessageRouter = new RuntimeBinaryMessageRouter()
   private readonly wsDispatchAbortStates = new Map<
     WebSocket,
     { controllers: Set<AbortController>; abortOnClose: () => void }
@@ -531,6 +543,8 @@ export class OrcaRuntimeRpcServer {
   private activeLongPolls = 0
   // Why: subset of activeLongPolls held by orchestration.ask, fenced by askLongPollCap.
   private activeAskLongPolls = 0
+  private activeBrowserHostLongPolls = 0
+  private readonly activeBrowserHostLongPollsByDevice = new Map<string, number>()
 
   constructor({
     runtime,
@@ -544,10 +558,11 @@ export class OrcaRuntimeRpcServer {
     webClientRoot,
     keepaliveIntervalMs = KEEPALIVE_INTERVAL_MS,
     longPollCap = LONG_POLL_CAP,
-    metadataOwnershipPollMs = RUNTIME_METADATA_OWNERSHIP_POLL_MS
+    metadataOwnershipPollMs = RUNTIME_METADATA_OWNERSHIP_POLL_MS,
+    methods
   }: OrcaRuntimeRpcServerOptions) {
     this.runtime = runtime
-    this.dispatcher = new RpcDispatcher({ runtime })
+    this.dispatcher = new RpcDispatcher({ runtime, methods })
     this.userDataPath = userDataPath
     this.pid = pid
     this.platform = platform
@@ -561,6 +576,12 @@ export class OrcaRuntimeRpcServer {
     this.metadataOwnershipPollMs = metadataOwnershipPollMs
     // Why: derived, not configurable — the reservation must hold for whatever cap a caller picks.
     this.askLongPollCap = Math.max(1, Math.floor(longPollCap * ASK_LONG_POLL_SHARE))
+    this.browserHostLongPollCap = Math.max(
+      1,
+      Math.floor(longPollCap * BROWSER_HOST_LONG_POLL_SHARE)
+    )
+    this.browserHostLongPollCapPerDevice = Math.max(1, Math.floor(this.browserHostLongPollCap / 2))
+    this.specializedLongPollCap = Math.max(1, Math.floor(longPollCap * SPECIALIZED_LONG_POLL_SHARE))
     this.relayRevokeOutbox = new RelayRevokeOutbox(userDataPath)
   }
 
@@ -661,6 +682,9 @@ export class OrcaRuntimeRpcServer {
     name?: string
     rotate?: boolean
     scope?: DeviceScope
+    // Why: STA-2370 — recorded on the grant so a "This computer only" client reconnecting cannot make the
+    // next launch bind every interface. Defaults to network reach, which is what every other caller means.
+    reach?: RuntimePairingReach
   }):
     | PairingOfferUnavailable
     | {
@@ -697,9 +721,10 @@ export class OrcaRuntimeRpcServer {
     const scope = args.scope ?? 'runtime'
     let device: DeviceEntry
     try {
+      const reach = args.reach ?? 'network'
       device = args.rotate
-        ? this.deviceRegistry.rotatePendingDevice(deviceName, scope)
-        : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope)
+        ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
+        : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
     } catch (error) {
       console.error('[runtime] Failed to persist pairing credential:', error)
       return pairingUnavailable('device_registry_unavailable', DEVICE_REGISTRY_UNAVAILABLE_GUIDANCE)
@@ -709,6 +734,7 @@ export class OrcaRuntimeRpcServer {
       endpoint,
       deviceToken: device.token,
       publicKeyB64,
+      pairedDeviceId: device.deviceId,
       scope
     })
     return {
@@ -921,6 +947,7 @@ export class OrcaRuntimeRpcServer {
         endpoint: direct.endpoint,
         deviceToken: device.token,
         publicKeyB64,
+        pairedDeviceId: device.deviceId,
         scope: 'mobile',
         relay: relayPairing.relay
       })
@@ -994,37 +1021,18 @@ export class OrcaRuntimeRpcServer {
     streamId: number,
     handler: (frame: TerminalStreamFrame) => void
   ): () => void {
-    if (!connectionId || !Number.isInteger(streamId) || streamId < 0) {
-      return () => {}
-    }
-    let handlers = this.binaryStreamHandlers.get(connectionId)
-    if (!handlers) {
-      handlers = new Map()
-      this.binaryStreamHandlers.set(connectionId, handlers)
-    }
-    handlers.set(streamId, handler)
-    return () => {
-      const current = this.binaryStreamHandlers.get(connectionId)
-      if (!current || current.get(streamId) !== handler) {
-        return
-      }
-      current.delete(streamId)
-      if (current.size === 0) {
-        this.binaryStreamHandlers.delete(connectionId)
-      }
-    }
+    return this.binaryMessageRouter.registerTerminalStream(connectionId, streamId, handler)
+  }
+
+  private registerBinaryMessageHandler(
+    connectionId: string | undefined,
+    handler: (bytes: Uint8Array<ArrayBufferLike>) => void
+  ): () => void {
+    return this.binaryMessageRouter.registerRawMessage(connectionId, handler)
   }
 
   private handleWebSocketBinaryMessage(bytes: Uint8Array<ArrayBufferLike>, ws: WebSocket): void {
-    const connectionId = this.mobileSocketWiring?.getConnectionId(ws)
-    if (!connectionId) {
-      return
-    }
-    const frame = decodeTerminalStreamFrame(bytes)
-    if (!frame) {
-      return
-    }
-    this.binaryStreamHandlers.get(connectionId)?.get(frame.streamId)?.(frame)
+    this.binaryMessageRouter.dispatch(this.mobileSocketWiring?.getConnectionId(ws), bytes)
   }
 
   private registerWebSocketDispatchAbort(ws: WebSocket): {
@@ -1161,6 +1169,8 @@ export class OrcaRuntimeRpcServer {
 
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
     if (this.enableWebSocket) {
+      // Why: land any deferred lastSeen write before a replacement registry reads the same file.
+      this.deviceRegistry?.flushPendingLastSeen()
       const pairingIdentity = this.initializePairingIdentity()
       if (!pairingIdentity.ok) {
         this.deviceRegistry = null
@@ -1228,13 +1238,17 @@ export class OrcaRuntimeRpcServer {
 
   // Why: STA-2370 — a desktop with no previously-connected device stays on loopback until the user
   // explicitly pairs; `orca serve`/E2E (exposeNetworkByDefault) and a reconnecting paired device bind wide.
+  // A grant minted for "This computer only" is excluded: its client is a browser on this machine, so
+  // counting it would republish the runtime on every interface one restart after the user declined that.
   private resolveInitialWebSocketBindHost(): string {
     if (this.exposeNetworkByDefault) {
       return WS_BIND_HOST_ALL_INTERFACES
     }
-    const hasConnectedDevice =
-      this.deviceRegistry?.listDevices().some((device) => device.lastSeenAt > 0) ?? false
-    return hasConnectedDevice ? WS_BIND_HOST_ALL_INTERFACES : WS_BIND_HOST_LOOPBACK
+    const hasConnectedNetworkDevice =
+      this.deviceRegistry
+        ?.listDevices()
+        .some((device) => device.lastSeenAt > 0 && device.pairingReach !== 'this-computer') ?? false
+    return hasConnectedNetworkDevice ? WS_BIND_HOST_ALL_INTERFACES : WS_BIND_HOST_LOOPBACK
   }
 
   // Why: builds and starts a WS transport bound to `host`, wiring the session-scoped mobile socket
@@ -1323,7 +1337,7 @@ export class OrcaRuntimeRpcServer {
         // Why: subscriptions and binary streams are socket-scoped, but disconnect state is device-scoped across transports.
         this.runtime.cleanupSubscriptionsForConnection(socket.connectionId)
         this.runtime.cancelMobileDictationForConnection(socket.connectionId)
-        this.binaryStreamHandlers.delete(socket.connectionId)
+        this.binaryMessageRouter.deleteConnection(socket.connectionId)
         if (!hasOtherConnections) {
           this.runtime.onClientDisconnected(socket.device.deviceToken)
         }
@@ -1340,9 +1354,10 @@ export class OrcaRuntimeRpcServer {
   }
 
   // Why: STA-2370 — widen the loopback listener to all interfaces so a freshly generated pairing
-  // offer's advertised LAN endpoint is reachable. Idempotent and only ever runs on the first opt-in
-  // (before any device has connected), so no live socket is disrupted; the resolved port is reused so
-  // an already-issued endpoint stays valid.
+  // offer's advertised LAN endpoint is reachable. Idempotent, but it is no longer confined to the first
+  // pairing action: a "This computer only" link never widens, so live loopback clients can already be
+  // connected when a later LAN/QR offer opts in. Rebinding terminates them (ws cannot move a listener),
+  // so the resolved port is reused — already-issued endpoints stay valid and clients reconnect in place.
   async ensureNetworkExposure(): Promise<void> {
     if (
       !this.enableWebSocket ||
@@ -1393,7 +1408,7 @@ export class OrcaRuntimeRpcServer {
     // never orphan a running 0.0.0.0 listener outside activeTransports (and thus outside stop()).
     this.activeTransports[index] = widened.transport
     const metaIndex = this.transports.findIndex((meta) => meta.kind === 'websocket')
-    if (metaIndex >= 0) {
+    if (metaIndex !== -1) {
       this.transports[metaIndex] = { kind: 'websocket', endpoint: widened.endpoint }
     }
     try {
@@ -1435,7 +1450,7 @@ export class OrcaRuntimeRpcServer {
       )
       this.activeTransports.splice(index, 1)
       const metaIndex = this.transports.findIndex((meta) => meta.kind === 'websocket')
-      if (metaIndex >= 0) {
+      if (metaIndex !== -1) {
         this.transports.splice(metaIndex, 1)
       }
       this.wsBoundHost = null
@@ -1450,7 +1465,7 @@ export class OrcaRuntimeRpcServer {
     // orphan a live transport outside activeTransports (and thus outside stop()).
     this.activeTransports[index] = restored.transport
     const metaIndex = this.transports.findIndex((meta) => meta.kind === 'websocket')
-    if (metaIndex >= 0) {
+    if (metaIndex !== -1) {
       this.transports[metaIndex] = { kind: 'websocket', endpoint: restored.endpoint }
     }
     try {
@@ -1487,10 +1502,15 @@ export class OrcaRuntimeRpcServer {
     this.metadataOwnershipWatch = null
     this.mobileSocketWiring = null
     this.detachWebSocketWiring = null
-    if (transports.length === 0) {
-      return
+    const stopResults = await Promise.allSettled(
+      transports.map(async (transport) => transport.stop())
+    )
+    // Why: before-quit fences relay input; direct auth can still refresh lastSeen while these transports close.
+    this.deviceRegistry?.flushPendingLastSeen()
+    const failedStop = stopResults.find((result) => result.status === 'rejected')
+    if (failedStop?.status === 'rejected') {
+      throw failedStop.reason
     }
-    await Promise.all(transports.map((t) => t.stop()))
     // Why: leave the metadata file on shutdown — shared userData may host another live runtime whose bootstrap file we'd erase.
   }
 
@@ -1511,7 +1531,7 @@ export class OrcaRuntimeRpcServer {
     const request = parsed.request
 
     // Why: long-poll admission fence; short RPCs bypass the counter. See §7 risk #2.
-    const longPoll = longPollClassOf(request)
+    const longPoll = classifyRuntimeLongPoll(request)
     const rejection = this.admitLongPoll(longPoll)
     if (rejection) {
       return this.buildError(request.id, 'runtime_busy', rejection)
@@ -1533,30 +1553,68 @@ export class OrcaRuntimeRpcServer {
   // Why: one fence for both transports — the total cap protects short RPCs, the ask
   // sub-cap protects terminal.wait / check --wait from slow reply-blocked asks.
   // Returns the rejection message, or null once the slot is reserved.
-  private admitLongPoll(longPoll: LongPollClass | null): string | null {
+  private admitLongPoll(
+    longPoll: RuntimeLongPollClass | null,
+    pairedDeviceId?: string
+  ): string | null {
     if (!longPoll) {
       return null
     }
     if (this.activeLongPolls >= this.longPollCap) {
       return 'long-poll capacity reached; retry with backoff'
     }
+    if (
+      (longPoll === 'ask' || longPoll === 'browser-host') &&
+      this.activeAskLongPolls + this.activeBrowserHostLongPolls >= this.specializedLongPollCap
+    ) {
+      return longPoll === 'ask'
+        ? 'orchestration.ask capacity reached; retry with backoff'
+        : 'browser-host capacity reached; retry with backoff'
+    }
     if (longPoll === 'ask' && this.activeAskLongPolls >= this.askLongPollCap) {
       return 'orchestration.ask capacity reached; retry with backoff'
+    }
+    if (
+      longPoll === 'browser-host' &&
+      (this.activeBrowserHostLongPolls >= this.browserHostLongPollCap ||
+        (pairedDeviceId !== undefined &&
+          (this.activeBrowserHostLongPollsByDevice.get(pairedDeviceId) ?? 0) >=
+            this.browserHostLongPollCapPerDevice))
+    ) {
+      return 'browser-host capacity reached; retry with backoff'
     }
     this.activeLongPolls += 1
     if (longPoll === 'ask') {
       this.activeAskLongPolls += 1
+    } else if (longPoll === 'browser-host') {
+      this.activeBrowserHostLongPolls += 1
+      if (pairedDeviceId !== undefined) {
+        this.activeBrowserHostLongPollsByDevice.set(
+          pairedDeviceId,
+          (this.activeBrowserHostLongPollsByDevice.get(pairedDeviceId) ?? 0) + 1
+        )
+      }
     }
     return null
   }
 
-  private releaseLongPoll(longPoll: LongPollClass | null): void {
+  private releaseLongPoll(longPoll: RuntimeLongPollClass | null, pairedDeviceId?: string): void {
     if (!longPoll) {
       return
     }
     this.activeLongPolls = Math.max(0, this.activeLongPolls - 1)
     if (longPoll === 'ask') {
       this.activeAskLongPolls = Math.max(0, this.activeAskLongPolls - 1)
+    } else if (longPoll === 'browser-host') {
+      this.activeBrowserHostLongPolls = Math.max(0, this.activeBrowserHostLongPolls - 1)
+      if (pairedDeviceId !== undefined) {
+        const remaining = (this.activeBrowserHostLongPollsByDevice.get(pairedDeviceId) ?? 1) - 1
+        if (remaining > 0) {
+          this.activeBrowserHostLongPollsByDevice.set(pairedDeviceId, remaining)
+        } else {
+          this.activeBrowserHostLongPollsByDevice.delete(pairedDeviceId)
+        }
+      }
     }
   }
 
@@ -1648,8 +1706,8 @@ export class OrcaRuntimeRpcServer {
       wsTransport.setClientId(ws, token)
     }
 
-    const longPoll = longPollClassOf(request)
-    const rejection = this.admitLongPoll(longPoll)
+    const longPoll = classifyRuntimeLongPoll(request)
+    const rejection = this.admitLongPoll(longPoll, device.deviceId)
     if (rejection) {
       reply(JSON.stringify(this.buildError(request.id, 'runtime_busy', rejection)))
       return
@@ -1690,6 +1748,8 @@ export class OrcaRuntimeRpcServer {
         : undefined
     try {
       await this.dispatcher.dispatchStreaming(request, replyForRequest, {
+        // Why: the validated credential preserves existing federation ownership without trusting request fields.
+        authenticatedCallerFingerprint: fingerprintAuthenticatedPairingCredential(token),
         connectionId,
         clientId: token,
         pairedDeviceId: device.deviceId,
@@ -1700,11 +1760,13 @@ export class OrcaRuntimeRpcServer {
         signal: abortRegistration?.signal,
         sendBinary,
         registerBinaryStreamHandler: (streamId, handler) =>
-          this.registerBinaryStreamHandler(connectionId, streamId, handler)
+          this.registerBinaryStreamHandler(connectionId, streamId, handler),
+        registerBinaryMessageHandler: (handler) =>
+          this.registerBinaryMessageHandler(connectionId, handler)
       })
     } finally {
       abortRegistration?.dispose()
-      this.releaseLongPoll(longPoll)
+      this.releaseLongPoll(longPoll, device.deviceId)
     }
   }
 

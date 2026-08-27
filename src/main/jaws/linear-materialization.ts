@@ -1,4 +1,4 @@
-import type { LinearCreateResult, LinearIssueContextResult } from '../../shared/linear-agent-access'
+import type { LinearCreateResult, LinearIssueContextResult } from '../../shared/linear/agent-access'
 import type {
   JawsLinearEffect,
   JawsLinearIssueRef,

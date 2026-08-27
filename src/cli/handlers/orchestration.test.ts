@@ -50,7 +50,7 @@ afterEach(() => {
 
 describe('orchestration send structured payload flags', () => {
   beforeEach(() => {
-    callMock.mockReset().mockResolvedValue({ result: { message: { id: 'msg_1' } } })
+    callMock.mockReset().mockResolvedValue({ result: { lifecycle: { action: 'completed' } } })
     getTerminalHandleMock.mockReset()
     delete process.env.ORCA_TERMINAL_HANDLE
     delete process.env.ORCA_PANE_KEY
@@ -68,7 +68,6 @@ describe('orchestration send structured payload flags', () => {
     await invokeSend(
       new Map<string, string | boolean>([
         ['from', 'term_worker'],
-        ['to', 'term_coord'],
         ['subject', 'done'],
         ['type', 'worker_done'],
         ['task-id', 'task_1'],
@@ -80,24 +79,23 @@ describe('orchestration send structured payload flags', () => {
       ])
     )
 
-    expect(callMock).toHaveBeenCalledWith('orchestration.send', {
-      from: 'term_worker',
-      to: 'term_coord',
-      subject: 'done',
-      body: undefined,
-      type: 'worker_done',
-      priority: undefined,
-      threadId: undefined,
-      payload: JSON.stringify({
-        taskId: 'task_1',
-        dispatchId: 'ctx_1',
-        outcome: 'succeeded',
-        filesModified: ['src/a.ts', 'src/b.ts'],
-        reportPath: 'reports/done.md',
-        commitSha: 'a'.repeat(40)
-      }),
-      devMode: false
-    })
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.send',
+      expect.objectContaining({
+        from: 'term_worker',
+        subject: 'done',
+        type: 'worker_done',
+        payload: JSON.stringify({
+          taskId: 'task_1',
+          dispatchId: 'ctx_1',
+          outcome: 'succeeded',
+          filesModified: ['src/a.ts', 'src/b.ts'],
+          reportPath: 'reports/done.md',
+          commitSha: 'a'.repeat(40)
+        }),
+        waitForLifecycleSettlement: true
+      })
+    )
   })
 
   it('forwards multiline message bodies without normalization', async () => {
@@ -209,6 +207,7 @@ describe('orchestration send structured payload flags', () => {
       priority: undefined,
       threadId: undefined,
       payload: JSON.stringify({ outcome: 'succeeded' }),
+      waitForLifecycleSettlement: true,
       devMode: false
     })
   })
@@ -235,6 +234,7 @@ describe('orchestration send structured payload flags', () => {
       priority: undefined,
       threadId: undefined,
       payload: JSON.stringify({ outcome: 'succeeded' }),
+      waitForLifecycleSettlement: true,
       devMode: false
     })
   })

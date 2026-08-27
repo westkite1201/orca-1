@@ -1,4 +1,7 @@
-import type { FolderWorkspace, ProjectGroup, Repo, Worktree } from '../../../shared/types'
+import type { FolderWorkspace } from '../../../shared/folder-workspace-types'
+import type { ProjectGroup } from '../../../shared/project-group-types'
+import type { Repo } from '../../../shared/repo-types'
+import type { Worktree } from '../../../shared/worktree/types'
 import {
   getRepoExecutionHostId,
   parseExecutionHostId,
@@ -8,10 +11,11 @@ import {
 } from '../../../shared/execution-host'
 
 type WorktreeOwnerRecord = Pick<Worktree, 'id' | 'repoId' | 'hostId' | 'runtimeOwnerEnvironmentId'>
+type DetectedWorktreeListing = { worktrees: readonly WorktreeOwnerRecord[] }
 type RepoOwnerRecord = Pick<Repo, 'id' | 'connectionId' | 'executionHostId'>
 type FolderWorkspaceOwnerRecord = Pick<
   FolderWorkspace,
-  'id' | 'projectGroupId' | 'connectionId' | 'executionHostId'
+  'id' | 'projectGroupId' | 'connectionId' | 'executionHostId' | 'diffComments'
 >
 type ProjectGroupOwnerRecord = Pick<ProjectGroup, 'id' | 'connectionId' | 'executionHostId'>
 
@@ -33,6 +37,12 @@ const projectGroupOwnerIndexCache = new WeakMap<
   readonly ProjectGroupOwnerRecord[],
   ReadonlyMap<string, IndexedProjectGroupOwnerResolution>
 >()
+const detectedWorktreeIndexCache = new WeakMap<
+  Record<string, DetectedWorktreeListing>,
+  ReadonlyMap<string, readonly WorktreeOwnerRecord[]>
+>()
+
+const NO_DETECTED_WORKTREES: readonly WorktreeOwnerRecord[] = []
 
 type IndexedFolderWorkspaceOwnerResolution =
   | { kind: 'resolved'; owner: FolderWorkspaceOwnerRecord }
@@ -44,7 +54,7 @@ type IndexedProjectGroupOwnerResolution =
   | { kind: 'missing' }
   | { kind: 'ambiguous' }
 
-function catalogOwnerHostId(owner: {
+export function getCatalogOwnerHostId(owner: {
   connectionId?: string | null
   executionHostId?: string | null
 }): ExecutionHostId {
@@ -64,11 +74,11 @@ function buildCatalogOwnerIndex<
   const next = new Map<string, { kind: 'resolved'; owner: T } | { kind: 'ambiguous' }>()
   for (const record of records) {
     const id = record.id
-    const hostId = catalogOwnerHostId(record)
+    const hostId = getCatalogOwnerHostId(record)
     const current = next.get(id)
     if (!current) {
       next.set(id, { kind: 'resolved', owner: record })
-    } else if (current.kind === 'resolved' && catalogOwnerHostId(current.owner) !== hostId) {
+    } else if (current.kind === 'resolved' && getCatalogOwnerHostId(current.owner) !== hostId) {
       next.set(id, { kind: 'ambiguous' })
     }
     next.set(`${id}\0${hostId}`, {
@@ -208,6 +218,43 @@ export function resolveIndexedWorktreeOwner(
     worktreeOwnerIndexCache.set(worktreesByRepo, index)
   }
   return index.get(worktreeId) ?? { kind: 'missing' }
+}
+
+/**
+ * Every detected publication of `worktreeId`, in catalog order. Rival repos may publish the same
+ * id, so callers that fail closed on conflicts need all matches rather than one resolved owner.
+ */
+export function findIndexedDetectedWorktrees(
+  detectedWorktreesByRepo: Record<string, DetectedWorktreeListing> | undefined,
+  worktreeId: string
+): readonly WorktreeOwnerRecord[] {
+  if (!detectedWorktreesByRepo) {
+    return NO_DETECTED_WORKTREES
+  }
+  let index = detectedWorktreeIndexCache.get(detectedWorktreesByRepo)
+  if (!index) {
+    const next = new Map<string, WorktreeOwnerRecord[]>()
+    for (const listing of Object.values(detectedWorktreesByRepo)) {
+      for (const worktree of listing.worktrees) {
+        const matches = next.get(worktree.id)
+        if (matches) {
+          matches.push(worktree)
+        } else {
+          next.set(worktree.id, [worktree])
+        }
+      }
+    }
+    index = next
+    detectedWorktreeIndexCache.set(detectedWorktreesByRepo, index)
+  }
+  return index.get(worktreeId) ?? NO_DETECTED_WORKTREES
+}
+
+export function hasIndexedDetectedWorktree(
+  detectedWorktreesByRepo: Record<string, DetectedWorktreeListing> | undefined,
+  worktreeId: string
+): boolean {
+  return findIndexedDetectedWorktrees(detectedWorktreesByRepo, worktreeId).length > 0
 }
 
 export function findIndexedRepoOwner(

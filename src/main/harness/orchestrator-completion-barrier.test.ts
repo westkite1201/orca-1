@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MessageRow, TaskRow } from '../runtime/orchestration/types'
-import type { Repo } from '../../shared/types'
+import type { Repo } from '../../shared/repo-types'
 import { createHarnessRunMemoryStore } from './harness-run-memory-store'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 import { advanceHarnessCompletion } from './verification'
@@ -38,8 +38,12 @@ function childTask(): TaskRow {
     run_id: 'run-1',
     parent_id: PARENT_TASK_ID,
     created_by_terminal_handle: 'terminal-codex',
+    created_by_pane_key: null,
+    created_by_process_incarnation: null,
+    created_by_run_generation: null,
     task_title: 'Child implementation',
     display_name: null,
+    verification_required: 0,
     spec: 'Implement the child lane.',
     status: 'dispatched',
     deps: '[]',

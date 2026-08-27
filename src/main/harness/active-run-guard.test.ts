@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { HarnessRun, HarnessRunCreateInput } from '../../shared/harness-types'
-import type { Repo } from '../../shared/types'
+import type { Repo } from '../../shared/repo-types'
 import { HarnessService, type HarnessStore } from './service'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 
