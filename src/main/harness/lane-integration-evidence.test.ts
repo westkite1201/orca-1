@@ -5,7 +5,7 @@ import {
   type HarnessExecutionPlanV1
 } from '../../shared/harness-allocation-types'
 import type { HarnessRun } from '../../shared/harness-types'
-import type { GitBranchCompareResult, GitDiffResult } from '../../shared/types'
+import type { GitBranchCompareResult, GitDiffResult } from '../../shared/git-diff-compare-types'
 import type { TaskRow } from '../runtime/orchestration/types'
 import { verifyHarnessReportedLane } from './lane-integration-evidence'
 import type { HarnessRuntimeCaller } from './runtime-caller'
@@ -74,6 +74,9 @@ function reportedTask(commitSha: string | null = WORKER_SHA): TaskRow {
     run_id: 'orchestration-run',
     parent_id: 'root-task',
     created_by_terminal_handle: 'coordinator',
+    created_by_pane_key: null,
+    created_by_process_incarnation: null,
+    created_by_run_generation: null,
     task_title: 'Patch runtime',
     display_name: null,
     verification_required: 1,

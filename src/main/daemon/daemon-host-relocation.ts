@@ -11,7 +11,8 @@ import {
 } from 'node:fs'
 import { dirname, join, win32 as winPath } from 'node:path'
 import { app } from 'electron'
-import { parseDaemonPidFile, startTimeMatches } from './daemon-health'
+import { parseDaemonPidFile } from './daemon-pid-file-parse'
+import { startTimeMatches } from './daemon-process-start-time'
 import productProfile from '../../shared/product-profile.json'
 
 /**

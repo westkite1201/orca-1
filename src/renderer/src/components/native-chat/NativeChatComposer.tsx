@@ -4,16 +4,19 @@ import { sendRuntimePtyInput } from '@/runtime/runtime-terminal-inspection'
 import { getSettingsForAgentTabRuntimeOwner } from '@/lib/agent-paste-draft'
 import {
   sendNativeChatMessage,
+  sendNativeChatTypedCommand,
   sendNativeChatMessageWithImageAttachments,
   submitNativeChatPrompt
 } from './native-chat-runtime-send'
 import type { NativeChatSendHandle } from './native-chat-runtime-send'
 import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
 import * as jawsChat from '../../../../shared/jaws-chat-request'
+import { isSlashCommandDraft } from '../../../../shared/native-chat-slash-commands'
 import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
 import {
   applyMentionSuggestion,
   EMPTY_HISTORY,
+  isNativeChatDictationActive,
   pushHistory,
   type HistoryState
 } from './native-chat-composer-state'
@@ -113,11 +116,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
     const voiceSettings = useAppStore((store) => store.settings?.voice)
     const isDictationHoldMode = voiceSettings?.dictationMode === 'hold'
     const dictationDisabled = voiceSettings?.enabled !== true || !voiceSettings.sttModel
-    const isDictating =
-      dictationPressed ||
-      dictationState === 'starting' ||
-      dictationState === 'listening' ||
-      dictationState === 'stopping'
+    const isDictating = isNativeChatDictationActive(dictationPressed, dictationState)
 
     // Place the caret at the end of the (possibly restored) draft when the
     // composer is reused for a different pane. Adjusted during render (matching
@@ -265,7 +264,10 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       // command/unknown send, otherwise `clearImageAttachments()` below drops
       // them silently when the text starts with the agent's slash/skill prefix.
       if (classification !== 'chat' && imagePaths.length === 0) {
-        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, sentText, sendOptions)
+        pendingHandle =
+          agent === 'codex' && isSlashCommandDraft(text)
+            ? sendNativeChatTypedCommand(target.settings, target.ptyId, text)
+            : sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
       } else if (imagePaths.length > 0) {
         pendingHandle = sendNativeChatMessageWithImageAttachments(
           target.settings,

@@ -9,6 +9,9 @@ import { TERMINAL_ORPHAN_METHODS } from './terminal-orphan'
 import { BROWSER_CORE_METHODS } from './browser-core'
 import { BROWSER_EXTRA_METHODS } from './browser-extras'
 import { BROWSER_SCREENCAST_METHODS } from './browser-screencast'
+import { BROWSER_CLIENT_HOST_METHODS } from './browser-client-host'
+import { BROWSER_CLIENT_FILE_CHANNEL_METHODS } from './browser-client-file-channel'
+import { BROWSER_NETWORK_TUNNEL_METHODS } from './browser-network-tunnel'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { NOTIFICATION_METHODS } from './notifications'
 import { STATS_METHODS } from './stats'
@@ -39,6 +42,7 @@ import { EMULATOR_METHODS } from './emulator'
 import { PAIRING_METHODS } from './pairing'
 import { UPDATER_METHODS } from './updater'
 import { AGENT_SESSION_METHODS } from './agent-session'
+import { ARTIFACT_METHODS } from './artifacts'
 import { HARNESS_METHODS } from './harness'
 import { JAWS_METHODS } from './jaws'
 
@@ -48,6 +52,7 @@ import { JAWS_METHODS } from './jaws'
 export const ALL_RPC_METHODS: readonly RpcAnyMethod[] = [
   ...STATUS_METHODS,
   ...AI_VAULT_METHODS,
+  ...ARTIFACT_METHODS,
   ...AUTOMATION_METHODS,
   ...REPO_METHODS,
   ...WORKTREE_METHODS,
@@ -57,6 +62,9 @@ export const ALL_RPC_METHODS: readonly RpcAnyMethod[] = [
   ...BROWSER_CORE_METHODS,
   ...BROWSER_SCREENCAST_METHODS,
   ...BROWSER_EXTRA_METHODS,
+  ...BROWSER_CLIENT_HOST_METHODS,
+  ...BROWSER_CLIENT_FILE_CHANNEL_METHODS,
+  ...BROWSER_NETWORK_TUNNEL_METHODS,
   ...ORCHESTRATION_METHODS,
   ...HARNESS_METHODS,
   ...JAWS_METHODS,

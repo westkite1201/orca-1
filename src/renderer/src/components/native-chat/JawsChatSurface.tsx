@@ -5,7 +5,7 @@ import type { JawsRunView } from '../../../../shared/jaws-types'
 import { translate } from '../../i18n/i18n'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '../ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 
 const POLL_INTERVAL_MS = 2_000
 
@@ -176,7 +176,9 @@ export function JawsChatSurface({ worktreeId }: { worktreeId: string }): React.J
                   {translate('auto.components.nativeChat.jaws.draftReview', 'Draft review')}
                 </p>
                 <p className="mt-1 text-foreground">
-                  {run.plan.review.provider ?? 'Manual'} · {run.plan.review.baseBranch}
+                  {run.plan.review.provider ??
+                    translate('auto.components.nativeChat.jaws.manualProvider', 'Manual')}{' '}
+                  · {run.plan.review.baseBranch}
                 </p>
               </div>
             ) : null}
@@ -355,7 +357,7 @@ export function JawsChatSurface({ worktreeId }: { worktreeId: string }): React.J
             ) : null}
           </CardContent>
           {canApprove || canRetryReview ? (
-            <CardFooter className="px-4">
+            <div className="flex items-center px-4">
               {canApprove ? (
                 <Button size="sm" disabled={approving} onClick={() => void approve()}>
                   {approving ? <Loader2 className="animate-spin" /> : null}
@@ -372,7 +374,7 @@ export function JawsChatSurface({ worktreeId }: { worktreeId: string }): React.J
                   )}
                 </Button>
               )}
-            </CardFooter>
+            </div>
           ) : null}
         </Card>
       </div>

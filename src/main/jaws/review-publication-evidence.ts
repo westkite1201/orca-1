@@ -1,6 +1,6 @@
 import { isHarnessCandidateVerified, type HarnessCandidate } from '../../shared/harness-types'
 import type { JawsRun } from '../../shared/jaws-types'
-import type { GitBranchCompareResult } from '../../shared/types'
+import type { GitBranchCompareResult } from '../../shared/git-diff-compare-types'
 import type { GitStatusResult } from '../../shared/git-status-types'
 import type { TaskRow } from '../runtime/orchestration/types'
 

@@ -215,8 +215,12 @@ function fixture(withLinear = false) {
         run_id: 'run-1',
         parent_id: 'task-parent',
         created_by_terminal_handle: null,
+        created_by_pane_key: null,
+        created_by_process_incarnation: null,
+        created_by_run_generation: null,
         task_title: '[Jaws:API] Build API',
         display_name: null,
+        verification_required: 1,
         spec: 'Build it',
         status: 'completed' as const,
         deps: '[]',
@@ -323,8 +327,8 @@ describe('Jaws review publication', () => {
 
   it('keeps the verified result and exposes a manual action for unsupported providers', async () => {
     const { getRun, store, reviewClient } = fixture()
-    getRun().plan.review = { provider: 'bitbucket', baseBranch: 'main', createDraft: true }
-    getRun().reviewPublication!.provider = 'bitbucket'
+    getRun().plan.review = { provider: 'unsupported', baseBranch: 'main', createDraft: true }
+    getRun().reviewPublication!.provider = 'unsupported'
 
     const result = await publishJawsReview({
       run: getRun(),

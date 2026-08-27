@@ -4,7 +4,11 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { resolveAutomationPrecheckSpawn, runAutomationPrecheck } from './precheck-runner'
+import { runAutomationPrecheck } from './precheck-runner'
+
+const runWslProcessMock = vi.hoisted(() => vi.fn())
+
+vi.mock('../wsl/wsl-runner', () => ({ runWslProcess: runWslProcessMock }))
 
 const sshManagerState = vi.hoisted(() => ({
   manager: null as null | {
@@ -37,6 +41,13 @@ describe('runAutomationPrecheck', () => {
     sshManagerState.manager = null
     sshManagerState.registeredState = undefined
     sshManagerState.getRegisteredSshState.mockClear()
+    runWslProcessMock.mockReset().mockResolvedValue({
+      environmentResolved: true,
+      code: 0,
+      stdout: 'passed',
+      stderr: '',
+      timedOut: false
+    })
   })
 
   afterEach(() => {
@@ -61,23 +72,26 @@ describe('runAutomationPrecheck', () => {
     expect(result.error).toBeNull()
   })
 
-  it('routes a WSL precheck through the selected distro login shell', () => {
-    const launch = resolveAutomationPrecheckSpawn(
-      { command: 'pnpm test', timeoutSeconds: 5 },
-      {
+  it('routes a WSL precheck through the centralized runner', async () => {
+    const result = await runAutomationPrecheck({
+      precheck: { command: 'pnpm test', timeoutSeconds: 5 },
+      target: {
         type: 'local',
         cwd: '\\\\wsl.localhost\\Ubuntu\\home\\jin\\repo',
         wslDistro: 'Ubuntu'
       }
-    )
+    })
 
-    expect(launch.command).toBe('wsl.exe')
-    expect(launch.args.slice(0, 5)).toEqual(['-d', 'Ubuntu', '--', 'sh', '-lc'])
-    expect(launch.args[5]).toContain('/home/jin/repo')
-    expect(launch.args[5]).toContain('pnpm test')
-    expect(launch.args[5]).toContain('getent passwd')
-    expect(launch.options).not.toHaveProperty('cwd')
-    expect(launch.options.shell).toBeUndefined()
+    expect(runWslProcessMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        distro: 'Ubuntu',
+        loginPath: 'preferred',
+        cwd: '/home/jin/repo',
+        script: 'pnpm test',
+        timeoutMs: 5_000
+      })
+    )
+    expect(result).toMatchObject({ exitCode: 0, stdout: 'passed', error: null })
   })
 
   it('marks a local precheck as timed out', async () => {

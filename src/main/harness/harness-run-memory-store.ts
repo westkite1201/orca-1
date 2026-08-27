@@ -6,7 +6,7 @@ import type {
   HarnessRun,
   HarnessRunCreateInput
 } from '../../shared/harness-types'
-import type { Repo } from '../../shared/types'
+import type { Repo } from '../../shared/repo-types'
 import { createHarnessAllocationState } from '../../shared/harness-allocation-types'
 import type { HarnessStore } from './service'
 import { normalizeHarnessExecutionPlan } from './allocation-validation'

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GitStatusResult } from '../../shared/git-status-types'
-import type { GitBranchCompareResult } from '../../shared/types'
+import type { GitBranchCompareResult } from '../../shared/git-diff-compare-types'
 import { buildHarnessDiffSummary as buildHarnessDiffSummaryWithBase } from './diff-summary'
 
 const EXPECTED_BRANCH = 'jaws-harness-run-codex'

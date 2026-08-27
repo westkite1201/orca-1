@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { isRepoHeaderActionTarget, useRepoHeaderDrag } from './project-header-drag'
 import type { RepoDragState } from './project-header-drag-contract'
-import type { Repo } from '../../../../shared/types'
+import type { Repo } from '../../../../shared/repo-types'
 
 function createHeader(markup: string): HTMLElement {
   const header = document.createElement('div')

@@ -24,6 +24,10 @@ export {
   type NativeChatSkillDiscoverySnapshot
 } from './native-chat-picker-items'
 
+export function isNativeChatDictationActive(pressed: boolean, state: string): boolean {
+  return pressed || state === 'starting' || state === 'listening' || state === 'stopping'
+}
+
 type PickerAutocomplete = {
   query: string
   items: NativeChatPickerItem[]

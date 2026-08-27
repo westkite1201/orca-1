@@ -13,8 +13,8 @@ import {
   mapSidebarRepoDropIndexToAllRepoInsertAt,
   measureProjectHeaderDragRects
 } from './project-header-drop'
-import type { Row } from './worktree-list-groups'
-import type { Repo } from '../../../../shared/types'
+import type { Row } from './worktree-list/grouping/row-types'
+import type { Repo } from '../../../../shared/repo-types'
 
 describe('getProjectHeaderDragBucketKey', () => {
   it('uses ungrouped for repos without a project group', () => {

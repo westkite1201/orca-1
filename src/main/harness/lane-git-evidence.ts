@@ -3,7 +3,7 @@ import type {
   GitBranchChangeEntry,
   GitBranchCompareResult,
   GitDiffResult
-} from '../../shared/types'
+} from '../../shared/git-diff-compare-types'
 import type { HarnessRuntimeCaller } from './runtime-caller'
 
 export const MAX_VERIFIED_FILES = 200

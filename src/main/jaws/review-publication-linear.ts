@@ -2,7 +2,7 @@ import type {
   LinearAttachResult,
   LinearCommentAddResult,
   LinearStatusSetResult
-} from '../../shared/linear-agent-access'
+} from '../../shared/linear/agent-access'
 import {
   assertMaterializedLinearState,
   type JawsLinearClient

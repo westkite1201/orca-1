@@ -6,6 +6,10 @@ import {
 } from '@/components/terminal-pane/layout-serialization'
 import { warnTerminalLifecycleAnomaly } from '@/components/terminal-pane/terminal-lifecycle-diagnostics'
 import { getEagerPtyBufferHandle } from '@/components/terminal-pane/pty-dispatcher'
+import {
+  collectParkedTerminalWatcherPtyIds,
+  getParkedTerminalWatcherPaneIdsByPtyId
+} from '@/components/terminal-pane/terminal-parked-watcher-registry'
 import { createBrowserUuid } from '@/lib/browser-uuid'
 import type { PaneManager } from '@/lib/pane-manager/pane-manager'
 import { resolveLeafIdForManager } from '@/lib/pane-manager/pane-key-resolution'
@@ -20,20 +24,24 @@ import type {
   RuntimeMobileSessionSnapshotTab,
   RuntimeMobileTerminalTheme,
   RuntimeMobileSessionTabsSnapshot,
-  RuntimeSyncWindowGraph
+  RuntimeRendererSyncWindowGraph
 } from '../../../shared/runtime-types'
 import { isTerminalLeafId, makePaneKey, parsePaneKey } from '../../../shared/stable-pane-id'
 import { isWebTerminalSurfaceTabId } from '../../../shared/terminal-surface-id'
 import { isClaudeManagementTitle } from '../../../shared/agent-detection'
 import { parseWorkspaceKey } from '../../../shared/workspace-scope'
+import type { Tab, TabGroup, TabGroupLayoutNode } from '../../../shared/tab-types'
 import type {
-  Tab,
-  TabGroup,
-  TabGroupLayoutNode,
   TerminalLayoutSnapshot,
+  TerminalPaneLayoutNode,
   TerminalTab
-} from '../../../shared/types'
+} from '../../../shared/terminal-tab-types'
 import { resolveTerminalTabTitle } from '../../../shared/tab-title-resolution'
+import {
+  isNativeChatTabWideFallbackSafe,
+  nativeChatLaunchAgentForLeaf,
+  resolveNativeChatActiveLayoutLeafId
+} from '../components/native-chat/native-chat-leaf-routing'
 import {
   getActiveTabNavOrder,
   getGroupVisibleTabOrder,
@@ -49,6 +57,7 @@ type RegisteredTerminalTab = {
   getManager: () => PaneManager | null
   getContainer: () => HTMLDivElement | null
   getPtyIdForPane: (paneId: number) => string | null
+  getTabWideAgentHintLeafId: () => string | null
 }
 
 type OpenFileByWorktreeAndId = Map<string, Map<string, AppState['openFiles'][number]>>
@@ -93,6 +102,23 @@ type MobileSessionPublicationInputs = {
   terminalTheme: RuntimeMobileTerminalTheme | undefined
 }
 /**
+ * Live PaneManager/DOM reads for one mounted terminal tab, captured once per
+ * publication.
+ *
+ * Why: builders read this instead of the registry, so live state the memo
+ * cannot witness is unrepresentable — mounted worktrees memoize like the rest
+ * instead of rebuilding on every publication.
+ */
+type MountedTerminalSurfaceCapture = {
+  paneLeafIds: readonly string[]
+  hasLiveActivePane: boolean
+  liveActiveLeafId: string | null
+  liveLayoutRoot: TerminalPaneLayoutNode | null
+  numericPaneIdByLeafId: ReadonlyMap<string, number | null>
+  ptyIdByNumericPaneId: ReadonlyMap<number, string | null>
+  tabWideAgentHintLeafId: string | null
+}
+/**
  * One worktree's complete mobile-snapshot input set.
  *
  * Why: every builder below takes this instead of `AppState`, so the compiler —
@@ -111,7 +137,7 @@ type MobileSessionWorktreeInputs = {
   openFileIds: readonly string[]
   terminalLayoutByTabId: ReadonlyMap<string, AppState['terminalLayoutsByTabId'][string]>
   paneTitlesByTabId: ReadonlyMap<string, AppState['runtimePaneTitlesByTabId'][string]>
-  launchDraftByTabId: ReadonlyMap<
+  launchDraftByPaneKey: ReadonlyMap<
     string,
     NonNullable<AppState['nativeChatLaunchDraftByTabId']>[string]
   >
@@ -131,8 +157,7 @@ type MobileSessionWorktreeInputs = {
   activeBrowserWorkspaceId: string | null
   generatedTitlesEnabled: boolean
   terminalTheme: RuntimeMobileTerminalTheme | undefined
-  // Why: a mounted TerminalPane feeds live DOM/PaneManager state that no store reference can witness.
-  hasMountedTerminalSurface: boolean
+  mountedSurfaceCaptureByTabId: ReadonlyMap<string, MountedTerminalSurfaceCapture>
 }
 
 const registeredTabs = new Map<string, RegisteredTerminalTab>()
@@ -497,6 +522,7 @@ function buildRuntimeMobileTabsProjection(tabsByWorktree: AppState['tabsByWorktr
                 id: tab.id,
                 title: tab.title,
                 quickCommandLabel: tab.quickCommandLabel,
+                aiVaultTitle: tab.aiVaultTitle,
                 generatedTitle: tab.generatedTitle,
                 customTitle: tab.customTitle,
                 launchAgent: tab.launchAgent
@@ -516,7 +542,10 @@ function buildRuntimeMobileTabsProjection(tabsByWorktree: AppState['tabsByWorktr
 }
 
 function resolveRuntimeTerminalTitle(
-  tab: Pick<TerminalTab, 'customTitle' | 'quickCommandLabel' | 'generatedTitle' | 'title'>,
+  tab: Pick<
+    TerminalTab,
+    'customTitle' | 'quickCommandLabel' | 'aiVaultTitle' | 'generatedTitle' | 'title'
+  >,
   generatedTitlesEnabled: boolean,
   liveTitle = tab.title
 ): string {
@@ -591,6 +620,7 @@ function serializeRuntimeMobileAgentStatusEntry(
     paneKey,
     entryPaneKey: entry.paneKey,
     state: entry.state,
+    workingMode: entry.workingMode ?? null,
     prompt: entry.prompt,
     updatedAtBucket: Math.floor(entry.updatedAt / AGENT_STATUS_SYNC_UPDATED_AT_BUCKET_MS),
     stateStartedAt: entry.stateStartedAt,
@@ -703,9 +733,10 @@ async function syncRuntimeGraph(): Promise<void> {
   const generatedTitlesEnabled = state.settings?.tabAutoGenerateTitle === true
   const mobileSessionTabs = buildMobileSessionTabSnapshots(state, systemPrefersDark)
   const publication = partitionMobileSessionPublication(mobileSessionTabs)
-  const graph: RuntimeSyncWindowGraph = {
+  const graph: RuntimeRendererSyncWindowGraph = {
     tabs: [],
     leaves: [],
+    rendererGeneration: mobileSessionPublicationEpoch,
     mobileSessionTabs: publication.changed,
     unchangedMobileSessionWorktrees: publication.unchangedWorktrees
   }
@@ -766,6 +797,13 @@ async function syncRuntimeGraph(): Promise<void> {
   }
 
   // Why: inactive automation tabs never mount a TerminalPane; publish their leaf+ptyId from persisted layout (gated on a live buffer) or the live PTY looks orphaned.
+  // Cold-parked tabs are the same shape with a different liveness proof: their
+  // pane is unmounted but a parked watcher still owns the PTY. Dropping their
+  // leaf invalidates the terminal handle every paired subscriber is bound to,
+  // stalling a remotely-driven terminal the host merely stopped displaying.
+  // Built once for the whole publication; a per-leaf registry scan would be
+  // quadratic across a many-worktree workspace.
+  const parkedWatcherPtyIds = collectParkedTerminalWatcherPtyIds()
   for (const [worktreeId, tabs] of Object.entries(state.tabsByWorktree)) {
     for (const tab of tabs) {
       const layout = state.terminalLayoutsByTabId[tab.id]
@@ -781,17 +819,27 @@ async function syncRuntimeGraph(): Promise<void> {
           typeof ptyId === 'string' &&
           ptyId.length > 0 &&
           isTerminalLeafId(leafId) &&
-          Boolean(getEagerPtyBufferHandle(ptyId))
+          (Boolean(getEagerPtyBufferHandle(ptyId)) || parkedWatcherPtyIds.has(ptyId))
       )
       if (liveLeaves.length === 0) {
         continue
       }
       const title = resolveRuntimeTerminalTitle(tab, generatedTitlesEnabled)
+      // Why: partial coverage is legitimate — one leaf's watcher can be disposed
+      // while its siblings stay parked — so a saved activeLeafId that did not
+      // survive the filter would name a leaf this publication never sends.
+      const publishedLeafIds = new Set(liveLeaves.map(([leafId]) => leafId))
+      const savedActiveLeafId = layout?.activeLeafId
+      const parkedPaneIdsByPtyId = getParkedTerminalWatcherPaneIdsByPtyId(tab.id)
+      const parkedPaneTitles = state.runtimePaneTitlesByTabId[tab.id] ?? {}
       graph.tabs.push({
         tabId: tab.id,
         worktreeId,
         title,
-        activeLeafId: layout?.activeLeafId ?? liveLeaves[0][0],
+        activeLeafId:
+          savedActiveLeafId && publishedLeafIds.has(savedActiveLeafId)
+            ? savedActiveLeafId
+            : liveLeaves[0][0],
         layout: resolveTerminalLayoutRoot({
           authoritativeRoot: layout?.root,
           leafIds: liveLeaves.map(([leafId]) => leafId),
@@ -802,13 +850,22 @@ async function syncRuntimeGraph(): Promise<void> {
         })
       })
       liveLeaves.forEach(([leafId, ptyId], index) => {
+        // Why the watcher's id wins: PaneManager ids are allocated monotonically
+        // and closing a pane retires its id without renumbering, so an ordinal
+        // can name a pane that no longer exists — and main routes split/close and
+        // the paneKey fallback through this value.
+        const parkedPaneId = parkedPaneIdsByPtyId.get(ptyId)
         graph.leaves.push({
           tabId: tab.id,
           worktreeId,
           leafId,
-          paneRuntimeId: index + 1,
+          paneRuntimeId: parkedPaneId ?? index + 1,
           ptyId,
-          paneTitle: null,
+          // Why not null: the parked byte watcher keeps writing this pane's
+          // runtime title, and main prefers leaf.paneTitle over its own older
+          // lastOscTitle. Dropping it would pin a parked agent pane to a stale
+          // title for as long as it stays parked.
+          paneTitle: (parkedPaneId === undefined ? null : parkedPaneTitles[parkedPaneId]) ?? null,
           title
         })
       })
@@ -972,6 +1029,11 @@ function buildMobileSessionWorktreeInputs(
 ): MobileSessionWorktreeInputs {
   const terminalTabs = state.tabsByWorktree[worktreeId] ?? EMPTY_WORKTREE_TERMINAL_TABS
   const terminalTabIds = terminalTabs.map((tab) => tab.id)
+  const terminalLayoutByTabId = narrowRecordByKeys(state.terminalLayoutsByTabId, terminalTabIds)
+  const mountedSurfaceCaptureByTabId = captureMountedTerminalSurfaces(
+    terminalTabs,
+    state.terminalLayoutsByTabId
+  )
   const browserWorkspaces =
     publication.browserTabsByWorktree[worktreeId] ?? EMPTY_WORKTREE_BROWSER_WORKSPACES
   const pagesByBrowserWorkspaceId = narrowRecordByKeys(
@@ -1003,9 +1065,14 @@ function buildMobileSessionWorktreeInputs(
     tabGroupLayout: (state.layoutByWorktree ?? EMPTY_LAYOUT_BY_WORKTREE)[worktreeId],
     openFilesById,
     openFileIds,
-    terminalLayoutByTabId: narrowRecordByKeys(state.terminalLayoutsByTabId, terminalTabIds),
+    terminalLayoutByTabId,
     paneTitlesByTabId: narrowRecordByKeys(state.runtimePaneTitlesByTabId, terminalTabIds),
-    launchDraftByTabId: narrowRecordByKeys(state.nativeChatLaunchDraftByTabId, terminalTabIds),
+    launchDraftByPaneKey: buildMobileLaunchDraftsByPaneKey({
+      terminalTabs,
+      terminalLayoutByTabId,
+      mountedSurfaceCaptureByTabId,
+      launchDraftByTabId: narrowRecordByKeys(state.nativeChatLaunchDraftByTabId, terminalTabIds)
+    }),
     agentStatusByPaneKey:
       publication.agentStatusByWorktreeId.get(worktreeId) ?? EMPTY_NARROWED_BY_KEY,
     editorDraftVersionByFileId: narrowMapByKeys(
@@ -1026,11 +1093,98 @@ function buildMobileSessionWorktreeInputs(
     activeBrowserWorkspaceId: state.activeBrowserTabIdByWorktree?.[worktreeId] ?? null,
     generatedTitlesEnabled: publication.generatedTitlesEnabled,
     terminalTheme: publication.terminalTheme,
-    hasMountedTerminalSurface: terminalTabs.some((tab) => registeredTabs.has(tab.id))
+    mountedSurfaceCaptureByTabId
   }
 }
 
-function narrowedEntriesEqual<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): boolean {
+function captureMountedTerminalSurfaces(
+  terminalTabs: AppState['tabsByWorktree'][string],
+  terminalLayoutsByTabId: AppState['terminalLayoutsByTabId']
+): ReadonlyMap<string, MountedTerminalSurfaceCapture> {
+  let captures: Map<string, MountedTerminalSurfaceCapture> | null = null
+  for (const tab of terminalTabs) {
+    const registered = registeredTabs.get(tab.id)
+    if (!registered) {
+      continue
+    }
+    captures ??= new Map()
+    captures.set(tab.id, captureMountedTerminalSurface(registered, terminalLayoutsByTabId[tab.id]))
+  }
+  return captures ?? EMPTY_NARROWED_BY_KEY
+}
+
+function captureMountedTerminalSurface(
+  registered: RegisteredTerminalTab,
+  savedLayout: AppState['terminalLayoutsByTabId'][string] | undefined
+): MountedTerminalSurfaceCapture {
+  const manager = registered.getManager()
+  const paneLeafIds = manager?.getPanes().map((pane) => pane.leafId) ?? []
+  const activePane = manager?.getActivePane() ?? null
+  const firstChild = registered.getContainer()?.firstElementChild
+  // Why: mirrors getRuntimeLeafIdsForTerminal so every leaf the builder resolves has a captured pane id.
+  const effectiveLeafIds =
+    paneLeafIds.length > 0
+      ? paneLeafIds
+      : collectLeafIdsInOrder(savedLayout?.root).filter(isTerminalLeafId)
+  const numericPaneIdByLeafId = new Map<string, number | null>()
+  const ptyIdByNumericPaneId = new Map<number, string | null>()
+  for (const leafId of effectiveLeafIds) {
+    const numericPaneId = manager?.getNumericIdForLeaf(leafId) ?? null
+    numericPaneIdByLeafId.set(leafId, numericPaneId)
+    if (numericPaneId !== null) {
+      ptyIdByNumericPaneId.set(numericPaneId, registered.getPtyIdForPane(numericPaneId))
+    }
+  }
+  return {
+    paneLeafIds,
+    hasLiveActivePane: activePane !== null,
+    liveActiveLeafId: activePane !== null ? (manager?.getLeafId(activePane.id) ?? null) : null,
+    liveLayoutRoot: serializePaneTree(
+      typeof HTMLElement !== 'undefined' && firstChild instanceof HTMLElement ? firstChild : null
+    ),
+    numericPaneIdByLeafId,
+    ptyIdByNumericPaneId,
+    tabWideAgentHintLeafId: registered.getTabWideAgentHintLeafId()
+  }
+}
+
+function mountedTerminalSurfaceCaptureEquals(
+  a: MountedTerminalSurfaceCapture,
+  b: MountedTerminalSurfaceCapture
+): boolean {
+  return (
+    a.hasLiveActivePane === b.hasLiveActivePane &&
+    a.liveActiveLeafId === b.liveActiveLeafId &&
+    a.paneLeafIds.length === b.paneLeafIds.length &&
+    a.paneLeafIds.every((leafId, index) => b.paneLeafIds[index] === leafId) &&
+    narrowedEntriesEqual(a.numericPaneIdByLeafId, b.numericPaneIdByLeafId) &&
+    narrowedEntriesEqual(a.ptyIdByNumericPaneId, b.ptyIdByNumericPaneId) &&
+    a.tabWideAgentHintLeafId === b.tabWideAgentHintLeafId &&
+    // Why: serialization allocates a fresh tree per capture, so it compares by content.
+    jsonContentEquals(a.liveLayoutRoot, b.liveLayoutRoot)
+  )
+}
+
+function mountedSurfaceCapturesEqual(
+  a: ReadonlyMap<string, MountedTerminalSurfaceCapture>,
+  b: ReadonlyMap<string, MountedTerminalSurfaceCapture>
+): boolean {
+  if (a === b) {
+    return true
+  }
+  if (a.size !== b.size) {
+    return false
+  }
+  for (const [tabId, capture] of a) {
+    const other = b.get(tabId)
+    if (!other || !mountedTerminalSurfaceCaptureEquals(capture, other)) {
+      return false
+    }
+  }
+  return true
+}
+
+function narrowedEntriesEqual<K, T>(a: ReadonlyMap<K, T>, b: ReadonlyMap<K, T>): boolean {
   if (a === b) {
     return true
   }
@@ -1056,9 +1210,6 @@ function canReuseMobileSessionSnapshot(
   next: MobileSessionWorktreeInputs
 ): boolean {
   return (
-    // Why: live DOM/PaneManager state is invisible to store references, so a mounted surface always rebuilds.
-    !previous.hasMountedTerminalSurface &&
-    !next.hasMountedTerminalSurface &&
     previous.worktreeId === next.worktreeId &&
     previous.terminalTabs === next.terminalTabs &&
     previous.browserWorkspaces === next.browserWorkspaces &&
@@ -1077,13 +1228,19 @@ function canReuseMobileSessionSnapshot(
     previous.terminalTheme === next.terminalTheme &&
     narrowedEntriesEqual(previous.terminalLayoutByTabId, next.terminalLayoutByTabId) &&
     narrowedEntriesEqual(previous.paneTitlesByTabId, next.paneTitlesByTabId) &&
-    narrowedEntriesEqual(previous.launchDraftByTabId, next.launchDraftByTabId) &&
+    narrowedEntriesEqual(previous.launchDraftByPaneKey, next.launchDraftByPaneKey) &&
     narrowedEntriesEqual(previous.agentStatusByPaneKey, next.agentStatusByPaneKey) &&
     narrowedEntriesEqual(previous.editorDraftVersionByFileId, next.editorDraftVersionByFileId) &&
     narrowedEntriesEqual(previous.pagesByBrowserWorkspaceId, next.pagesByBrowserWorkspaceId) &&
     narrowedEntriesEqual(
       previous.certificateFailureByBrowserPageId,
       next.certificateFailureByBrowserPageId
+    ) &&
+    // Why: live DOM/PaneManager state is invisible to store references; the
+    // capture makes it comparable instead of forcing mounted worktrees to rebuild.
+    mountedSurfaceCapturesEqual(
+      previous.mountedSurfaceCaptureByTabId,
+      next.mountedSurfaceCaptureByTabId
     )
   )
 }
@@ -1582,7 +1739,9 @@ function buildMobileSessionGroupProjection(
       groupTabs,
       terminalIds,
       editorIds,
-      browserIds
+      browserIds,
+      new Set(),
+      true
     )
     if (visibleOrder.length === 0) {
       continue
@@ -1683,12 +1842,10 @@ function resolveMobileTerminalTheme(
 }
 
 function getRuntimeLeafIdsForTerminal(
-  tabId: string,
+  capture: MountedTerminalSurfaceCapture | undefined,
   savedLayout: AppState['terminalLayoutsByTabId'][string] | undefined
-): string[] {
-  const registered = registeredTabs.get(tabId)
-  const manager = registered?.getManager()
-  const liveLeafIds = manager?.getPanes().map((pane) => pane.leafId) ?? []
+): readonly string[] {
+  const liveLeafIds = capture?.paneLeafIds ?? []
   if (liveLeafIds.length > 0) {
     return liveLeafIds
   }
@@ -1702,23 +1859,73 @@ function getRuntimeLeafIdsForTerminal(
   return []
 }
 
+function resolveMobileTabWideAgentHintLeafId(
+  capture: MountedTerminalSurfaceCapture | undefined,
+  savedLayout: AppState['terminalLayoutsByTabId'][string] | undefined
+): string | null {
+  if (capture) {
+    return capture.tabWideAgentHintLeafId
+  }
+  return isNativeChatTabWideFallbackSafe(savedLayout)
+    ? resolveNativeChatActiveLayoutLeafId(savedLayout)
+    : null
+}
+
+function buildMobileLaunchDraftsByPaneKey(args: {
+  terminalTabs: AppState['tabsByWorktree'][string]
+  terminalLayoutByTabId: MobileSessionWorktreeInputs['terminalLayoutByTabId']
+  mountedSurfaceCaptureByTabId: MobileSessionWorktreeInputs['mountedSurfaceCaptureByTabId']
+  launchDraftByTabId: ReadonlyMap<
+    string,
+    NonNullable<AppState['nativeChatLaunchDraftByTabId']>[string]
+  >
+}): MobileSessionWorktreeInputs['launchDraftByPaneKey'] {
+  if (args.launchDraftByTabId.size === 0) {
+    return EMPTY_NARROWED_BY_KEY
+  }
+  let draftsByPaneKey: Map<
+    string,
+    NonNullable<AppState['nativeChatLaunchDraftByTabId']>[string]
+  > | null = null
+  for (const terminal of args.terminalTabs) {
+    const draft = args.launchDraftByTabId.get(terminal.id)
+    if (!draft || draft.resolved) {
+      continue
+    }
+    const capture = args.mountedSurfaceCaptureByTabId.get(terminal.id)
+    const savedLayout = args.terminalLayoutByTabId.get(terminal.id)
+    const leafIds = getRuntimeLeafIdsForTerminal(capture, savedLayout)
+    const ownerLeafId = resolveMobileTabWideAgentHintLeafId(capture, savedLayout)
+    const launchAgent = nativeChatLaunchAgentForLeaf({
+      launchAgent: terminal.launchAgent,
+      launchAgentLeafId: ownerLeafId,
+      leafId: ownerLeafId,
+      leafIds
+    })
+    if (!launchAgent || launchAgent !== draft.agent || !ownerLeafId) {
+      continue
+    }
+    draftsByPaneKey ??= new Map()
+    draftsByPaneKey.set(makePaneKey(terminal.id, ownerLeafId), draft)
+  }
+  return draftsByPaneKey ?? EMPTY_NARROWED_BY_KEY
+}
+
 function buildMobileTerminalSurfaceTabs(
   inputs: MobileSessionWorktreeInputs,
   terminal: NonNullable<AppState['tabsByWorktree'][string]>[number],
   unifiedTabId?: string
 ): RuntimeMobileSessionSnapshotTab[] {
-  const registered = registeredTabs.get(terminal.id)
+  const capture = inputs.mountedSurfaceCaptureByTabId.get(terminal.id)
   const isDesktopTabActive = unifiedTabId
     ? isUnifiedTabActiveInActiveGroup(inputs, unifiedTabId)
     : inputs.activeTerminalTabId === terminal.id
-  const manager = registered?.getManager()
-  const liveActivePaneId = manager?.getActivePane()?.id ?? null
   const savedLayout = inputs.terminalLayoutByTabId.get(terminal.id)
-  const leafIds = getRuntimeLeafIdsForTerminal(terminal.id, savedLayout)
-  const activeLeafId =
-    liveActivePaneId !== null
-      ? (manager?.getLeafId(liveActivePaneId) ?? null)
-      : (savedLayout?.activeLeafId ?? leafIds[0] ?? null)
+  const leafIds = getRuntimeLeafIdsForTerminal(capture, savedLayout)
+  const launchAgentLeafId = resolveMobileTabWideAgentHintLeafId(capture, savedLayout)
+  const activeLeafId = capture?.hasLiveActivePane
+    ? capture.liveActiveLeafId
+    : (savedLayout?.activeLeafId ?? leafIds[0] ?? null)
   const paneTitles = inputs.paneTitlesByTabId.get(terminal.id) ?? {}
   const generatedTitlesEnabled = inputs.generatedTitlesEnabled
   const sanitizedSavedLayout = savedLayout
@@ -1726,21 +1933,7 @@ function buildMobileTerminalSurfaceTabs(
     : undefined
   const savedPtyIdsByLeafId = sanitizedSavedLayout?.ptyIdsByLeafId ?? {}
   const terminalTheme = inputs.terminalTheme
-  // Agent-matched like the desktop consumer: a pane whose agent changed keeps its
-  // tab id, so an unmatched seed would prefill the new agent's chat with stale text.
-  const seededLaunchDraft = inputs.launchDraftByTabId.get(terminal.id)
-  const launchDraftEntry =
-    seededLaunchDraft &&
-    !seededLaunchDraft.resolved &&
-    seededLaunchDraft.agent === terminal.launchAgent
-      ? seededLaunchDraft
-      : null
-  const publishedLaunchDraft = launchDraftEntry?.text.trim() ? launchDraftEntry : null
-  const container = registered?.getContainer()
-  const firstChild = container?.firstElementChild
-  const liveLayoutRoot = serializePaneTree(
-    typeof HTMLElement !== 'undefined' && firstChild instanceof HTMLElement ? firstChild : null
-  )
+  const liveLayoutRoot = capture?.liveLayoutRoot ?? null
   const parentLayout = normalizeTerminalLayoutSnapshot({
     // Why: live DOM tree is authoritative when mounted, else the saved tree; synthesize only as a last resort, never re-guess.
     root: resolveTerminalLayoutRoot({
@@ -1760,11 +1953,11 @@ function buildMobileTerminalSurfaceTabs(
       : {})
   } satisfies TerminalLayoutSnapshot).snapshot
   return leafIds.map((leafId) => {
-    const numericPaneId = manager?.getNumericIdForLeaf(leafId) ?? null
+    const numericPaneId = capture?.numericPaneIdByLeafId.get(leafId) ?? null
     const ptyId =
       numericPaneId === null
         ? (savedPtyIdsByLeafId[leafId] ?? (leafIds.length === 1 ? terminal.ptyId : null))
-        : (registered?.getPtyIdForPane(numericPaneId) ?? savedPtyIdsByLeafId[leafId] ?? null)
+        : (capture?.ptyIdByNumericPaneId.get(numericPaneId) ?? savedPtyIdsByLeafId[leafId] ?? null)
     const legacyPaneId = numericPaneId === null ? /^pane:(\d+)$/.exec(leafId)?.[1] : null
     const paneTitle =
       numericPaneId !== null
@@ -1772,22 +1965,38 @@ function buildMobileTerminalSurfaceTabs(
         : legacyPaneId
           ? paneTitles[Number(legacyPaneId)]
           : undefined
+    const leafTitle = paneTitle?.trim() || sanitizedSavedLayout?.titlesByLeafId?.[leafId]?.trim()
     const paneKey = isTerminalLeafId(leafId) ? makePaneKey(terminal.id, leafId) : null
-    const title = resolveRuntimeTerminalTitle(
-      terminal,
-      generatedTitlesEnabled,
-      paneTitle ?? terminal.title ?? 'Terminal'
-    )
-    const agentStatusTitle = paneTitle ?? terminal.title ?? ''
+    const tabWideFallbackSafe =
+      isNativeChatTabWideFallbackSafe(parentLayout) && launchAgentLeafId === leafId
+    const title = tabWideFallbackSafe
+      ? resolveRuntimeTerminalTitle(
+          terminal,
+          generatedTitlesEnabled,
+          leafTitle ?? terminal.title ?? 'Terminal'
+        )
+      : (leafTitle ?? 'Terminal')
+    const agentStatusTitle = leafTitle ?? (tabWideFallbackSafe ? terminal.title : '') ?? ''
     const agentStatus =
       paneKey && !isClaudeManagementTitle(agentStatusTitle)
         ? inputs.agentStatusByPaneKey.get(paneKey)
         : undefined
+    const launchAgent = nativeChatLaunchAgentForLeaf({
+      launchAgent: terminal.launchAgent,
+      launchAgentLeafId,
+      leafId,
+      leafIds
+    })
+    const launchDraft = paneKey ? inputs.launchDraftByPaneKey.get(paneKey) : undefined
+    const publishedLaunchDraft =
+      launchDraft && launchDraft.agent === launchAgent && launchDraft.text.trim()
+        ? launchDraft
+        : null
     return {
       type: 'terminal' as const,
       id: mobileTerminalSurfaceId(terminal.id, leafId),
       title,
-      ...(terminal.quickCommandLabel?.trim()
+      ...(tabWideFallbackSafe && terminal.quickCommandLabel?.trim()
         ? { quickCommandLabel: terminal.quickCommandLabel.trim() }
         : {}),
       parentTabId: terminal.id,
@@ -1795,7 +2004,7 @@ function buildMobileTerminalSurfaceTabs(
       ptyId,
       ...(terminalTheme ? { terminalTheme } : {}),
       ...(agentStatus ? { agentStatus } : {}),
-      ...(terminal.launchAgent ? { launchAgent: terminal.launchAgent } : {}),
+      ...(launchAgent ? { launchAgent } : {}),
       // Launch context that exists only as an unsent TUI-input draft; mobile
       // prefills its chat composer from it (desktop keeps its own seed store).
       ...(publishedLaunchDraft

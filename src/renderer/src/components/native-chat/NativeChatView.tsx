@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '../../store'
 import { useNativeChatLaunchDraftSignal } from './use-native-chat-launch-draft-adoption'
-import { useNativeChatLiveSession } from './use-native-chat-live-session'
+import { useNativeChatRetainedSession } from './use-native-chat-retained-session'
+import { isNativeChatTranscriptUnsettled } from './use-native-chat-live-session'
 import { selectNativeChatViewState } from './native-chat-view-state'
 import { NativeChatMessageList } from './NativeChatMessageList'
 import { NativeChatComposer, type NativeChatComposerHandle } from './NativeChatComposer'
@@ -18,21 +19,23 @@ import {
   shouldShowNativeChatWorking
 } from './native-chat-working-suppression'
 import {
-  applyCommandMarkerBoundaries,
   appendPendingSendCache,
-  commandMarkersAsMessages,
-  appendCommandMarkerCache,
   launchPromptAsMessage,
   pendingSendsAsMessages,
   nextNativeChatPendingSendId,
   prunePendingSends,
-  readCommandMarkerCache,
   readPendingSendCache,
   shouldPruneLaunchPrompt,
   writePendingSendCache,
-  type NativeChatCommandMarker,
   type NativeChatPendingSend
 } from './native-chat-pending'
+import {
+  appendCommandMarkerCache,
+  applyCommandMarkerBoundaries,
+  commandMarkersAsMessages,
+  readCommandMarkerCache,
+  type NativeChatCommandMarker
+} from './native-chat-command-marker'
 import {
   deriveNativeChatStreamingText,
   nativeChatStreamingMessage
@@ -53,12 +56,11 @@ import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
 import type { NativeChatResolvedViewProps, NativeChatViewProps } from './native-chat-view-types'
 import { JawsChatSurface } from './JawsChatSurface'
 
-export type { NativeChatViewProps } from './native-chat-view-types'
-
 /** Resolves an agent terminal into its native conversation and composer UI. */
 export default function NativeChatView({
   worktreeId,
   terminalTabId,
+  isVisible,
   paneKey: preferredPaneKey,
   targetPtyId = null,
   launchAgent,
@@ -95,6 +97,7 @@ export default function NativeChatView({
           agent={resolution.agent}
           sessionId={resolution.sessionId}
           transcriptPath={resolution.transcriptPath}
+          isVisible={isVisible}
           targetPtyId={targetPtyId}
           terminalTabId={terminalTabId}
           onSwitchToTerminal={onSwitchToTerminal}
@@ -112,6 +115,7 @@ function NativeChatResolvedView({
   agent,
   sessionId,
   transcriptPath,
+  isVisible,
   targetPtyId,
   terminalTabId,
   onSwitchToTerminal,
@@ -123,12 +127,13 @@ function NativeChatResolvedView({
   const runtimeEnvironmentId = useAppStore((s) =>
     selectNativeChatRuntimeEnvironmentId(s, terminalTabId)
   )
-  const session = useNativeChatLiveSession({
+  const session = useNativeChatRetainedSession({
     paneKey,
     agent,
     sessionId,
     transcriptPath,
-    runtimeEnvironmentId
+    runtimeEnvironmentId,
+    enabled: isVisible
   })
   const launchPrompt = useAppStore((s) => s.nativeChatLaunchPromptByTabId[terminalTabId] ?? null)
   const clearNativeChatLaunchPrompt = useAppStore((s) => s.clearNativeChatLaunchPrompt)
@@ -140,7 +145,9 @@ function NativeChatResolvedView({
     terminalTabId,
     agent,
     messages: session.messages,
-    transcriptLoading: session.readPhase === 'loading'
+    // 'awaiting' counts too: adopting a prefill against a transcript that hasn't
+    // flushed would re-offer a prompt the user already submitted.
+    transcriptLoading: isNativeChatTranscriptUnsettled(session.readPhase)
   })
   // The live-session merge reconciles hooks with replayable transcript turn
   // boundaries; all working consumers must use that one lifecycle decision.
@@ -276,15 +283,13 @@ function NativeChatResolvedView({
       ? sessionWithLaunchPrompt
       : { ...sessionWithLaunchPrompt, messages }
   }, [sessionWithLaunchPrompt, commandMarkers])
-  const launchPromptVisible =
-    launchPromptMessage !== null &&
-    sessionAfterCommandBoundaries.messages.some((message) => message.id === launchPromptMessage.id)
   const failedLaunchPromptMessageIds = useMemo(() => {
-    if (!paneLaunchPrompt?.failed || !launchPromptVisible || !launchPromptMessage) {
+    const id = paneLaunchPrompt?.failed ? launchPromptMessage?.id : null
+    if (!id || !sessionAfterCommandBoundaries.messages.some((message) => message.id === id)) {
       return undefined
     }
-    return new Set([launchPromptMessage.id])
-  }, [paneLaunchPrompt?.failed, launchPromptMessage, launchPromptVisible])
+    return new Set([id])
+  }, [paneLaunchPrompt?.failed, launchPromptMessage?.id, sessionAfterCommandBoundaries.messages])
 
   // The streaming preview bubble (if any) sits after the transcript but before
   // the optimistic user echoes — same order mobile uses.
@@ -424,6 +429,8 @@ function NativeChatResolvedView({
         paneKey={paneKey}
         send={interactiveSend}
         canSend={canSend}
+        messages={sessionAfterCommandBoundaries.messages}
+        transcriptSettled={session.readPhase === 'ready'}
         onShowingQuestionChange={setQuestionActive}
         answerInputRef={questionAnswerInputRef}
       />

@@ -2,15 +2,9 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import type { ClientChannel } from 'ssh2'
 import type { AutomationPrecheck, AutomationPrecheckResult } from '../../shared/automations-types'
 import { MAX_AUTOMATION_PRECHECK_OUTPUT_CHARS } from '../../shared/automation-precheck'
-import {
-  buildWslLoginShellCommand,
-  escapeWslShCommandForWindows,
-  quotePosixShell
-} from '../../shared/wsl-login-shell-command'
-import { parseWslUncPath } from '../../shared/wsl-paths'
 import { getRegisteredSshState, getSshConnectionManager } from '../ipc/ssh'
-import { toLinuxPath } from '../wsl'
 import { resolveSshPrecheckCommand } from './ssh-precheck-command'
+import { runWslAutomationPrecheck } from './wsl-precheck-runner'
 
 export type AutomationPrecheckExecutionTarget =
   | {
@@ -53,19 +47,7 @@ export function resolveAutomationPrecheckSpawn(
     }
   }
 
-  const linuxCwd = parseWslUncPath(target.cwd)?.linuxPath ?? toLinuxPath(target.cwd)
-  const command = buildWslLoginShellCommand(
-    `cd ${quotePosixShell(linuxCwd)} && ${precheck.command}`
-  )
-  return {
-    command: 'wsl.exe',
-    args: ['-d', target.wslDistro, '--', 'sh', '-lc', escapeWslShCommandForWindows(command)],
-    options: {
-      detached: false,
-      env: process.env,
-      windowsHide: true
-    }
-  }
+  throw new Error('WSL prechecks use the centralized WSL runner.')
 }
 
 function appendTail(buffer: TailBuffer, chunk: string): TailBuffer {
@@ -164,6 +146,12 @@ function runLocalPrecheck(
   precheck: AutomationPrecheck,
   target: Extract<AutomationPrecheckExecutionTarget, { type: 'local' }>
 ): Promise<AutomationPrecheckResult> {
+  if (target.wslDistro) {
+    return runWslAutomationPrecheck(precheck, {
+      cwd: target.cwd,
+      wslDistro: target.wslDistro
+    })
+  }
   const startedAt = Date.now()
   const timeoutMs = precheck.timeoutSeconds * 1000
   return new Promise((resolve) => {

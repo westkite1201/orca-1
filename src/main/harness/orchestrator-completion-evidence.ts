@@ -17,7 +17,7 @@ function workerDoneTarget(message: MessageRow): { taskId: string; dispatchId: st
     if (
       typeof payload.taskId !== 'string' ||
       typeof payload.dispatchId !== 'string' ||
-      Object.prototype.hasOwnProperty.call(payload, '_orcaLifecycleRejection')
+      Object.hasOwn(payload, '_orcaLifecycleRejection')
     ) {
       return null
     }

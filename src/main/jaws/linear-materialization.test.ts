@@ -3,11 +3,11 @@ import type {
   LinearCreateRequest,
   LinearCreateResult,
   LinearIssueContextResult
-} from '../../shared/linear-agent-access'
+} from '../../shared/linear/agent-access'
 import type {
   LinearIssueRelationWriteRequest,
   LinearIssueRelationWriteResult
-} from '../../shared/linear-issue-relation-write'
+} from '../../shared/linear/issue-relation-write'
 import { isConfirmedJawsLinearMaterialization, type JawsRun } from '../../shared/jaws-types'
 import { LinearAgentAccessError } from '../linear/issue-context-errors'
 import {
