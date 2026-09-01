@@ -5,17 +5,19 @@ import {
   jawsReviewRetrySchema,
   type JawsPlanApproval,
   type JawsPlanProposal,
+  type JawsPlanningRun,
+  type JawsPlanningSelector,
+  type JawsPlanningStart,
   type JawsReviewRetry,
   type JawsRun,
   type JawsRunView
 } from '../../shared/jaws-types'
-import {
-  deriveHarnessRunStatus,
-  isHarnessCandidateVerified,
-  type HarnessRun
-} from '../../shared/harness-types'
+import { isHarnessCandidateVerified, type HarnessRun } from '../../shared/harness-types'
 import type { Store } from '../persistence'
 import type { HarnessService } from '../harness/service'
+import { JawsPlanningService, type JawsPlanner } from './planning-service'
+import { createHarnessExecutionPlanFromJawsPlan } from './jaws-plan-to-harness-execution-plan'
+import { createJawsRunView } from './jaws-run-view'
 import { materializeJawsLinearRun } from './linear-materialization'
 import {
   publishJawsReview,
@@ -26,6 +28,10 @@ import {
 export type JawsStore = Pick<
   Store,
   | 'listJawsRuns'
+  | 'listJawsPlanningRuns'
+  | 'getJawsPlanningRun'
+  | 'createJawsPlanningRun'
+  | 'updateJawsPlanningRun'
   | 'getJawsRun'
   | 'saveJawsPlan'
   | 'markJawsApprovalStarted'
@@ -34,6 +40,8 @@ export type JawsStore = Pick<
   | 'attachJawsHarnessRun'
   | 'failJawsApproval'
 >
+
+export type { JawsPlanner } from './planning-service'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -58,15 +66,37 @@ function planHash(run: {
 export class JawsService {
   private readonly approvalInFlight = new Map<string, Promise<JawsRunView>>()
   private readonly publicationInFlight = new Map<string, Promise<JawsRunView>>()
+  private readonly planning: JawsPlanningService
 
   constructor(
     private readonly store: JawsStore,
     private readonly harness: HarnessService,
     private readonly linearClient: JawsResultLinearClient | null = null,
-    private readonly reviewClient: JawsReviewClient | null = null
-  ) {}
+    private readonly reviewClient: JawsReviewClient | null = null,
+    planner: JawsPlanner | null = null
+  ) {
+    this.planning = new JawsPlanningService(store, harness, planner, (input, signal) =>
+      this.propose(input, signal)
+    )
+  }
 
-  async propose(input: JawsPlanProposal): Promise<JawsRunView> {
+  async startPlanning(input: JawsPlanningStart): Promise<JawsPlanningRun> {
+    return this.planning.start(input)
+  }
+
+  listPlanning(filters: { sourceWorktreeId?: string } = {}): JawsPlanningRun[] {
+    return this.planning.list(filters)
+  }
+
+  showPlanning(input: JawsPlanningSelector): JawsPlanningRun {
+    return this.planning.show(input)
+  }
+
+  cancelPlanning(input: JawsPlanningSelector): JawsPlanningRun {
+    return this.planning.cancel(input)
+  }
+
+  async propose(input: JawsPlanProposal, signal?: AbortSignal): Promise<JawsRunView> {
     const proposal = jawsPlanProposalSchema.parse(input)
     const { source, baseSha } = await this.harness.preflight(proposal.worktree)
     const interruptedApproval = this.store
@@ -80,6 +110,9 @@ export class JawsService {
       )
     if (interruptedApproval) {
       throw new Error('A Jaws approval is still starting. Retry the approved plan first.')
+    }
+    if (signal?.aborted) {
+      throw new Error('Planning was canceled before the proposal was saved.')
     }
     const run = this.store.saveJawsPlan({
       repoId: source.repoId,
@@ -193,6 +226,11 @@ export class JawsService {
           client: this.linearClient
         })
       }
+      const executionPlan = createHarnessExecutionPlanFromJawsPlan({
+        plan: run.plan,
+        revision: run.revision,
+        planHash: run.planHash
+      })
       const harnessRun = await this.harness.start({
         worktree: `id:${run.sourceWorktreeId}`,
         goal: run.plan.goal,
@@ -201,6 +239,7 @@ export class JawsService {
         expectedBaseSha: run.baseSha,
         jawsRunId: run.id,
         approvedPlan: run.plan,
+        ...(executionPlan ? { executionPlan } : {}),
         ...(run.linearMaterialization?.status === 'confirmed'
           ? { approvedLinearMaterialization: run.linearMaterialization }
           : {})
@@ -279,37 +318,6 @@ export class JawsService {
         'The approved Harness run is no longer available. Propose a new plan to run it again.'
       )
     }
-    const harnessStatus = harnessRun ? deriveHarnessRunStatus(harnessRun) : null
-    const harnessCandidate = harnessRun?.candidates[0] ?? null
-    const linearStatus = currentRun.linearMaterialization?.status
-    const reviewStatus = currentRun.reviewPublication?.status
-    const status =
-      linearStatus === 'decision_required' || linearStatus === 'unknown'
-        ? 'decision_required'
-        : linearStatus === 'materializing' ||
-            (linearStatus === 'planned' && currentRun.approvalStartedAt !== null)
-          ? 'materializing_linear'
-          : harnessStatus === 'failed'
-            ? 'failed'
-            : reviewStatus === 'publishing'
-              ? 'publishing_review'
-              : reviewStatus === 'review_ready'
-                ? 'review_ready'
-                : harnessStatus === 'completed'
-                  ? 'verified'
-                  : harnessStatus
-                    ? 'running'
-                    : currentRun.error
-                      ? 'failed'
-                      : currentRun.approvalStartedAt
-                        ? 'starting'
-                        : 'awaiting_approval'
-    return {
-      ...currentRun,
-      status,
-      harnessStatus,
-      harnessError: harnessRun?.fatalError ?? harnessCandidate?.error ?? null,
-      verification: harnessCandidate?.verification ?? null
-    }
+    return createJawsRunView(currentRun, harnessRun)
   }
 }

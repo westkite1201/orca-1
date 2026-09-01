@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type {
   JawsLinearMaterialization,
+  JawsPlanningRun,
+  JawsPlanningRunCreateInput,
   JawsReviewPublication,
   JawsRun,
   JawsRunCreateInput
@@ -14,6 +16,7 @@ import {
   createJawsReviewPublication,
   pruneJawsRuns
 } from './harness-jaws-run-state'
+import { pruneJawsPlanningRuns } from './jaws-planning-run-state'
 import type { StoreRuntimeState } from './store-runtime-state'
 
 type JawsRunRuntime = Pick<StoreRuntimeState, 'state' | 'flushOrThrow'>
@@ -47,11 +50,74 @@ function replaceJawsRun(owner: JawsRunPersistence, run: JawsRun): JawsRun {
   return run
 }
 
+function replaceJawsPlanningRun(owner: JawsRunPersistence, run: JawsPlanningRun): JawsPlanningRun {
+  const state = stateOf(owner)
+  const before = [...state.jawsPlanningRuns]
+  state.jawsPlanningRuns = pruneJawsPlanningRuns(
+    state.jawsPlanningRuns.map((entry) => (entry.id === run.id ? run : entry))
+  )
+  try {
+    owner[jawsRunPersistenceContext].flushOrThrow()
+  } catch (error) {
+    state.jawsPlanningRuns = before
+    throw error
+  }
+  return run
+}
+
 export class JawsRunPersistence {
   readonly [jawsRunPersistenceContext]: JawsRunRuntime
 
   constructor(runtime: JawsRunRuntime) {
     this[jawsRunPersistenceContext] = runtime
+  }
+
+  listJawsPlanningRuns(filters: { sourceWorktreeId?: string } = {}): JawsPlanningRun[] {
+    return stateOf(this)
+      .jawsPlanningRuns.filter(
+        (run) => !filters.sourceWorktreeId || run.sourceWorktreeId === filters.sourceWorktreeId
+      )
+      .sort((left, right) => right.createdAt - left.createdAt)
+  }
+
+  getJawsPlanningRun(runId: string): JawsPlanningRun | null {
+    return stateOf(this).jawsPlanningRuns.find((run) => run.id === runId) ?? null
+  }
+
+  createJawsPlanningRun(input: JawsPlanningRunCreateInput): JawsPlanningRun {
+    const state = stateOf(this)
+    const before = [...state.jawsPlanningRuns]
+    const now = Date.now()
+    const run: JawsPlanningRun = {
+      id: randomUUID(),
+      ...input,
+      status: 'queued',
+      question: null,
+      jawsRunId: null,
+      error: null,
+      logs: [],
+      createdAt: now,
+      updatedAt: now
+    }
+    state.jawsPlanningRuns = pruneJawsPlanningRuns([...state.jawsPlanningRuns, run])
+    try {
+      this[jawsRunPersistenceContext].flushOrThrow()
+    } catch (error) {
+      state.jawsPlanningRuns = before
+      throw error
+    }
+    return run
+  }
+
+  updateJawsPlanningRun(
+    runId: string,
+    patch: Partial<Pick<JawsPlanningRun, 'status' | 'question' | 'jawsRunId' | 'error' | 'logs'>>
+  ): JawsPlanningRun {
+    const run = this.getJawsPlanningRun(runId)
+    if (!run) {
+      throw new Error('Jaws planning run not found.')
+    }
+    return replaceJawsPlanningRun(this, { ...run, ...patch, updatedAt: Date.now() })
   }
 
   listJawsRuns(filters: { repoId?: string; sourceWorktreeId?: string } = {}): JawsRun[] {

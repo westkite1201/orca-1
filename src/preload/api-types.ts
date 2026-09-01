@@ -61,7 +61,11 @@ import type { WorkspaceCleanupApi, WorkspaceSpaceApi } from './api/workspace-cle
 import type { LocalhostWorktreeLabelsApi, WorkspacePortsApi } from './api/workspace-port-api'
 import type { WorkspaceSessionApi } from './api/workspace-session-api'
 import type { FolderWorkspacesApi, SparsePresetsApi, WorktreeApi } from './api/worktree-api'
-import type { JawsPlanApproval, JawsReviewRetry, JawsRunView } from '../shared/jaws-types'
+import type {
+  JawsPlanApprovalRequest,
+  JawsReviewRetryRequest,
+  JawsRunView
+} from '../shared/jaws-types'
 
 // Flattens contracts that share one PreloadApi key: an intersection is not type-identical to the flat shape.
 type Merged<T> = { [K in keyof T]: T[K] }
@@ -134,8 +138,8 @@ export type PreloadApi = {
   aiVault: AiVaultApi
   nativeChat: NativeChatApi
   jaws?: {
-    approvePlan: (args: JawsPlanApproval) => Promise<{ run: JawsRunView }>
-    retryReview: (args: JawsReviewRetry) => Promise<{ run: JawsRunView }>
+    approvePlan: (args: JawsPlanApprovalRequest) => Promise<{ run: JawsRunView }>
+    retryReview: (args: JawsReviewRetryRequest) => Promise<{ run: JawsRunView }>
   }
   fs: FilesystemApi['fs']
   git: Merged<GitInspectionApi & GitOperationApi>

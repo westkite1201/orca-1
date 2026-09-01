@@ -17,7 +17,34 @@ describe('Jaws plan validation', () => {
         maxConcurrency: 2,
         tasks: [task('API'), task('UI', ['API'])]
       })
-    ).toMatchObject({ tasks: [{ key: 'API' }, { key: 'UI', dependsOn: ['API'] }] })
+    ).toMatchObject({
+      tasks: [{ key: 'API' }, { key: 'UI', dependsOn: ['API'] }]
+    })
+  })
+
+  it('preserves richer per-task execution fields when provided', () => {
+    expect(
+      jawsPlanSchema.parse({
+        goal: 'Implement the feature',
+        verificationCommand: 'pnpm test',
+        maxConcurrency: 1,
+        tasks: [
+          {
+            ...task('research'),
+            execution: 'read-only',
+            fileScopes: ['docs/plan.md'],
+            acceptanceCriteria: ['Relevant code paths are identified.'],
+            verificationCommands: ['pnpm test src/shared/jaws-types.test.ts']
+          }
+        ]
+      }).tasks[0]
+    ).toMatchObject({
+      key: 'research',
+      execution: 'read-only',
+      fileScopes: ['docs/plan.md'],
+      acceptanceCriteria: ['Relevant code paths are identified.'],
+      verificationCommands: ['pnpm test src/shared/jaws-types.test.ts']
+    })
   })
 
   it('includes the exact draft review target in the approved plan', () => {

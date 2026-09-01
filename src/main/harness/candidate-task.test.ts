@@ -137,4 +137,25 @@ describe('orchestrator candidate task', () => {
       error: null
     })
   })
+
+  it('closes a candidate when the runtime rejects the obsolete orchestration contract', async () => {
+    const run = orchestratorRun()
+    const updateHarnessCandidate = vi.fn().mockReturnValue(run)
+    const call = vi
+      .fn()
+      .mockRejectedValue(new Error('orchestration_migration_required: obsolete contract'))
+
+    await createHarnessTask({
+      store: { updateHarnessCandidate },
+      runtime: { call } as unknown as HarnessRuntimeCaller,
+      run,
+      candidate: run.candidates[0],
+      spec: 'spec'
+    })
+
+    expect(updateHarnessCandidate).toHaveBeenCalledWith(run.id, 'codex', {
+      status: 'failed',
+      error: 'orchestration_migration_required: obsolete contract'
+    })
+  })
 })

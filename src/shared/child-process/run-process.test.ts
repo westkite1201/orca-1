@@ -99,6 +99,24 @@ describe('runProcessSync', () => {
   })
 })
 
+describe('streaming output', () => {
+  it('forwards stdout and stderr chunks while retaining captured output', async () => {
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const result = await runProcess({
+      program: process.execPath,
+      args: ['-e', "process.stdout.write('out'); process.stderr.write('err')"],
+      onStdout: (chunk) => stdout.push(String(chunk)),
+      onStderr: (chunk) => stderr.push(String(chunk))
+    })
+
+    expect(stdout.join('')).toBe('out')
+    expect(stderr.join('')).toBe('err')
+    expect(result.stdout).toBe('out')
+    expect(result.stderr).toBe('err')
+  })
+})
+
 describe('unkillable children', () => {
   it('settles after the grace period rather than outliving its own deadline', async () => {
     // `close` only fires once the child is gone, so a child that ignores the

@@ -67,7 +67,7 @@ export function ActivityTitlebarControls(): React.JSX.Element {
         onClick={() => setRunDialogOpen(true)}
       >
         <Workflow />
-        {translate('harness.runComparison', 'Start orchestrator')}
+        {translate('harness.createPlan', 'New plan')}
       </Button>
       <HarnessRunDialog open={runDialogOpen} onOpenChange={setRunDialogOpen} />
     </div>

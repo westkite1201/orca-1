@@ -25,6 +25,7 @@ import {
 } from './normalize-loaded-state-collections'
 import { normalizeRetiredNameRegistryMap } from './retired-name-registry-normalization'
 import { normalizeHarnessRuns, normalizeJawsRuns } from './harness-jaws-run-state'
+import { normalizeJawsPlanningRuns } from './jaws-planning-run-state'
 
 export function normalizeLoadedProfileState(
   parsed: PersistedState,
@@ -35,6 +36,7 @@ export function normalizeLoadedProfileState(
   const { defaults, migratedExternalVisibility, osc52ClipboardNoticePending } = terminal
   const { normalizedOnboarding, normalizedProjectGroups, loadedCompactWorktreeCards } = profile
   const harnessRuns = normalizeHarnessRuns(parsed.harnessRuns, markNeedsSave)
+  const jawsPlanningRuns = normalizeJawsPlanningRuns(parsed.jawsPlanningRuns, markNeedsSave)
   const jawsRuns = normalizeJawsRuns(parsed.jawsRuns, harnessRuns, markNeedsSave)
 
   return {
@@ -90,6 +92,7 @@ export function normalizeLoadedProfileState(
     automations: Array.isArray(parsed.automations) ? parsed.automations : [],
     automationRuns: normalizeLoadedAutomationRuns(parsed, markNeedsSave),
     harnessRuns,
+    jawsPlanningRuns,
     jawsRuns,
     onboarding: normalizedOnboarding
   }

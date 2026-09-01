@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { HarnessRun } from '../../shared/harness-types'
-import type { JawsRun } from '../../shared/jaws-types'
+import type { JawsPlanningRun, JawsRun } from '../../shared/jaws-types'
 import type { HarnessService } from '../harness/service'
 import { LinearAgentAccessError } from '../linear/issue-context-errors'
 import type { JawsResultLinearClient, JawsReviewClient } from './review-publication'
-import { JawsService, type JawsStore } from './service'
+import { jawsPlannerReplySchema } from './planner-contract'
+import { JawsService, type JawsPlanner, type JawsStore } from './service'
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111'
 const HARNESS_RUN_ID = '22222222-2222-4222-8222-222222222222'
 const PLAN_HASH = 'a'.repeat(64)
+const PLANNING_ID = '33333333-3333-4333-8333-333333333333'
+const CLIENT_REQUEST_ID = '44444444-4444-4444-8444-444444444444'
 
 function jawsRun(): JawsRun {
   return {
@@ -24,8 +27,26 @@ function jawsRun(): JawsRun {
       verificationCommand: 'pnpm test',
       maxConcurrency: 2,
       tasks: [
-        { key: 'API', title: 'Build API', objective: 'Implement API', dependsOn: [] },
-        { key: 'UI', title: 'Build UI', objective: 'Implement UI', dependsOn: ['API'] }
+        {
+          key: 'API',
+          title: 'Build API',
+          objective: 'Implement API',
+          dependsOn: [],
+          execution: 'worktree',
+          fileScopes: ['src/main/api'],
+          acceptanceCriteria: ['API behavior is implemented.'],
+          verificationCommands: ['pnpm test src/main/api']
+        },
+        {
+          key: 'UI',
+          title: 'Build UI',
+          objective: 'Implement UI',
+          dependsOn: ['API'],
+          execution: 'worktree',
+          fileScopes: ['src/renderer/src'],
+          acceptanceCriteria: ['UI behavior is implemented.'],
+          verificationCommands: ['pnpm test src/renderer/src']
+        }
       ]
     },
     approvalStartedAt: null,
@@ -59,14 +80,44 @@ function harnessRun(run: JawsRun): HarnessRun {
 function serviceFixture(
   initialRun: JawsRun = jawsRun(),
   linearClient: JawsResultLinearClient | null = null,
-  reviewClient: JawsReviewClient | null = null
+  reviewClient: JawsReviewClient | null = null,
+  planner: JawsPlanner | null = null
 ) {
   let run = initialRun
+  let planningRun: JawsPlanningRun | null = null
   let createdHarness: HarnessRun | null = null
   const store = {
+    listJawsPlanningRuns: vi.fn((filters?: { sourceWorktreeId?: string }) =>
+      planningRun &&
+      (!filters?.sourceWorktreeId || filters.sourceWorktreeId === planningRun.sourceWorktreeId)
+        ? [planningRun]
+        : []
+    ),
+    getJawsPlanningRun: vi.fn(() => planningRun),
+    createJawsPlanningRun: vi.fn((input) => {
+      planningRun = {
+        id: PLANNING_ID,
+        ...input,
+        status: 'queued',
+        question: null,
+        jawsRunId: null,
+        error: null,
+        logs: [],
+        createdAt: 1,
+        updatedAt: 1
+      }
+      return planningRun
+    }),
+    updateJawsPlanningRun: vi.fn((_runId, patch) => {
+      planningRun = { ...planningRun!, ...patch, updatedAt: planningRun!.updatedAt + 1 }
+      return planningRun
+    }),
     listJawsRuns: vi.fn(() => [run]),
     getJawsRun: vi.fn(() => run),
-    saveJawsPlan: vi.fn(),
+    saveJawsPlan: vi.fn((input) => {
+      run = { ...run, ...input, revision: run.revision + 1, updatedAt: run.updatedAt + 1 }
+      return run
+    }),
     markJawsApprovalStarted: vi.fn(() => {
       run = { ...run, approvalStartedAt: 2 }
       return run
@@ -97,7 +148,7 @@ function serviceFixture(
       }
       return createdHarness
     }),
-    start: vi.fn(async () => {
+    start: vi.fn(async (_input: unknown) => {
       createdHarness = harnessRun(run)
       return createdHarness
     })
@@ -107,12 +158,157 @@ function serviceFixture(
       store,
       harness as unknown as HarnessService,
       linearClient,
-      reviewClient
+      reviewClient,
+      planner
     ),
     harness,
     store
   }
 }
+
+describe('Jaws native planning', () => {
+  it('persists a structured planner result as an approval-ready run', async () => {
+    const planner: JawsPlanner = async (input) => {
+      input.onLog?.({ stream: 'stdout', message: 'Inspecting: git status --short' })
+      input.onLog?.({ stream: 'stderr', message: 'refresh_token=secret-value' })
+      return {
+        success: true,
+        reply: jawsPlannerReplySchema.parse({ kind: 'plan', plan: jawsRun().plan }),
+        lastMessage: '{}',
+        stdout: '',
+        stderr: ''
+      }
+    }
+    const { service } = serviceFixture(jawsRun(), null, null, planner)
+
+    const started = await service.startPlanning({
+      goal: 'Implement the feature',
+      worktreeSelector: `id:${jawsRun().sourceWorktreeId}`,
+      clientRequestId: CLIENT_REQUEST_ID
+    })
+
+    expect(started.status).toBe('planning')
+    await vi.waitFor(() =>
+      expect(service.showPlanning({ planningId: PLANNING_ID }).status).toBe('proposed')
+    )
+    expect(service.showPlanning({ planningId: PLANNING_ID })).toMatchObject({
+      jawsRunId: RUN_ID,
+      logs: expect.arrayContaining([
+        expect.objectContaining({ stream: 'stdout', message: 'Inspecting: git status --short' }),
+        expect.objectContaining({ stream: 'stderr', message: 'refresh_token=[redacted]' }),
+        expect.objectContaining({ stream: 'system', message: 'Plan ready for review.' })
+      ])
+    })
+  })
+
+  it('keeps a planner clarification typed and side-effect free', async () => {
+    const planner: JawsPlanner = async () => ({
+      success: true,
+      reply: { kind: 'question', question: 'Which API should own retries?' },
+      lastMessage: '{}',
+      stdout: '',
+      stderr: ''
+    })
+    const { service, store } = serviceFixture(jawsRun(), null, null, planner)
+
+    await service.startPlanning({
+      goal: 'Add retries',
+      worktreeSelector: `id:${jawsRun().sourceWorktreeId}`,
+      clientRequestId: CLIENT_REQUEST_ID
+    })
+
+    await vi.waitFor(() =>
+      expect(service.showPlanning({ planningId: PLANNING_ID })).toMatchObject({
+        status: 'needs_input',
+        question: 'Which API should own retries?'
+      })
+    )
+    expect(store.saveJawsPlan).not.toHaveBeenCalled()
+    await expect(
+      service.startPlanning({
+        goal: 'Add retries with the API owner clarified',
+        worktreeSelector: `id:${jawsRun().sourceWorktreeId}`,
+        clientRequestId: '55555555-5555-4555-8555-555555555555'
+      })
+    ).rejects.toThrow('already being prepared')
+    expect(service.cancelPlanning({ planningId: PLANNING_ID })).toMatchObject({
+      status: 'canceled'
+    })
+  })
+
+  it('removes internal runtime details from Linear clarification questions', async () => {
+    const planner: JawsPlanner = async () => ({
+      success: true,
+      reply: {
+        kind: 'question',
+        question:
+          '현재 Linear 이슈의 식별자·제목·설명·의존관계를 붙여주시겠어요? Orca 런타임이 꺼져 있고 네트워크도 차단되어 이슈를 조회할 수 없습니다.'
+      },
+      lastMessage: '{}',
+      stdout: '',
+      stderr: ''
+    })
+    const { service } = serviceFixture(jawsRun(), null, null, planner)
+
+    await service.startPlanning({
+      goal: '현재 있는 Linear 이슈를 병렬 레인으로 구성해줘',
+      worktreeSelector: `id:${jawsRun().sourceWorktreeId}`,
+      clientRequestId: CLIENT_REQUEST_ID
+    })
+
+    await vi.waitFor(() =>
+      expect(service.showPlanning({ planningId: PLANNING_ID })).toMatchObject({
+        status: 'needs_input',
+        question:
+          'Linear 이슈 정보를 확인할 수 없어요. 이슈 ID를 붙여 넣거나 Linear 연결 후 다시 시도해 주세요.'
+      })
+    )
+  })
+
+  it('does not persist a proposal when cancel wins during source revalidation', async () => {
+    const planner: JawsPlanner = async () => ({
+      success: true,
+      reply: jawsPlannerReplySchema.parse({ kind: 'plan', plan: jawsRun().plan }),
+      lastMessage: '{}',
+      stdout: '',
+      stderr: ''
+    })
+    const { service, store, harness } = serviceFixture(jawsRun(), null, null, planner)
+    let preflightCalls = 0
+    let releaseRevalidation!: () => void
+    const revalidation = new Promise<void>((resolve) => {
+      releaseRevalidation = resolve
+    })
+    vi.mocked(harness.preflight).mockImplementation(async () => {
+      preflightCalls += 1
+      if (preflightCalls === 2) {
+        await revalidation
+      }
+      return {
+        source: {
+          id: jawsRun().sourceWorktreeId,
+          repoId: jawsRun().repoId,
+          git: { path: jawsRun().sourceWorktreePath }
+        },
+        baseSha: jawsRun().baseSha
+      }
+    })
+
+    await service.startPlanning({
+      goal: 'Implement the feature',
+      worktreeSelector: `id:${jawsRun().sourceWorktreeId}`,
+      clientRequestId: CLIENT_REQUEST_ID
+    })
+    await vi.waitFor(() => expect(preflightCalls).toBe(2))
+    await service.cancelPlanning({ planningId: PLANNING_ID })
+    releaseRevalidation()
+
+    await vi.waitFor(() =>
+      expect(service.showPlanning({ planningId: PLANNING_ID }).status).toBe('canceled')
+    )
+    expect(store.saveJawsPlan).not.toHaveBeenCalled()
+  })
+})
 
 describe('Jaws approval', () => {
   it('starts one correlated Harness run for duplicate approval clicks', async () => {
@@ -130,7 +326,8 @@ describe('Jaws approval', () => {
         worktree: 'id:repo-1::/repo',
         mode: 'orchestrator',
         expectedBaseSha: 'b'.repeat(40),
-        jawsRunId: RUN_ID
+        jawsRunId: RUN_ID,
+        executionPlan: expect.objectContaining({ planHash: PLAN_HASH })
       })
     )
     expect(vi.mocked(store.markJawsApprovalStarted).mock.invocationCallOrder[0]).toBeLessThan(
@@ -138,6 +335,22 @@ describe('Jaws approval', () => {
     )
     expect(first.harnessRunId).toBe(HARNESS_RUN_ID)
     expect(second.harnessRunId).toBe(HARNESS_RUN_ID)
+  })
+
+  it('keeps legacy plans on the coordinator-owned path', async () => {
+    const legacy = jawsRun()
+    legacy.plan.tasks = legacy.plan.tasks.map(({ key, title, objective, dependsOn }) => ({
+      key,
+      title,
+      objective,
+      dependsOn
+    }))
+    const { service, harness } = serviceFixture(legacy)
+
+    await service.approve({ runId: RUN_ID, revision: 1, planHash: PLAN_HASH })
+
+    expect(harness.start).toHaveBeenCalledOnce()
+    expect(vi.mocked(harness.start).mock.calls[0]?.[0]).not.toHaveProperty('executionPlan')
   })
 
   it('rejects a stale card before starting Harness', async () => {

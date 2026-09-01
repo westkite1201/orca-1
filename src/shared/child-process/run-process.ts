@@ -44,6 +44,9 @@ export type ProcessSpec = {
   input?: string
   /** Cap on captured stdout/stderr; output past it is discarded. */
   maxOutputBytes?: number
+  /** Observe stdout/stderr while the process is running. */
+  onStdout?: (chunk: Buffer | string) => void
+  onStderr?: (chunk: Buffer | string) => void
   /** Kills the process when aborted; the result still reports the exit. */
   signal?: AbortSignal
   /** Keep the child in its own POSIX process group for tree termination. */
@@ -199,9 +202,17 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
       act()
     }
 
-    child.stdout?.on('data', (chunk: Buffer | string) => stdout.write(chunk))
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout.write(chunk)
+      try {
+        spec.onStdout?.(chunk)
+      } catch {}
+    })
     child.stderr?.on('data', (chunk: Buffer | string) => {
       stderr.write(chunk)
+      try {
+        spec.onStderr?.(chunk)
+      } catch {}
       if (typeof spec.terminationBarrier === 'object') {
         spec.terminationBarrier.observeStderr?.(chunk)
       }

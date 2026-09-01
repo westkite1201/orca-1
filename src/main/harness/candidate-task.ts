@@ -137,6 +137,10 @@ export async function createHarnessTask(args: {
       error: null
     })
   } catch (error) {
-    store.updateHarnessCandidate(run.id, candidate.agent, { error: errorMessage(error) })
+    const message = errorMessage(error)
+    store.updateHarnessCandidate(run.id, candidate.agent, {
+      ...(message.startsWith('orchestration_migration_required') ? { status: 'failed' } : {}),
+      error: message
+    })
   }
 }
