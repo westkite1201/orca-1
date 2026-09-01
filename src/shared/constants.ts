@@ -457,6 +457,7 @@ export function getDefaultPersistedState(homedir: string): PersistedState {
     automations: [],
     automationRuns: [],
     harnessRuns: [],
+    jawsPlanningRuns: [],
     jawsRuns: [],
     onboarding: getDefaultOnboardingState(),
     featureInteractionTelemetryBuckets: {},

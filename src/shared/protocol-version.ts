@@ -60,6 +60,9 @@ export const LINEAR_ISSUE_ATTRIBUTE_FILTER_RUNTIME_CAPABILITY =
   'linear.issue-attribute-filter.v1' as const
 export const HARNESS_RUNTIME_CAPABILITY = 'harness.v1' as const
 export const HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY = 'harness.orchestrator.v2' as const
+export const JAWS_NATIVE_PLANNER_RUNTIME_CAPABILITY = 'jaws.native-planner.v1' as const
+export const JAWS_TRUSTED_APPROVAL_RELAY_RUNTIME_CAPABILITY =
+  'jaws.trusted-approval-relay.v1' as const
 // Why: signals the host exposes the Agent Session History scanner over RPC
 // (aiVault.listSessions). Registered unconditionally for every build, so it is a
 // STATIC capability advertised by getStatus() automatically — NOT a runtime
@@ -151,6 +154,7 @@ export const NATIVE_REMOTE_RUNTIME_CLIENT_CAPABILITIES = [
 // host still requires the separate authenticated browser-client lease.
 export const ELECTRON_REMOTE_RUNTIME_CLIENT_CAPABILITIES = [
   ...NATIVE_REMOTE_RUNTIME_CLIENT_CAPABILITIES,
+  JAWS_TRUSTED_APPROVAL_RELAY_RUNTIME_CAPABILITY,
   BROWSER_CLIENT_HOST_RUNTIME_CAPABILITY,
   BROWSER_CLIENT_PAGE_METADATA_RUNTIME_CAPABILITY
 ] as const
@@ -186,6 +190,8 @@ export const RUNTIME_CAPABILITIES = [
   HARNESS_RUNTIME_CAPABILITY,
   'harness.orchestrator.v1',
   HARNESS_ORCHESTRATOR_RUNTIME_CAPABILITY,
+  JAWS_NATIVE_PLANNER_RUNTIME_CAPABILITY,
+  JAWS_TRUSTED_APPROVAL_RELAY_RUNTIME_CAPABILITY,
   AI_VAULT_RUNTIME_CAPABILITY,
   AI_VAULT_SESSION_TITLES_RUNTIME_CAPABILITY,
   TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY,

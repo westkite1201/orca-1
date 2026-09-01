@@ -690,7 +690,14 @@ import { advertisedUrlWatcher } from '../ports/advertised-url-watcher'
 import type { AutomationService } from '../automations/service'
 import { HarnessService, type HarnessStore } from '../harness/service'
 import { createHarnessRuntimeCaller } from '../harness/runtime-caller'
-import { JawsService, type JawsStore } from '../jaws/service'
+import { JawsService, type JawsPlanner, type JawsStore } from '../jaws/service'
+import { buildJawsPlannerPrompt } from '../jaws/planner-prompt'
+import {
+  loadJawsPlannerLinearContext,
+  shouldLoadJawsPlannerLinearContext
+} from '../jaws/planner-linear-context'
+import { runJawsPlanner } from '../jaws/planner-runner'
+import { runRemoteJawsPlanner } from '../jaws/remote-planner-runner'
 import { runHarnessVerificationTerminal } from '../harness/verification-terminal-session'
 import type { HarnessAgent } from '../../shared/harness-types'
 import { runAutomationNowFenced } from '../automations/refused-manual-run'
@@ -1283,6 +1290,13 @@ import {
   getSpeechModelDeletionErrorCode
 } from '../speech/speech-model-deletion'
 import type { CommitMessageAgentEnvironmentResolvers } from '../text-generation/commit-message-agent-environment'
+import { prepareLocalCommitMessageAgentEnv } from '../text-generation/commit-message-agent-environment'
+import { localAgentRuntimeTargetForTarget } from './runtime-git-generation-context'
+import { resolveCliCommand, withCliRuntimeOnPath } from '../codex-cli/command'
+import {
+  resolveCodexHomeProcessLockKeyForSpawnEnv,
+  withCodexHomeProcessLock
+} from '../codex-cli/codex-home-process-lock'
 import { scanNestedRepos } from '../project-groups/nested-repo-discovery'
 import {
   createNestedProjectGroupResolver,
@@ -1390,6 +1404,10 @@ type RuntimeStore = {
   createHarnessRun?: Store['createHarnessRun']
   updateHarnessCandidate?: Store['updateHarnessCandidate']
   failHarnessRun?: Store['failHarnessRun']
+  listJawsPlanningRuns?: Store['listJawsPlanningRuns']
+  getJawsPlanningRun?: Store['getJawsPlanningRun']
+  createJawsPlanningRun?: Store['createJawsPlanningRun']
+  updateJawsPlanningRun?: Store['updateJawsPlanningRun']
   listJawsRuns?: Store['listJawsRuns']
   getJawsRun?: Store['getJawsRun']
   saveJawsPlan?: Store['saveJawsPlan']
@@ -5350,6 +5368,146 @@ export class OrcaRuntimeService {
     return this._harnessService
   }
 
+  private async runJawsPlannerForWorktree(
+    input: Parameters<JawsPlanner>[0]
+  ): ReturnType<JawsPlanner> {
+    const target = await this.resolveRuntimeGitTarget(input.worktreeSelector)
+    let linearContext: string | undefined
+    try {
+      const status = this.linearStatus()
+      const workspaceId = status.selectedWorkspaceId ?? status.activeWorkspaceId ?? undefined
+      if (shouldLoadJawsPlannerLinearContext(input.goal)) {
+        input.onLog?.({ stream: 'system', message: 'Reading Linear issue context.' })
+        if (!status.connected) {
+          input.onLog?.({
+            stream: 'system',
+            message: 'Linear context unavailable; the planner will ask for issue IDs.'
+          })
+        } else {
+          const loaded = await loadJawsPlannerLinearContext(
+            input.goal,
+            {
+              readIssue: (identifier) =>
+                this.linearIssueContext({
+                  input: identifier,
+                  include: {
+                    comments: false,
+                    children: false,
+                    attachments: false,
+                    relations: true,
+                    activity: false
+                  },
+                  depth: 0
+                }),
+              listIssues: (request) => this.linearIssueListForAgents(request)
+            },
+            workspaceId
+          )
+          linearContext = loaded.text
+          input.onLog?.({
+            stream: 'system',
+            message: loaded.text
+              ? `Linear context loaded (${loaded.issueCount} issue${loaded.issueCount === 1 ? '' : 's'}).`
+              : 'Linear context unavailable; the planner will ask for issue IDs.'
+          })
+        }
+      }
+    } catch {
+      input.onLog?.({
+        stream: 'system',
+        message: 'Linear context unavailable; the planner will ask for issue IDs.'
+      })
+    }
+    const prompt = buildJawsPlannerPrompt({
+      goal: input.goal,
+      worktreeSelector: input.worktreeSelector,
+      linearContext
+    })
+    if (target.connectionId) {
+      const provider = requireSshGitProvider(target.connectionId)
+      return runRemoteJawsPlanner({
+        prompt,
+        cwd: target.worktree.path,
+        signal: input.signal,
+        onOutput: input.onLog,
+        execute: async (request) => {
+          const cancel = (): void => {
+            void provider.cancelNonInteractiveExec(request.cwd, 'jaws-plan')
+          }
+          request.signal?.addEventListener('abort', cancel, { once: true })
+          try {
+            return await provider.executeCommitMessagePlan(
+              {
+                binary: request.binary,
+                args: request.args,
+                stdinPayload: request.prompt,
+                label: 'Codex'
+              },
+              request.cwd,
+              request.timeoutMs,
+              'jaws-plan'
+            )
+          } finally {
+            request.signal?.removeEventListener('abort', cancel)
+          }
+        }
+      })
+    }
+
+    const wslDistro = target.localGitOptions?.wslDistro
+    const prepared = await prepareLocalCommitMessageAgentEnv(
+      'codex',
+      this.getCommitMessageAgentEnvironmentResolvers(),
+      localAgentRuntimeTargetForTarget(target)
+    )
+    if (!prepared.ok) {
+      return {
+        success: false,
+        error: prepared.error,
+        exitCode: null,
+        timedOut: false,
+        canceled: false,
+        stdout: '',
+        stderr: ''
+      }
+    }
+    const binary = wslDistro
+      ? 'codex'
+      : resolveCliCommand('codex', {
+          pathEnv: prepared.env?.PATH ?? prepared.env?.Path ?? null
+        })
+    const plannerEnv = prepared.env
+      ? Object.fromEntries(
+          Object.entries(prepared.env).filter(
+            (entry): entry is [string, string] => entry[1] != null
+          )
+        )
+      : undefined
+    const localPlannerEnv = withCliRuntimeOnPath(binary, plannerEnv ?? process.env)
+    const lockKey = resolveCodexHomeProcessLockKeyForSpawnEnv(plannerEnv, wslDistro)
+    return withCodexHomeProcessLock(lockKey, () =>
+      runJawsPlanner({
+        prompt,
+        signal: input.signal,
+        onOutput: input.onLog,
+        target: wslDistro
+          ? {
+              kind: 'wsl',
+              cwd: target.worktree.path,
+              distro: wslDistro,
+              env: plannerEnv,
+              binary
+            }
+          : {
+              kind: 'local',
+              cwd: target.worktree.path,
+              env: localPlannerEnv,
+              binary
+            }
+      })
+    )
+  }
+
   getJawsService(): JawsService {
     if (this._jawsService) {
       return this._jawsService
@@ -5357,6 +5515,10 @@ export class OrcaRuntimeService {
     const store = this.store
     if (
       !store?.listJawsRuns ||
+      !store.listJawsPlanningRuns ||
+      !store.getJawsPlanningRun ||
+      !store.createJawsPlanningRun ||
+      !store.updateJawsPlanningRun ||
       !store.getJawsRun ||
       !store.saveJawsPlan ||
       !store.markJawsApprovalStarted ||
@@ -5419,7 +5581,8 @@ export class OrcaRuntimeService {
           }),
         getManualUrl: (worktreeId, headSha) =>
           this.getRuntimeGitRemoteCommitUrl(`id:${worktreeId}`, headSha)
-      }
+      },
+      (input) => this.runJawsPlannerForWorktree(input)
     )
     return this._jawsService
   }

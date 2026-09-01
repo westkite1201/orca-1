@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { handlers, isTrustedUIRenderer } = vi.hoisted(() => ({
+const { handlers, isTrustedUIRenderer, callRuntimeEnvironment } = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
-  isTrustedUIRenderer: vi.fn()
+  isTrustedUIRenderer: vi.fn(),
+  callRuntimeEnvironment: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -14,6 +15,8 @@ vi.mock('electron', () => ({
   }
 }))
 vi.mock('./ui', () => ({ isTrustedUIRenderer }))
+vi.mock('../persistence', () => ({ getCanonicalUserDataPath: () => '/user-data' }))
+vi.mock('./runtime-environment-transport-routing', () => ({ callRuntimeEnvironment }))
 
 import { registerJawsHandlers } from './jaws'
 
@@ -22,18 +25,21 @@ const APPROVAL = {
   revision: 1,
   planHash: 'a'.repeat(64)
 }
-
 describe('Jaws approval IPC', () => {
   const approve = vi.fn(async () => ({ id: APPROVAL.runId }))
   const retryReview = vi.fn(async () => ({ id: APPROVAL.runId }))
   const runtime = {
-    getJawsService: () => ({ approve, retryReview })
+    getJawsService: () => ({
+      approve,
+      retryReview
+    })
   }
 
   beforeEach(() => {
     handlers.clear()
     approve.mockClear()
     retryReview.mockClear()
+    callRuntimeEnvironment.mockReset()
     isTrustedUIRenderer.mockReset()
     registerJawsHandlers(runtime as never)
   })
@@ -57,6 +63,32 @@ describe('Jaws approval IPC', () => {
     })
     expect(approve).toHaveBeenCalledOnce()
     expect(approve).toHaveBeenCalledWith(APPROVAL)
+  })
+
+  it('relays a trusted remote approval without exposing it to renderer RPC', async () => {
+    isTrustedUIRenderer.mockReturnValue(true)
+    callRuntimeEnvironment.mockResolvedValue({
+      ok: true,
+      result: { run: { id: APPROVAL.runId } }
+    })
+
+    await expect(
+      handlers.get('jaws:approvePlan')!(
+        { sender: { id: 1 } },
+        {
+          ...APPROVAL,
+          runtimeEnvironmentId: 'runtime-1'
+        }
+      )
+    ).resolves.toEqual({ run: { id: APPROVAL.runId } })
+
+    expect(callRuntimeEnvironment).toHaveBeenCalledWith(
+      '/user-data',
+      'runtime-1',
+      'jaws.planApprove',
+      APPROVAL
+    )
+    expect(approve).not.toHaveBeenCalled()
   })
 
   it('keeps review retry behind the same trusted renderer boundary', async () => {

@@ -1,12 +1,17 @@
 import { z } from 'zod'
 import type { HarnessRunStatus, HarnessVerificationSummary } from './harness-types'
-import { jawsReviewPlanSchema, jawsReviewPublicationSchema } from './jaws-review-types'
+import {
+  jawsReviewPlanSchema,
+  jawsReviewPublicationSchema,
+  jawsReviewRetrySchema
+} from './jaws-review-types'
 export {
   jawsReviewEffectSchema,
   jawsReviewPublicationSchema,
   jawsReviewRetrySchema
 } from './jaws-review-types'
 export type { JawsReviewEffect, JawsReviewPublication, JawsReviewRetry } from './jaws-review-types'
+export * from './jaws-planning-types'
 
 const trimmedString = (message: string, max: number) =>
   z.string().trim().min(1, message).max(max, message)
@@ -70,7 +75,17 @@ export const jawsPlanTaskSchema = z.object({
   key: taskKey,
   title: approvalText('Each task needs a title.', 160),
   objective: approvalText('Each task needs an objective.', 4_000),
-  dependsOn: z.array(taskKey).max(32).default([])
+  dependsOn: z.array(taskKey).max(32).default([]),
+  execution: z.enum(['read-only', 'worktree']).optional(),
+  fileScopes: z.array(approvalText('Each file scope needs a path.', 1_024)).max(32).optional(),
+  acceptanceCriteria: z
+    .array(approvalText('Each acceptance criterion must be non-empty.', 4_000))
+    .max(16)
+    .optional(),
+  verificationCommands: z
+    .array(approvalText('Each verification command must be non-empty.', 4_000))
+    .max(16)
+    .optional()
 })
 
 export const jawsPlanSchema = z
@@ -247,6 +262,17 @@ export const jawsPlanApprovalSchema = z.object({
 })
 
 export type JawsPlanApproval = z.infer<typeof jawsPlanApprovalSchema>
+
+export const jawsPlanApprovalRequestSchema = jawsPlanApprovalSchema.extend({
+  runtimeEnvironmentId: trimmedString('A runtime environment id is required.', 1_024).optional()
+})
+
+export const jawsReviewRetryRequestSchema = jawsReviewRetrySchema.extend({
+  runtimeEnvironmentId: trimmedString('A runtime environment id is required.', 1_024).optional()
+})
+
+export type JawsPlanApprovalRequest = z.infer<typeof jawsPlanApprovalRequestSchema>
+export type JawsReviewRetryRequest = z.infer<typeof jawsReviewRetryRequestSchema>
 
 export const jawsRunSchema = z.object({
   id: z.string().uuid(),

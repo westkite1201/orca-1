@@ -10,7 +10,7 @@ import {
 } from './native-chat-runtime-send'
 import type { NativeChatSendHandle } from './native-chat-runtime-send'
 import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
-import * as jawsChat from '../../../../shared/jaws-chat-request'
+import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
 import { isSlashCommandDraft } from '../../../../shared/native-chat-slash-commands'
 import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
 import {
@@ -67,7 +67,6 @@ const ESC = '\x1b'
 export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeChatComposerProps>(
   function NativeChatComposer(
     {
-      worktreeId,
       terminalTabId,
       paneKey,
       targetPtyId,
@@ -127,7 +126,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       setCaret(readNativeChatDraftCache(draftScopeKey).length)
     }
 
-    const agentCommands = jawsChat.jawsChatCommands(agent, !!worktreeId)
+    const agentCommands = getVerifiedNativeChatCommands(agent)
     const picker = useNativeChatPickerState({
       agent,
       terminalTabId,
@@ -250,8 +249,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       if (!target) {
         return
       }
-      const sentText = jawsChat.expandJawsChatCommand(text, worktreeId)
-      const classification = classifySend(sentText)
+      const classification = classifySend(text)
       // A parked launch draft must be cleared line-by-line before the body.
       const { sendOptions } = resolveNativeChatLaunchDraftSend({
         launchDraft,
@@ -272,12 +270,12 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         pendingHandle = sendNativeChatMessageWithImageAttachments(
           target.settings,
           target.ptyId,
-          sentText,
+          text,
           imagePaths,
           sendOptions
         )
       } else if (text.trim().length > 0) {
-        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, sentText, sendOptions)
+        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
       } else {
         submitNativeChatPrompt(target.settings, target.ptyId)
       }
@@ -324,7 +322,6 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       launchDraftResolved,
       readTerminalScreen,
       resolveTarget,
-      worktreeId,
       onOptimisticSend,
       onSlashCommand,
       sessionOptionsSurface,

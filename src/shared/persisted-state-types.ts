@@ -24,7 +24,7 @@ import type { WorkspaceLineage, WorktreeLineage } from './worktree/lineage-types
 import type { WorktreeMeta } from './worktree/meta-types'
 import type { WorkspaceSessionState } from './workspace-session-state-types'
 import type { HarnessRun } from './harness-types'
-import type { JawsRun } from './jaws-types'
+import type { JawsPlanningRun, JawsRun } from './jaws-types'
 
 export type LegacyPaneKeyAliasEntry = {
   ptyId: string
@@ -108,6 +108,7 @@ export type PersistedState = {
   automations: Automation[]
   automationRuns: AutomationRun[]
   harnessRuns: HarnessRun[]
+  jawsPlanningRuns: JawsPlanningRun[]
   jawsRuns: JawsRun[]
   onboarding: OnboardingState
   /** Main-owned telemetry de-dupe marker; never exposed through PersistedUIState. */
